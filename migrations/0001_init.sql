@@ -1,0 +1,17 @@
+CREATE TABLE IF NOT EXISTS config (
+  id TEXT PRIMARY KEY,
+  json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+  id TEXT PRIMARY KEY,
+  json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS positions (
+  id TEXT PRIMARY KEY,
+  json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);

@@ -1,0 +1,7 @@
+name = "nuvo-vsim"
+compatibility_date = "2026-03-03"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nuvo-vsim"
+database_id = "ed3c4304-b7f0-4bbf-a887-28a262b0430f"
