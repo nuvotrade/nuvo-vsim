@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NUVO VSIM v3.3</title>
+  <title>NUVO VSIM v3.3.1</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0c0e14; font-family: 'DM Sans', -apple-system, sans-serif; }
@@ -37,11 +37,40 @@ const { useState, useMemo, useCallback, useEffect } = React;
    =========================== */
 const WORKER_BASE = "https://nuvo-proxy.yulgutierrez.workers.dev"; // routes: /all, /spot, /rv, /health
 
-const APP_VER = "v3.3";
+const APP_VER = "v3.3.1";
 const STORAGE = {
   cfg: "nuvo_config_v3_3",
   positions: "nuvo_positions_v3_3",
   watch: "nuvo_watchlist_v3_3",
+};
+
+/* ===========================
+   D1 PERSISTENCE LAYER
+   Writes to D1 + localStorage.
+   Reads from D1 on mount, falls back to localStorage.
+   =========================== */
+const d1 = {
+  async loadConfig() {
+    const r = await fetch("/api/config"); if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async saveConfig(obj) {
+    const r = await fetch("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj) });
+    if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async loadPositions() {
+    const r = await fetch("/api/positions"); if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async savePositions(arr) {
+    const r = await fetch("/api/positions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(arr) });
+    if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async loadWatchlist() {
+    const r = await fetch("/api/watchlist"); if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async saveWatchlist(arr) {
+    const r = await fetch("/api/watchlist", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(arr) });
+    if (!r.ok) throw new Error(r.status); return r.json();
+  },
 };
 
 const M = "'SF Mono','Fira Code','JetBrains Mono',ui-monospace,monospace";
@@ -517,6 +546,7 @@ function Pill({ text, col, bg }) {
    =========================== */
 function App() {
   const [mode, setMode] = useState("CONFIG");
+  const [d1Status, setD1Status] = useState("CHECKING"); // CHECKING → SYNCED | LOCAL ONLY
 
   const CFG_DEF = {
     aum: "",
@@ -585,6 +615,7 @@ function App() {
     };
 
     try { localStorage.setItem(STORAGE.cfg, JSON.stringify(nextCfg)); } catch {}
+    d1.saveConfig(nextCfg).catch(e => console.warn("D1 config sync failed:", e));
     setSavedCfg({ ...nextCfg });
     setDraft({ ...nextCfg });
     setCfgDirty(false);
@@ -595,6 +626,7 @@ function App() {
   const persist = useCallback((next) => {
     setPositions(next);
     try { localStorage.setItem(STORAGE.positions, JSON.stringify(next)); } catch {}
+    d1.savePositions(next).catch(e => console.warn("D1 positions sync failed:", e));
   }, []);
 
   /* NEW TRADE inputs (VIX removed) */
@@ -607,6 +639,7 @@ function App() {
   };
   const saveWatch = (arr) => {
     try { localStorage.setItem(STORAGE.watch, JSON.stringify(arr)); } catch {}
+    d1.saveWatchlist(arr).catch(e => console.warn("D1 watchlist sync failed:", e));
   };
 
   const [watch, setWatch] = useState(loadWatch);
@@ -687,6 +720,47 @@ function App() {
     }
     setScanLoading(false);
   }, [watch]);
+
+  // D1 hydration on mount — pull from server, override localStorage
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [cfgRemote, posRemote, watchRemote] = await Promise.all([
+          d1.loadConfig(),
+          d1.loadPositions(),
+          d1.loadWatchlist(),
+        ]);
+        if (cancelled) return;
+
+        // Config: merge with defaults, D1 wins over localStorage
+        if (cfgRemote && Object.keys(cfgRemote).length > 0) {
+          const merged = { ...CFG_DEF, ...cfgRemote };
+          setSavedCfg(merged);
+          setDraft(prev => ({ ...merged }));
+          try { localStorage.setItem(STORAGE.cfg, JSON.stringify(merged)); } catch {}
+        }
+
+        // Positions: D1 array wins if non-empty
+        if (Array.isArray(posRemote) && posRemote.length > 0) {
+          setPositions(posRemote);
+          try { localStorage.setItem(STORAGE.positions, JSON.stringify(posRemote)); } catch {}
+        }
+
+        // Watchlist: D1 array wins if non-empty
+        if (Array.isArray(watchRemote) && watchRemote.length > 0) {
+          setWatch(watchRemote);
+          try { localStorage.setItem(STORAGE.watch, JSON.stringify(watchRemote)); } catch {}
+        }
+
+        setD1Status("SYNCED");
+      } catch (e) {
+        console.warn("D1 hydration failed, using localStorage:", e);
+        if (!cancelled) setD1Status("LOCAL ONLY");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Auto-refresh scanner when on SCAN tab
   useEffect(() => {
@@ -1103,6 +1177,11 @@ function App() {
           <span style={{ fontFamily: M, fontSize: 15, fontWeight: 900, color: K.w, letterSpacing: 2 }}>NUVO</span>
           <span style={{ fontFamily: M, fontSize: 15, color: K.td, letterSpacing: 2 }}>VSIM</span>
           <span style={{ fontSize: 9, fontFamily: M, color: K.g, opacity: 0.85, letterSpacing: 1 }}>{APP_VER}</span>
+          <span style={{ fontSize: 8, fontFamily: M, padding: "2px 6px", borderRadius: 4, letterSpacing: 1, fontWeight: 700,
+            color: d1Status === "SYNCED" ? K.g : d1Status === "LOCAL ONLY" ? "#f59e0b" : K.tm,
+            background: d1Status === "SYNCED" ? "rgba(34,197,94,0.08)" : d1Status === "LOCAL ONLY" ? "rgba(245,158,11,0.08)" : "rgba(255,255,255,0.03)",
+            border: "1px solid " + (d1Status === "SYNCED" ? "rgba(34,197,94,0.25)" : d1Status === "LOCAL ONLY" ? "rgba(245,158,11,0.25)" : K.cb),
+          }}>{d1Status === "SYNCED" ? "D1 SYNCED" : d1Status === "LOCAL ONLY" ? "LOCAL ONLY" : "..."}</span>
         </div>
         <div style={{ display: "flex", background: K.ib, borderRadius: 6, border: "1px solid " + K.ibr, overflow: "hidden" }}>
           {[["CONFIG","CONFIG"],["SCAN","SCANNER"],["NEW","NEW TRADE"],["DASH","DASHBOARD"]].map(([k,l]) => (
