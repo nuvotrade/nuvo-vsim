@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NUVO VSIM v3.4</title>
+  <title>NUVO VSIM v3.5</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0c0e14; font-family: 'DM Sans', -apple-system, sans-serif; }
@@ -37,7 +37,7 @@ const { useState, useMemo, useCallback, useEffect } = React;
    =========================== */
 const WORKER_BASE = "https://nuvo-proxy.yulgutierrez.workers.dev"; // routes: /all, /spot, /rv, /health
 
-const APP_VER = "v3.4";
+const APP_VER = "v3.5";
 const STORAGE = {
   cfg: "nuvo_config_v3_3",
   positions: "nuvo_positions_v3_3",
@@ -455,9 +455,8 @@ function positionStatus({ dte, sigma, reqSigma, pop, spot, breakEven }) {
 }
 
 /* ===========================
-   SCANNER v2 — SIGMA SIGNALS
-   IDEA / STRONG / PANIC
-   Uses IV20 if available, else RV proxy.
+   SCANNER v2.1 — SIGMA SIGNALS (vol-normalized)
+   IDEA / STRONG / PANIC / NONE
    =========================== */
 function pctDrop(refSpot, spot) {
   if (!ok(refSpot) || !ok(spot) || refSpot <= 0) return NaN;
@@ -467,40 +466,54 @@ function rvExpanding(rv10, rv20) {
   if (!ok(rv10) || !ok(rv20)) return false;
   return rv10 > rv20;
 }
+function asVol(x) {
+  const v = Number(x);
+  if (!ok(v) || v <= 0) return NaN;
+  return v > 1 ? v / 100 : v;
+}
 function dailyEM(spot, vol) {
-  if (!ok(spot) || spot <= 0 || !ok(vol) || vol <= 0) return NaN;
-  return spot * vol * Math.sqrt(1 / 252);
+  const s = Number(spot);
+  const v = asVol(vol);
+  if (!ok(s) || s <= 0 || !ok(v) || v <= 0) return NaN;
+  return s * v * Math.sqrt(1 / 252);
 }
 function dropSigma(refSpot, spot, vol) {
-  if (!ok(refSpot) || refSpot <= 0 || !ok(spot) || spot <= 0) return NaN;
-  const em = dailyEM(spot, vol);
+  const rs = Number(refSpot);
+  const s = Number(spot);
+  if (!ok(rs) || rs <= 0 || !ok(s) || s <= 0) return NaN;
+  const em = dailyEM(s, vol);
   if (!ok(em) || em <= 0) return NaN;
-  return (refSpot - spot) / em; // positive = drop
+  return (rs - s) / em;
 }
 function ivPremiumOk(iv20, rv20) {
-  if (!ok(iv20) || !ok(rv20) || rv20 <= 0) return false;
-  return (iv20 / rv20) >= 1.05;
+  const iv = asVol(iv20);
+  const rv = asVol(rv20);
+  if (!ok(iv) || !ok(rv) || rv <= 0) return false;
+  return (iv / rv) >= 1.05;
 }
 function signalTier({ refSpot, spot, iv20, rv10, rv20, vix }) {
-  const volProxy = ok(iv20) ? iv20 : Math.max(Number(rv20) || NaN, Number(rv10) || NaN);
+  const iv = ok(iv20) ? asVol(iv20) : NaN;
+  const rv10d = asVol(rv10);
+  const rv20d = asVol(rv20);
+  const volProxy = ok(iv) ? iv : Math.max(rv20d || NaN, rv10d || NaN);
   const ds = dropSigma(refSpot, spot, volProxy);
   if (!ok(ds)) {
-    return { label: "—", tier: "NONE", ds: NaN, col: K.tm, bg: "rgba(255,255,255,0.03)", br: K.cb };
+    return { label: "NONE", tier: "NONE", ds: NaN, col: K.tm, bg: "rgba(255,255,255,0.03)", br: K.cb };
   }
-  const confirmPaidVol = ok(iv20) ? ivPremiumOk(iv20, rv20) : rvExpanding(rv10, rv20);
+  const confirmPaidVol = ok(iv) ? ivPremiumOk(iv, rv20d) : rvExpanding(rv10d, rv20d);
   const IDEA_TH = 0.75;
   const STRONG_TH = 1.00;
   const PANIC_TH = 1.50;
-  const vixPanic = ok(vix) && vix >= 28;
+  const vixPanic = ok(vix) && Number(vix) >= 28;
   let tier = "NONE";
   if (ds >= PANIC_TH || vixPanic) tier = "PANIC";
   else if (ds >= STRONG_TH) tier = "STRONG";
   else if (ds >= IDEA_TH) tier = "IDEA";
   if ((tier === "IDEA" || tier === "STRONG") && !confirmPaidVol) tier = "NONE";
-  if (tier === "IDEA") return { label: "IDEA", tier, ds, col: K.a, bg: "rgba(59,130,246,0.10)", br: "rgba(59,130,246,0.35)" };
+  if (tier === "IDEA")   return { label: "IDEA", tier, ds, col: K.a, bg: "rgba(59,130,246,0.10)", br: "rgba(59,130,246,0.35)" };
   if (tier === "STRONG") return { label: "STRONG", tier, ds, col: K.g, bg: "rgba(34,197,94,0.10)", br: "rgba(34,197,94,0.35)" };
-  if (tier === "PANIC") return { label: "PANIC", tier, ds, col: K.r, bg: "rgba(239,68,68,0.10)", br: "rgba(239,68,68,0.35)" };
-  return { label: "—", tier: "NONE", ds, col: K.tm, bg: "rgba(255,255,255,0.03)", br: K.cb };
+  if (tier === "PANIC")  return { label: "PANIC", tier, ds, col: K.r, bg: "rgba(239,68,68,0.10)", br: "rgba(239,68,68,0.35)" };
+  return { label: "NONE", tier: "NONE", ds, col: K.tm, bg: "rgba(255,255,255,0.03)", br: K.cb };
 }
 
 /* ===========================
