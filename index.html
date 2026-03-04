@@ -330,10 +330,10 @@ function erfApprox(x){
 function normCdf(x){ return 0.5*(1+erfApprox(x/Math.SQRT2)); }
 
 // ── Fetch with timeout ────────────────────────────────────────────────
-async function fetchWithTimeout(url, ms=12000) {
+async function fetchWithTimeout(url, ms=15000) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
-  try { return await fetch(url, { cache:"no-store", signal: ctrl.signal }); }
+  try { return await fetch(url, { signal: ctrl.signal, mode: 'cors' }); }
   finally { clearTimeout(id); }
 }
 
@@ -352,7 +352,7 @@ async function fetchBars(sym, tf) {
   console.log("→ Fetching from worker:", url);
 
   try {
-    const res = await fetchWithTimeout(url, 12000);
+    const res = await fetchWithTimeout(url, 20000);
     console.log("← Worker status:", res.status, res.statusText);
 
     if (!res.ok) {
