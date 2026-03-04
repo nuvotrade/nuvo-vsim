@@ -1368,7 +1368,7 @@ async function exportToDesk(){
 // ════════════════════════════════════════════════════════════════════════
 function render(){
   // Cache analysis: recompute only when inputs change
-  const cacheKey=S.bars?(S.bars[S.bars.length-1].t+"|"+S.tf+"|"+S.fibLookback+"|"+S.pivLR+"|"+S.clusterTol+"|"+S.iv+"|"+S.dte):"";
+  const cacheKey=S.bars?(S.sym+"|"+S.bars[S.bars.length-1].t+"|"+S.tf+"|"+S.fibLookback+"|"+S.pivLR+"|"+S.clusterTol+"|"+S.iv+"|"+S.dte):"";
   let A=null;
   if(S.bars){
     if(cacheKey===S._cacheKey&&S._analysis){A=S._analysis;}
@@ -1881,7 +1881,9 @@ async function doFetch(){
   const s=S.sym.trim().toUpperCase().replace(/[^A-Z0-9.\-^=]/g,"");
   S.sym=s;
   if(!s)return;
-  S.loading=true;S.error=null;render();
+  S.loading=true;S.error=null;
+  S.bars=null;S._analysis=null;S._cacheKey="";
+  render();
   try{
     S.bars=await fetchBars(s,S.tf);
     S.lastUpdate=new Date();
