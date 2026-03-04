@@ -344,7 +344,11 @@ async function fetchBars(sym, tf) {
   const s = sym.trim().toUpperCase();
   if (!s) return [];
 
-  const url = `${WORKER}/v1/bars?ticker=${encodeURIComponent(s)}&tf=${tf}&ts=${Date.now()}`;
+  // Map app tf values to Worker convention
+  const tfMap = { "daily": "1d", "1h": "1h", "4h": "4h", "1d": "1d" };
+  const workerTF = tfMap[tf] || "1d";
+
+  const url = `${WORKER}/v1/bars?ticker=${encodeURIComponent(s)}&tf=${workerTF}&ts=${Date.now()}`;
   console.log("→ Fetching from worker:", url);
 
   try {
