@@ -344,24 +344,41 @@ async function fetchBars(sym, tf) {
   const s = sym.trim().toUpperCase();
   if (!s) return [];
 
-  // Primary: Worker /v1/bars (uses ?ticker= convention)
-  try {
-    const res = await fetchWithTimeout(
-      `${WORKER}/v1/bars?ticker=${encodeURIComponent(s)}&tf=${tf}&ts=${Date.now()}`, 12000
-    );
-    if (res.ok) {
-      const json = await res.json();
-      if (Array.isArray(json.bars) && json.bars.length >= 50) {
-        // Normalize: ensure all fields are numbers
-        return json.bars.map(b => ({
-          t: +b.t, o: +b.o, h: +b.h, l: +b.l, c: +b.c, v: +(b.v || 0)
-        })).filter(b => isFinite(b.o) && isFinite(b.c));
-      }
-    }
-  } catch (e) { console.warn("Worker /v1/bars failed:", e.message); }
+  const url = `${WORKER}/v1/bars?ticker=${encodeURIComponent(s)}&tf=${tf}&ts=${Date.now()}`;
+  console.log("→ Fetching from worker:", url);
 
-  // Degraded fallback: Yahoo via CORS proxies (unreliable)
-  console.warn("Falling back to Yahoo CORS proxies for", s);
+  try {
+    const res = await fetchWithTimeout(url, 12000);
+    console.log("← Worker status:", res.status, res.statusText);
+
+    if (!res.ok) {
+      const txt = await res.text().catch(()=>"(no text)");
+      console.warn("Worker HTTP error:", res.status, txt);
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    console.log("Worker JSON keys:", Object.keys(json));
+    console.log("Worker bars type:", typeof json.bars, "isArray:", Array.isArray(json.bars), "length:", json.bars?.length);
+
+    if (!json || !Array.isArray(json.bars) || json.bars.length === 0) {
+      console.warn("Invalid bars format — bars is", json?.bars);
+      throw new Error("No valid bars array");
+    }
+
+    const bars = json.bars.map(b => ({
+      t: +b.t, o: +b.o, h: +b.h, l: +b.l, c: +b.c, v: +(b.v || 0)
+    })).filter(b => isFinite(b.o) && isFinite(b.c) && isFinite(b.t));
+
+    console.log(`✓ Got ${bars.length} valid bars from worker`);
+    if (bars.length >= 50) return bars;
+
+    console.warn("Too few bars from worker:", bars.length);
+  } catch (e) {
+    console.error("✗ Worker fetch failed:", e.message);
+  }
+
+  console.warn("⚠ Falling back to Yahoo for", s);
   return fetchYahooFallback(s, tf);
 }
 
@@ -1831,9 +1848,9 @@ function render(){
   } else {
     // EMPTY STATE
     if(S.loading){
-      h+=`<div class="empty-state"><div style="font-size:32px;color:var(--g);margin-bottom:12px">⟳</div><div style="color:var(--d);font-size:14px">Fetching from Yahoo Finance...</div></div>`;
+      h+=`<div class="empty-state"><div style="font-size:32px;color:var(--g);margin-bottom:12px">⟳</div><div style="color:var(--d);font-size:14px">Fetching market data...</div></div>`;
     } else {
-      h+=`<div class="empty-state"><div style="font-size:40px;margin-bottom:16px;opacity:.3">◈</div><div style="color:var(--d);font-size:14px">Enter ticker and select timeframe</div><div style="color:var(--dd);font-size:11px;margin-top:6px">Yahoo Finance · CORS Proxy · v10.2</div></div>`;
+      h+=`<div class="empty-state"><div style="font-size:40px;margin-bottom:16px;opacity:.3">◈</div><div style="color:var(--d);font-size:14px">Enter ticker and select timeframe</div><div style="color:var(--dd);font-size:11px;margin-top:6px">Worker → Polygon/Yahoo · v10.2</div></div>`;
     }
   }
 
