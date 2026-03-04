@@ -1,0 +1,1788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NUVO VSIM v3.3.2</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0c0e14; font-family: 'DM Sans', -apple-system, sans-serif; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0c0e14; }
+    ::-webkit-scrollbar-thumb { background: #252836; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulseGlow { 0%, 100% { box-shadow: 0 0 8px rgba(34,197,94,0.15); } 50% { box-shadow: 0 0 18px rgba(34,197,94,0.3); } }
+    .fade-in { animation: fadeIn 0.25s ease-out both; }
+    .pulse-border { animation: pulseGlow 2.5s ease-in-out infinite; }
+    input[type="date"] { color-scheme: dark; }
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+  <script type="text/babel">
+const { useState, useMemo, useCallback, useEffect } = React;
+
+/* ===========================
+   CONFIG
+   =========================== */
+const WORKER_BASE = "https://nuvo-proxy.yulgutierrez.workers.dev"; // routes: /all, /spot, /rv, /health
+
+const APP_VER = "v3.3.2";
+const STORAGE = {
+  cfg: "nuvo_config_v3_3",
+  positions: "nuvo_positions_v3_3",
+  watch: "nuvo_watchlist_v3_3",
+};
+
+/* ===========================
+   D1 PERSISTENCE LAYER
+   Writes to D1 + localStorage.
+   Reads from D1 on mount, falls back to localStorage.
+   =========================== */
+const d1 = {
+  async loadConfig() {
+    const r = await fetch("/api/config"); if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async saveConfig(obj) {
+    const r = await fetch("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(obj) });
+    if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async loadPositions() {
+    const r = await fetch("/api/positions"); if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async savePositions(arr) {
+    const r = await fetch("/api/positions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(arr) });
+    if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async loadWatchlist() {
+    const r = await fetch("/api/watchlist"); if (!r.ok) throw new Error(r.status); return r.json();
+  },
+  async saveWatchlist(arr) {
+    const r = await fetch("/api/watchlist", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(arr) });
+    if (!r.ok) throw new Error(r.status); return r.json();
+  },
+};
+
+const M = "'SF Mono','Fira Code','JetBrains Mono',ui-monospace,monospace";
+const K = {
+  bg: "#0c0e14",
+  card: "#13151d",
+  cb: "#1e212b",
+  sf: "#181b24",
+  ib: "#11131a",
+  ibr: "#252836",
+  tx: "#e2e4ea",
+  td: "#8b8e99",
+  tm: "#5c5f6a",
+  g: "#22c55e",
+  gd: "rgba(34,197,94,0.10)",
+  r: "#ef4444",
+  rd: "rgba(239,68,68,0.08)",
+  a: "#3b82f6",
+  w: "#ffffff",
+  cy: "#06b6d4",
+  cyD: "rgba(6,182,212,0.06)",
+  cyB: "rgba(6,182,212,0.18)",
+  y: "#f59e0b",
+};
+
+const SEV = {
+  PASS: { col: K.g, bg: "rgba(34,197,94,.05)", br: "2px solid " + K.g },
+  WARN: { col: K.y, bg: "rgba(245,158,11,.06)", br: "2px solid rgba(245,158,11,.9)" },
+  RED:  { col: K.r, bg: "rgba(239,68,68,.06)", br: "2px solid " + K.r },
+};
+
+const ok = (v) => typeof v === "number" && Number.isFinite(v);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/* ===========================
+   TIME HELPERS
+   =========================== */
+function todayLocalYMD() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return y + "-" + m + "-" + day;
+}
+function computeDTE(ymd) {
+  if (!ymd) return "";
+  const parts = ymd.split("-").map(Number);
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return "";
+  const [y, mo, da] = parts;
+  const now = new Date();
+  const exp = new Date(y, mo - 1, da, 16, 0, 0, 0); // 4pm local expiry
+  const ms = exp.getTime() - now.getTime();
+  const days = Math.ceil(ms / (1000 * 60 * 60 * 24));
+  return String(Math.max(0, days));
+}
+function fmtTime(ts) {
+  if (!ts) return "-";
+  try {
+    return new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  } catch { return "-"; }
+}
+function fmtDate(ts) {
+  if (!ts) return "-";
+  try {
+    return new Date(ts).toLocaleDateString("en-US", { month: "short", day: "2-digit" });
+  } catch { return "-"; }
+}
+function ymdToDate(ymd) {
+  const [y,m,d] = (ymd||"").split("-").map(Number);
+  return new Date(y, (m||1)-1, d||1, 0,0,0,0);
+}
+function addDays(ymd, delta) {
+  const dt = ymdToDate(ymd);
+  dt.setDate(dt.getDate() + delta);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,"0");
+  const d = String(dt.getDate()).padStart(2,"0");
+  return `${y}-${m}-${d}`;
+}
+
+/* ===========================
+   NORMAL CDF (approx)
+   =========================== */
+const Ncdf = (x) => {
+  const s = x < 0 ? -1 : 1;
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+  const p = d * t * (0.31938153 + t * (-0.35656378 + t * (1.78147794 + t * (-1.82125598 + t * 1.33027443))));
+  return s === 1 ? 1 - p : p;
+};
+
+/* ===========================
+   REGIME + FLOORS
+   =========================== */
+const regime = (v) => (v < 17 ? "CALM" : v <= 23 ? "NORMAL" : v <= 30 ? "ELEVATED" : "PANIC");
+const RC = {
+  CALM:     { sig: 0.50, vrp: 0.010, col: K.g, bg: "rgba(34,197,94,0.08)" },
+  NORMAL:   { sig: 0.75, vrp: 0.015, col: K.a, bg: "rgba(59,130,246,0.08)" },
+  ELEVATED: { sig: 1.00, vrp: 0.020, col: K.y, bg: "rgba(245,158,11,0.08)" },
+  PANIC:    { sig: 1.25, vrp: 0.030, col: K.r, bg: "rgba(239,68,68,0.08)" },
+};
+
+/* ===========================
+   STRIKE INCREMENTS
+   =========================== */
+function strikeIncrementFromSpot(S) {
+  if (!ok(S) || S <= 0) return 1;
+  if (S < 25) return 0.5;
+  if (S < 200) return 1;
+  return 5;
+}
+function roundToInc(x, inc) {
+  if (!ok(x) || !ok(inc) || inc <= 0) return NaN;
+  return Math.floor(x / inc) * inc;
+}
+
+/* ===========================
+   CORE MATH
+   =========================== */
+function expectedMove(spot, iv, dte) { return spot * iv * Math.sqrt(dte / 365); }
+
+function bsD2(spot, strike, iv, dte) {
+  if ([spot, strike, iv, dte].some(v => !ok(v) || v <= 0)) return NaN;
+  const T = dte / 365, sqrtT = Math.sqrt(T);
+  return (Math.log(spot / strike) + 0.5 * iv * iv * T) / (iv * sqrtT) - iv * sqrtT;
+}
+function calcPopPut(spot, strike, iv, dte) {
+  const d2 = bsD2(spot, strike, iv, dte);
+  return ok(d2) ? clamp(Ncdf(d2), 0, 1) : NaN;
+}
+function probTouch(spot, strike, iv, dte) {
+  if ([spot, strike, iv, dte].some(v => !ok(v) || v <= 0)) return NaN;
+  const z = -Math.log(spot / strike) / (iv * Math.sqrt(dte / 365));
+  return clamp(2 * Ncdf(z), 0, 1);
+}
+
+/* ===========================
+   INCOME FLOOR ENGINE (DTE-scaled)
+   =========================== */
+function rorMinDTE(ror30, dte) {
+  if (!ok(ror30) || ror30 <= 0 || !ok(dte) || dte <= 0) return NaN;
+  return ror30 * (dte / 30);
+}
+function pcsMinCredit(width, r) {
+  if (!ok(width) || width <= 0 || !ok(r) || r <= 0) return NaN;
+  return (r / (1 + r)) * width;
+}
+
+/* PCS width suggestion given risk cap */
+function recPcsWidth(aum, r, contracts, bpsRiskPct) {
+  const n = Math.max(1, Math.floor(Number(contracts) || 1));
+  if (!ok(aum) || aum <= 0) return { err: "Set AUM in CONFIG" };
+  if (!ok(r) || r <= 0) return { err: "Invalid RoR floor" };
+
+  const pct = ok(bpsRiskPct) && bpsRiskPct > 0 ? bpsRiskPct : 0.02;
+  const riskCap = aum * pct;
+
+  for (const w of [1, 2, 2.5, 5, 10]) {
+    const cmin = pcsMinCredit(w, r);
+    const maxLossPS = w - cmin;
+    const risk = maxLossPS * 100 * n;
+    if (risk <= riskCap && cmin < w) return { w, cmin, maxLossPS, risk, riskCap };
+  }
+  return { err: "No width fits risk cap", riskCap };
+}
+
+/* ===========================
+   WORKER API
+   =========================== */
+async function apiGet(path) {
+  const url = WORKER_BASE + path + (path.includes("?") ? "&" : "?") + "ts=" + Date.now();
+  const res = await fetch(url, { method: "GET", mode: "cors", cache: "no-store" });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const data = await res.json();
+  if (data && data.error) throw new Error(data.error);
+  return data;
+}
+async function fetchSnapshot(ticker) {
+  const t = (ticker || "").trim().toUpperCase();
+  if (!t) throw new Error("Missing ticker");
+  return apiGet("/all?ticker=" + encodeURIComponent(t));
+}
+async function fetchOption(_) {
+  throw new Error("Options endpoint disabled — no /option route + Polygon entitlement");
+}
+
+/* ===========================
+   EVALUATION (strategy-first)
+   =========================== */
+function evaluateTrade(input, cfg, openPositions) {
+  const STR = input.structure;
+
+  const S = parseFloat(input.spot);
+  const IV = parseFloat(input.iv);
+  const DTE = parseInt(input.dte, 10);
+  const Kshort = parseFloat(input.strike);
+  const CR = parseFloat(input.credit);
+  const W = STR === "PCS" ? parseFloat(input.width) : null;
+  const N = parseInt(input.contracts, 10) || 0;
+
+  const VIX = parseFloat(input.vix);
+  const VIXY = parseFloat(input.vixY);
+  const RV10 = parseFloat(input.rv10);
+  const RV20 = parseFloat(input.rv20);
+
+  if (!["CSP","PCS"].includes(STR)) return { error: "Invalid structure" };
+  if ([S, IV, VIX, VIXY, RV10, RV20].some(v => !ok(v))) return { error: "Missing required fields" };
+  if (!ok(DTE) || DTE <= 0) return { error: "DTE must be > 0" };
+  if (!ok(Kshort) || Kshort <= 0) return { error: "Strike required" };
+  if (!ok(CR) || CR < 0) return { error: "Credit required" };
+  if (!ok(N) || N < 1) return { error: "Contracts required" };
+  if (STR === "PCS") {
+    if (!ok(W) || W <= 0) return { error: "Width required for PCS" };
+    if (W <= CR) return { error: "Width must exceed credit (defined risk must be > 0)" };
+  }
+
+  const rg = regime(VIX);
+  const c = RC[rg];
+  const em = expectedMove(S, IV, DTE);
+  const reqSigma = c.sig;
+
+  const sigmaDistance = em > 0 ? (S - Kshort) / em : 0;
+  const sigmaPass = sigmaDistance >= reqSigma;
+
+  const rising = VIX > VIXY;
+  const rv = rising ? RV10 : RV20;
+  const vrp = IV - rv;
+  const vrpPass = vrp >= c.vrp;
+
+  const ror30 = parseFloat(cfg?.ror30) || 0.04;
+  const rMin = rorMinDTE(ror30, DTE);
+
+  let ror = 0;
+  let maxLossPS = 0;
+  if (STR === "CSP") {
+    ror = Kshort > 0 ? (CR / Kshort) : 0;
+    maxLossPS = Kshort - CR;
+  } else {
+    maxLossPS = W - CR;
+    ror = maxLossPS > 0 ? (CR / maxLossPS) : 0;
+  }
+  const rorPass = ok(rMin) ? (ror >= rMin) : false;
+
+  const minPremium = STR === "CSP"
+    ? (ok(rMin) ? Kshort * rMin : NaN)
+    : (ok(rMin) ? pcsMinCredit(W, rMin) : NaN);
+
+  const pop = calcPopPut(S, Kshort, IV, DTE);
+  const pt = probTouch(S, Kshort, IV, DTE);
+
+  const breakEven = Kshort - CR;
+  const cushionPct = S > 0 ? (S - breakEven) / S : 0;
+
+  const s1 = S - em;
+  const s2 = S - 2 * em;
+
+  let pnl1, pnl2;
+  if (STR === "PCS") {
+    const Klong = Kshort - W;
+    const spreadValue = (s) => Math.max(0, Kshort - s) - Math.max(0, Klong - s);
+    pnl1 = CR - spreadValue(s1);
+    pnl2 = CR - spreadValue(s2);
+  } else {
+    pnl1 = CR - Math.max(0, Kshort - s1);
+    pnl2 = CR - Math.max(0, Kshort - s2);
+  }
+
+  const tailAdj = ok(pt) ? 0.35 + 0.65 * pt : 0.65;
+  const maxLoss = maxLossPS * 100 * N;
+  const evShare = ok(pop) ? pop * CR - (1 - pop) * maxLossPS * tailAdj : NaN;
+  const evCt = ok(evShare) ? evShare * 100 : NaN;
+
+  const aum = parseFloat(cfg?.aum) || 0;
+  const maxBpsRiskPct = parseFloat(cfg?.maxBpsRiskPct || "0.02");
+  const maxCspNotionalPct = parseFloat(cfg?.maxCspNotionalPct || "0.25");
+  const maxDeploymentPct = parseFloat(cfg?.maxDeploymentPct || "0.80");
+
+  const capital = {
+    notional: 0,
+    definedRisk: 0,
+    totalMaxLoss: maxLoss,
+    deploymentPct: 0,
+    cspUsagePct: 0,
+    bpsUsagePct: 0,
+    pass: true,
+    details: [],
+  };
+
+  if (aum > 0) {
+    const pos = openPositions || [];
+    const existingCsp = pos.filter(p => p.str === "CSP").reduce((s, p) => s + (Number(p.entry?.strike) * 100 * (Number(p.entry?.contracts) || 1)), 0);
+    const existingBps = pos.filter(p => p.str === "PCS").reduce((s, p) => s + (((Number(p.entry?.width) || 0) - (Number(p.entry?.credit) || 0)) * 100 * (Number(p.entry?.contracts) || 1)), 0);
+
+    const thisCsp = STR === "CSP" ? (Kshort * 100 * N) : 0;
+    const thisBps = STR === "PCS" ? (maxLossPS * 100 * N) : 0;
+
+    capital.notional = thisCsp;
+    capital.definedRisk = thisBps;
+    capital.cspUsagePct = thisCsp / aum;
+    capital.bpsUsagePct = thisBps / aum;
+
+    const cspLim = aum * maxCspNotionalPct;
+    const bpsLim = aum * maxBpsRiskPct;
+
+    if (STR === "CSP" && thisCsp > cspLim) {
+      capital.pass = false;
+      capital.details.push({ gate: "CSP NOTIONAL LIMIT", limit: cspLim, actual: thisCsp });
+    }
+    if (STR === "PCS" && thisBps > bpsLim) {
+      capital.pass = false;
+      capital.details.push({ gate: "PCS RISK LIMIT", limit: bpsLim, actual: thisBps });
+    }
+
+    const deployLim = aum * maxDeploymentPct;
+    const totalDeploy = existingCsp + existingBps + thisCsp + thisBps;
+    capital.deploymentPct = totalDeploy / aum;
+
+    if (totalDeploy > deployLim) {
+      capital.pass = false;
+      capital.details.push({ gate: "TOTAL DEPLOYMENT LIMIT", limit: deployLim, actual: totalDeploy });
+    }
+  } else {
+    capital.pass = false;
+    capital.details.push({ gate: "AUM NOT SET", limit: 0, actual: 0 });
+  }
+
+  const pass = sigmaPass && vrpPass && rorPass && capital.pass;
+
+  return {
+    structure: STR,
+    rg,
+    em,
+    reqSigma,
+    sigmaDistance,
+    sigmaPass,
+    rising,
+    rv,
+    vrp,
+    vrpFloor: c.vrp,
+    vrpPass,
+    rMin,
+    ror,
+    rorPass,
+    minPremium,
+    maxLossPS,
+    maxLoss,
+    pop,
+    pt,
+    breakEven,
+    cushionPct,
+    s1, s2,
+    pnl1, pnl2,
+    pnl1_ct: pnl1 * 100,
+    pnl2_ct: pnl2 * 100,
+    evShare,
+    evCt,
+    capital,
+    pass,
+  };
+}
+
+/* ===========================
+   STATUS
+   =========================== */
+function positionStatus({ dte, sigma, reqSigma, pop, spot, breakEven }) {
+  if (!ok(dte)) return { label: "AWAITING", color: K.tm, action: "ENTER DATA" };
+  if (dte <= 0) return { label: "EXPIRED", color: K.r, action: "CLOSE/SETTLE" };
+
+  if (![sigma, reqSigma, pop, spot, breakEven].every(ok)) return { label: "AWAITING", color: K.tm, action: "ENTER DATA" };
+
+  if (spot <= breakEven || pop < 0.50 || sigma < 0.50) return { label: "RED", color: K.r, action: "EXIT" };
+
+  const nearBE = spot > breakEven && spot <= breakEven * 1.02;
+  const sigmaMarg = sigma >= 0.50 && sigma < reqSigma;
+  const popMarg = pop >= 0.50 && pop < 0.60;
+
+  if (nearBE || sigmaMarg || popMarg) return { label: "ORANGE", color: K.y, action: "MONITOR" };
+
+  if (sigma >= reqSigma && pop >= 0.60 && spot > breakEven) return { label: "GREEN", color: K.g, action: "HOLD" };
+
+  return { label: "MONITOR", color: K.y, action: "MONITOR" };
+}
+
+/* ===========================
+   SCANNER v2 — SIGMA SIGNALS
+   IDEA / STRONG / PANIC
+   Uses IV20 if available, else RV proxy.
+   =========================== */
+function pctDrop(refSpot, spot) {
+  if (!ok(refSpot) || !ok(spot) || refSpot <= 0) return NaN;
+  return (spot - refSpot) / refSpot;
+}
+function rvExpanding(rv10, rv20) {
+  if (!ok(rv10) || !ok(rv20)) return false;
+  return rv10 > rv20;
+}
+function dailyEM(spot, vol) {
+  if (!ok(spot) || spot <= 0 || !ok(vol) || vol <= 0) return NaN;
+  return spot * vol * Math.sqrt(1 / 252);
+}
+function dropSigma(refSpot, spot, vol) {
+  if (!ok(refSpot) || refSpot <= 0 || !ok(spot) || spot <= 0) return NaN;
+  const em = dailyEM(spot, vol);
+  if (!ok(em) || em <= 0) return NaN;
+  return (refSpot - spot) / em; // positive = drop
+}
+function ivPremiumOk(iv20, rv20) {
+  if (!ok(iv20) || !ok(rv20) || rv20 <= 0) return false;
+  return (iv20 / rv20) >= 1.05;
+}
+function signalTier({ refSpot, spot, iv20, rv10, rv20, vix }) {
+  const volProxy = ok(iv20) ? iv20 : Math.max(Number(rv20) || NaN, Number(rv10) || NaN);
+  const ds = dropSigma(refSpot, spot, volProxy);
+  if (!ok(ds)) {
+    return { label: "—", tier: "NONE", ds: NaN, col: K.tm, bg: "rgba(255,255,255,0.03)", br: K.cb };
+  }
+  const confirmPaidVol = ok(iv20) ? ivPremiumOk(iv20, rv20) : rvExpanding(rv10, rv20);
+  const IDEA_TH = 0.75;
+  const STRONG_TH = 1.00;
+  const PANIC_TH = 1.50;
+  const vixPanic = ok(vix) && vix >= 28;
+  let tier = "NONE";
+  if (ds >= PANIC_TH || vixPanic) tier = "PANIC";
+  else if (ds >= STRONG_TH) tier = "STRONG";
+  else if (ds >= IDEA_TH) tier = "IDEA";
+  if ((tier === "IDEA" || tier === "STRONG") && !confirmPaidVol) tier = "NONE";
+  if (tier === "IDEA") return { label: "IDEA", tier, ds, col: K.a, bg: "rgba(59,130,246,0.10)", br: "rgba(59,130,246,0.35)" };
+  if (tier === "STRONG") return { label: "STRONG", tier, ds, col: K.g, bg: "rgba(34,197,94,0.10)", br: "rgba(34,197,94,0.35)" };
+  if (tier === "PANIC") return { label: "PANIC", tier, ds, col: K.r, bg: "rgba(239,68,68,0.10)", br: "rgba(239,68,68,0.35)" };
+  return { label: "—", tier: "NONE", ds, col: K.tm, bg: "rgba(255,255,255,0.03)", br: K.cb };
+}
+
+/* ===========================
+   UI PRIMITIVES
+   =========================== */
+function Cd({ children, st }) {
+  return (
+    <div style={{ background: K.card, border: "1px solid " + K.cb, borderRadius: 10, padding: "15px 17px", display: "flex", flexDirection: "column", gap: 12, ...st }}>
+      {children}
+    </div>
+  );
+}
+function Lb({ t }) {
+  return <span style={{ fontSize: 10, fontFamily: M, color: K.tm, letterSpacing: 1.2 }}>{t}</span>;
+}
+function Inp({ label, value, onChange, sfx, ph, hl, readOnly, type="text", inputMode="decimal" }) {
+  const [f, setF] = useState(false);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+      <label style={{ fontSize: 9.5, fontFamily: M, color: K.tm, letterSpacing: 1.2, textTransform: "uppercase" }}>{label}</label>
+      <div style={{ position: "relative" }}>
+        <input
+          type={type}
+          inputMode={inputMode}
+          value={value}
+          onChange={e => !readOnly && onChange(e.target.value)}
+          readOnly={readOnly}
+          placeholder={ph || ""}
+          style={{
+            width: "100%",
+            padding: "10px 12px",
+            paddingRight: sfx ? 40 : 12,
+            boxSizing: "border-box",
+            background: readOnly ? "rgba(17,19,26,0.6)" : hl ? "rgba(6,182,212,0.03)" : K.ib,
+            border: "1px solid " + (f ? K.a : hl ? K.cyB : K.ibr),
+            borderRadius: 6,
+            color: readOnly ? K.td : K.tx,
+            fontFamily: M,
+            fontSize: 14,
+            outline: "none",
+            transition: "border-color .15s",
+            cursor: readOnly ? "default" : "text"
+          }}
+          onFocus={() => setF(true)}
+          onBlur={() => setF(false)}
+        />
+        {sfx && <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 10, color: K.tm, fontFamily: M }}>{sfx}</span>}
+      </div>
+    </div>
+  );
+}
+function Tog({ opts, val, set }) {
+  return (
+    <div style={{ display: "flex", background: K.ib, borderRadius: 6, border: "1px solid " + K.ibr, overflow: "hidden" }}>
+      {opts.map(o => (
+        <button
+          key={o}
+          onClick={() => set(o)}
+          style={{ flex: 1, padding: "10px 0", background: val === o ? K.a : "transparent", color: val === o ? K.w : K.td, border: "none", fontFamily: M, fontSize: 13, fontWeight: 600, cursor: "pointer", letterSpacing: 0.5 }}
+        >
+          {o}
+        </button>
+      ))}
+    </div>
+  );
+}
+function Pill({ text, col, bg }) {
+  return (
+    <span style={{ fontSize: 9, fontFamily: M, fontWeight: 800, color: col, background: bg, padding: "2px 7px", borderRadius: 4, letterSpacing: 1 }}>
+      {text}
+    </span>
+  );
+}
+
+/* ===========================
+   APP
+   - NEW CHANGE: CONFIG requires "Today's VIX"
+   - NEW CHANGE: Yesterday's VIX auto-populates from prior session save
+   - NEW CHANGE: NEW TRADE removes manual VIX inputs; uses session VIX values
+   =========================== */
+function App() {
+  const [mode, setMode] = useState("CONFIG");
+  const [d1Status, setD1Status] = useState("CHECKING"); // CHECKING → SYNCED | LOCAL ONLY
+
+  const CFG_DEF = {
+    aum: "",
+    ror30: "0.04",
+    maxBpsRiskPct: "0.02",
+    maxCspNotionalPct: "0.25",
+    maxDeploymentPct: "0.80",
+    refreshSec: "60",
+
+    // Session VIX fields
+    sessionDate: "",
+    sessionVix: "",
+    sessionVixY: "",
+    sessionLockedAt: null,
+  };
+
+  const loadCfg = () => {
+    try { const s = localStorage.getItem(STORAGE.cfg); return s ? { ...CFG_DEF, ...JSON.parse(s) } : CFG_DEF; }
+    catch { return CFG_DEF; }
+  };
+  const loadPos = () => {
+    try { const s = localStorage.getItem(STORAGE.positions); return s ? JSON.parse(s) : []; }
+    catch { return []; }
+  };
+
+  const [savedCfg, setSavedCfg] = useState(loadCfg);
+  const [draft, setDraft] = useState(() => ({ ...loadCfg() }));
+  const [cfgDirty, setCfgDirty] = useState(false);
+  const [cfgMsg, setCfgMsg] = useState(null);
+
+  const editCfg = (k, v) => { setDraft(p => ({ ...p, [k]: v })); setCfgDirty(true); setCfgMsg(null); };
+
+  const commitCfg = () => {
+    const a = parseFloat(draft.aum);
+    const r30 = parseFloat(draft.ror30);
+    const vixToday = parseFloat(draft.sessionVix);
+    const today = todayLocalYMD();
+
+    if (!ok(a) || a <= 0) { setCfgMsg("AUM required (>0)."); return; }
+    if (!ok(r30) || r30 <= 0) { setCfgMsg("RoR_30 required (>0)."); return; }
+    if (!ok(vixToday) || vixToday <= 0) { setCfgMsg("Today VIX required (>0)."); return; }
+
+    let prev = null;
+    try { prev = JSON.parse(localStorage.getItem(STORAGE.cfg) || "null"); } catch {}
+
+    let vixY = null;
+    const yesterday = addDays(today, -1);
+
+    // primary rule: if last session was yesterday, use its VIX as today's "yesterday"
+    if (prev && prev.sessionDate === yesterday && ok(parseFloat(prev.sessionVix))) {
+      vixY = parseFloat(prev.sessionVix);
+    } else if (prev && ok(parseFloat(prev.sessionVixY))) {
+      // fallback: carry forward last known yesterday
+      vixY = parseFloat(prev.sessionVixY);
+    } else {
+      // fallback: if nothing exists, set to today so rising = false by default
+      vixY = vixToday;
+    }
+
+    const nextCfg = {
+      ...draft,
+      sessionDate: today,
+      sessionVix: String(vixToday),
+      sessionVixY: String(vixY),
+      sessionLockedAt: Date.now(),
+    };
+
+    try { localStorage.setItem(STORAGE.cfg, JSON.stringify(nextCfg)); } catch {}
+    d1.saveConfig(nextCfg).catch(e => console.warn("D1 config sync failed:", e));
+    setSavedCfg({ ...nextCfg });
+    setDraft({ ...nextCfg });
+    setCfgDirty(false);
+    setCfgMsg("CONFIG SAVED");
+  };
+
+  const [positions, setPositions] = useState(loadPos);
+  const persist = useCallback((next) => {
+    setPositions(next);
+    try { localStorage.setItem(STORAGE.positions, JSON.stringify(next)); } catch {}
+    d1.savePositions(next).catch(e => console.warn("D1 positions sync failed:", e));
+  }, []);
+
+  /* NEW TRADE inputs (VIX removed) */
+  const [ticker, setTicker] = useState("");
+
+  /* Watchlist state + persistence */
+  const loadWatch = () => {
+    try { const s = localStorage.getItem(STORAGE.watch); return s ? JSON.parse(s) : []; }
+    catch { return []; }
+  };
+  const saveWatch = (arr) => {
+    try { localStorage.setItem(STORAGE.watch, JSON.stringify(arr)); } catch {}
+    d1.saveWatchlist(arr).catch(e => console.warn("D1 watchlist sync failed:", e));
+  };
+
+  const [watch, setWatch] = useState(loadWatch);
+  const [watchInput, setWatchInput] = useState("");
+  const [scanMsg, setScanMsg] = useState(null);
+  const [scanLoading, setScanLoading] = useState(false);
+
+  const addToWatch = useCallback(() => {
+    const raw = (watchInput || "").toUpperCase();
+    const parts = raw.split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+    if (!parts.length) return;
+    const next = Array.from(new Set([...parts, ...watch.map(w => w.ticker)]))
+      .slice(0, 50)
+      .map(t => {
+        const existing = watch.find(x => x.ticker === t);
+        return existing || { ticker: t, last: null, asOf: null, refSpot: null, refTs: null };
+      });
+    setWatch(next);
+    saveWatch(next);
+    setWatchInput("");
+  }, [watchInput, watch]);
+
+  const removeFromWatch = useCallback((t) => {
+    const next = watch.filter(w => w.ticker !== t);
+    setWatch(next);
+    saveWatch(next);
+  }, [watch]);
+
+  const clearWatch = useCallback(() => {
+    setWatch([]);
+    saveWatch([]);
+  }, []);
+
+  const setWatchRefSpot = useCallback((ticker, val) => {
+    const x = parseFloat(val);
+    const next = watch.map(w => w.ticker === ticker ? { ...w, refSpot: ok(x) ? x : null, refTs: Date.now() } : w);
+    setWatch(next);
+    saveWatch(next);
+  }, [watch]);
+
+  const refreshWatch = useCallback(async () => {
+    if (!watch.length) return;
+    setScanLoading(true);
+    setScanMsg(null);
+    try {
+      const next = await Promise.all(
+        watch.map(async (w) => {
+          try {
+            const s = await fetchSnapshot(w.ticker);
+            return {
+              ...w,
+              last: {
+                spot: ok(s?.spot) ? Number(s.spot) : null,
+                rv10: ok(s?.rv10) ? Number(s.rv10) : null,
+                rv20: ok(s?.rv20) ? Number(s.rv20) : null,
+                spotError: s?.spotError || null,
+                rvError: s?.rvError || null,
+              },
+              // auto-seed refSpot on first load if not set
+              refSpot: ok(w.refSpot) ? w.refSpot : (ok(s?.spot) ? Number(s.spot) : null),
+              refTs: ok(w.refSpot) ? w.refTs : (ok(s?.spot) ? Date.now() : null),
+              asOf: s?.asOf || Date.now(),
+            };
+          } catch (e) {
+            return {
+              ...w,
+              last: { spot: null, rv10: null, rv20: null, spotError: String(e?.message || e), rvError: String(e?.message || e) },
+              asOf: Date.now(),
+            };
+          }
+        })
+      );
+      setWatch(next);
+      saveWatch(next);
+      setScanMsg("SCAN REFRESH OK " + fmtTime(Date.now()));
+    } catch (e) {
+      setScanMsg("SCAN REFRESH FAILED: " + (e?.message || e));
+    }
+    setScanLoading(false);
+  }, [watch]);
+
+  // D1 hydration on mount — pull from server, override localStorage
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [cfgRemote, posRemote, watchRemote] = await Promise.all([
+          d1.loadConfig(),
+          d1.loadPositions(),
+          d1.loadWatchlist(),
+        ]);
+        if (cancelled) return;
+
+        // Config: merge with defaults, D1 wins over localStorage
+        if (cfgRemote && Object.keys(cfgRemote).length > 0) {
+          const merged = { ...CFG_DEF, ...cfgRemote };
+          setSavedCfg(merged);
+          setDraft(prev => ({ ...merged }));
+          try { localStorage.setItem(STORAGE.cfg, JSON.stringify(merged)); } catch {}
+        }
+
+        // Positions: D1 array wins if non-empty
+        if (Array.isArray(posRemote) && posRemote.length > 0) {
+          setPositions(posRemote);
+          try { localStorage.setItem(STORAGE.positions, JSON.stringify(posRemote)); } catch {}
+        }
+
+        // Watchlist: D1 array wins if non-empty
+        if (Array.isArray(watchRemote) && watchRemote.length > 0) {
+          setWatch(watchRemote);
+          try { localStorage.setItem(STORAGE.watch, JSON.stringify(watchRemote)); } catch {}
+        }
+
+        setD1Status("SYNCED");
+      } catch (e) {
+        console.warn("D1 hydration failed, using localStorage:", e);
+        if (!cancelled) setD1Status("LOCAL ONLY");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Auto-refresh scanner when on SCAN tab
+  useEffect(() => {
+    if (mode !== "SCAN") return;
+    refreshWatch();
+    const sec = Math.max(30, parseInt(savedCfg.refreshSec || "60", 10) || 60);
+    const id = setInterval(refreshWatch, sec * 1000);
+    return () => clearInterval(id);
+  }, [mode, refreshWatch, savedCfg.refreshSec]);
+  const [structure, setStructure] = useState("CSP");
+  const [spot, setSpot] = useState("");
+  const [expiry, setExpiry] = useState("");
+  const [dte, setDte] = useState("");
+  const [iv, setIv] = useState("");
+  const [rv10, setRv10] = useState("");
+  const [rv20, setRv20] = useState("");
+  const [strike, setStrike] = useState("");
+  const [width, setWidth] = useState("");
+  const [credit, setCredit] = useState("");
+  const [contracts, setContracts] = useState("1");
+
+  const [snapLoading, setSnapLoading] = useState(false);
+  const [snapMsg, setSnapMsg] = useState(null);
+
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const [dashLiveMsg, setDashLiveMsg] = useState(null);
+  const [dashRefreshing, setDashRefreshing] = useState(false);
+
+  const [openPos, setOpenPos] = useState(null);
+
+  const handleExpiryChange = useCallback((val) => {
+    setExpiry(val);
+    setDte(computeDTE(val));
+  }, []);
+
+  const sessionVix = useMemo(() => parseFloat(savedCfg.sessionVix), [savedCfg.sessionVix]);
+  const sessionVixY = useMemo(() => {
+    const v = parseFloat(savedCfg.sessionVixY);
+    return ok(v) ? v : sessionVix;
+  }, [savedCfg.sessionVixY, sessionVix]);
+
+  const sessionReady = useMemo(() => ok(sessionVix) && ok(sessionVixY), [sessionVix, sessionVixY]);
+
+  const handleLoadSnapshot = useCallback(async () => {
+    const t = ticker.trim().toUpperCase();
+    if (!t) return;
+
+    setSnapLoading(true);
+    setSnapMsg(null);
+
+    try {
+      const snap = await fetchSnapshot(t);
+      if (ok(snap.spot)) setSpot(String(Number(snap.spot).toFixed(2)));
+      if (ok(snap.rv10)) setRv10(String(Number(snap.rv10).toFixed(4)));
+      if (ok(snap.rv20)) setRv20(String(Number(snap.rv20).toFixed(4)));
+
+      setSnapMsg(
+        `${t} | Spot $${ok(snap.spot)?Number(snap.spot).toFixed(2):"NA"} | RV10 ${(ok(snap.rv10)?Number(snap.rv10)*100:0).toFixed(1)}% | RV20 ${(ok(snap.rv20)?Number(snap.rv20)*100:0).toFixed(1)}%`
+      );
+    } catch (e) {
+      setSnapMsg("Fetch failed: " + (e?.message || e));
+    }
+
+    setSnapLoading(false);
+  }, [ticker]);
+
+  const rec = useMemo(() => {
+    const S = parseFloat(spot);
+    const IV = parseFloat(iv);
+    const D = parseInt(dte, 10);
+
+    if (!sessionReady) return null;
+    if (![S, IV].every(ok) || !ok(D) || D <= 0) return null;
+
+    const rg = regime(sessionVix);
+    const c = RC[rg];
+    const em = expectedMove(S, IV, D);
+    const rawStrike = S - c.sig * em;
+    const inc = strikeIncrementFromSpot(S);
+    const recStrike = roundToInc(rawStrike, inc);
+
+    const r30 = parseFloat(savedCfg.ror30 || "0.04");
+    const rMin = rorMinDTE(r30, D);
+
+    const base = { rg, em, sig: c.sig, rawStrike, recStrike, rMin, pop: calcPopPut(S, recStrike, IV, D) };
+
+    if (structure === "CSP") {
+      return { ...base, mode: "CSP", minCredit: ok(rMin) ? (recStrike * rMin) : NaN };
+    }
+
+    const ct = Math.max(1, parseInt(contracts, 10) || 1);
+    const aum = parseFloat(savedCfg.aum) || 0;
+    const bpsPct = parseFloat(savedCfg.maxBpsRiskPct || "0.02");
+    const wRec = recPcsWidth(aum, rMin, ct, bpsPct);
+
+    if (wRec.err) return { ...base, mode: "PCS", pcsErr: wRec.err, riskCap: wRec.riskCap };
+
+    const userW = parseFloat(width);
+    const effW = (ok(userW) && userW > 0) ? userW : wRec.w;
+
+    const minCredit = pcsMinCredit(effW, rMin);
+    const longStrike = recStrike - effW;
+    const maxLossPS = effW - minCredit;
+    const risk = maxLossPS * 100 * ct;
+
+    return {
+      ...base,
+      mode: "PCS",
+      autoWidth: !(ok(userW) && userW > 0),
+      recWidth: wRec.w,
+      effWidth: effW,
+      longStrike,
+      minCredit,
+      maxLossPS,
+      risk,
+      riskCap: wRec.riskCap,
+    };
+  }, [spot, iv, dte, structure, contracts, width, savedCfg, sessionVix, sessionReady]);
+
+  const handleEval = useCallback(() => {
+    setErr(null);
+    setRes(null);
+
+    if (!sessionReady) { setErr("Set today's VIX in CONFIG first."); return; }
+
+    const ct = parseInt(contracts, 10);
+    if (!ok(ct) || ct < 1) { setErr("Contracts required."); return; }
+    if (!expiry || !dte) { setErr("Expiry required."); return; }
+
+    const effStrike = strike !== "" ? strike : (rec?.recStrike != null ? String(rec.recStrike) : "");
+    const effWidth  = structure === "PCS"
+      ? (width !== "" ? width : (rec?.effWidth != null ? String(rec.effWidth) : ""))
+      : null;
+
+    const out = evaluateTrade({
+      structure,
+      spot,
+      strike: effStrike,
+      width: effWidth,
+      credit,
+      contracts: String(ct),
+      iv,
+      dte,
+      vix: String(sessionVix),
+      vixY: String(sessionVixY),
+      rv10,
+      rv20,
+    }, savedCfg, positions);
+
+    if (out.error) setErr(out.error);
+    else setRes(out);
+  }, [sessionReady, contracts, expiry, dte, strike, width, structure, rec, spot, credit, iv, rv10, rv20, sessionVix, sessionVixY, savedCfg, positions]);
+
+  const handleUseRec = useCallback(() => {
+    if (!rec) return;
+    setStrike(String(rec.recStrike));
+    if (structure === "CSP") {
+      if (ok(rec.minCredit)) setCredit(rec.minCredit.toFixed(2));
+    } else {
+      if (rec.mode === "PCS" && !rec.pcsErr) {
+        setWidth(String(rec.effWidth));
+        if (ok(rec.minCredit)) setCredit(rec.minCredit.toFixed(2));
+      }
+    }
+  }, [rec, structure]);
+
+  const saveToDash = useCallback(() => {
+    setErr(null);
+
+    if (!sessionReady) { setErr("Set today's VIX in CONFIG first."); return; }
+
+    const t = ticker.trim().toUpperCase();
+    if (!t) { setErr("Ticker required."); return; }
+
+    const ct = parseInt(contracts, 10);
+    if (!ok(ct) || ct < 1) { setErr("Contracts required."); return; }
+
+    const effStrike = strike !== "" ? parseFloat(strike) : (rec ? rec.recStrike : NaN);
+    const effWidth  = structure === "PCS" ? (parseFloat(width) || (rec && rec.effWidth ? rec.effWidth : NaN)) : null;
+
+    if (!ok(effStrike)) { setErr("Strike required."); return; }
+    if (structure === "PCS" && !ok(effWidth)) { setErr("PCS width required."); return; }
+
+    const entrySpot = parseFloat(spot);
+    const entryIV = parseFloat(iv);
+    const entryDTE = parseInt(dte, 10);
+    const entryCR = parseFloat(credit);
+
+    if (![entrySpot, entryIV, entryDTE, entryCR].every(ok)) { setErr("Fill all required inputs first."); return; }
+    if (entryDTE <= 0) { setErr("Cannot save expired trade."); return; }
+
+    const entryEval = evaluateTrade({
+      structure,
+      spot: String(entrySpot),
+      iv: String(entryIV),
+      dte: String(entryDTE),
+      strike: String(effStrike),
+      width: structure === "PCS" ? String(effWidth) : null,
+      credit: String(entryCR),
+      contracts: String(ct),
+      vix: String(sessionVix),
+      vixY: String(sessionVixY),
+      rv10: String(parseFloat(rv10)),
+      rv20: String(parseFloat(rv20)),
+    }, savedCfg, positions);
+
+    if (entryEval.error) { setErr(entryEval.error); return; }
+
+    const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+
+    const recObj = {
+      id,
+      ts: Date.now(),
+      ticker: t,
+      str: structure,
+      identifiers: {
+        expiry: (expiry || "").trim(),
+        shortType: "put",
+        shortStrike: effStrike,
+      },
+      entry: {
+        spot: entrySpot,
+        strike: effStrike,
+        width: structure === "PCS" ? effWidth : null,
+        credit: entryCR,
+        iv: entryIV,
+        dte: entryDTE,
+        contracts: ct,
+        // snapshot vix regime inputs at entry
+        vix: sessionVix,
+        vixY: sessionVixY,
+        rv10: parseFloat(rv10),
+        rv20: parseFloat(rv20),
+      },
+      entryEval,
+      live: {
+        spot: entrySpot,
+        rv10: parseFloat(rv10),
+        rv20: parseFloat(rv20),
+        asOf: Date.now(),
+        shortIv: null,
+        shortDelta: null,
+        shortMid: null,
+        optAsOf: null,
+      },
+    };
+
+    persist([recObj, ...positions]);
+    setMode("DASH");
+  }, [sessionReady, ticker, structure, spot, iv, dte, strike, width, credit, contracts, expiry, savedCfg, positions, persist, rec, rv10, rv20, sessionVix, sessionVixY]);
+
+  const deletePos = useCallback((id) => {
+    const next = positions.filter(p => p.id !== id);
+    persist(next);
+    if (openPos && openPos.id === id) setOpenPos(null);
+  }, [positions, persist, openPos]);
+
+  const analyzePos = useCallback((p) => setOpenPos(p), []);
+
+  const refreshDashboardLive = useCallback(async () => {
+    if (!positions.length) return;
+
+    setDashRefreshing(true);
+    setDashLiveMsg(null);
+
+    try {
+      const tickers = Array.from(new Set(positions.map(p => (p.ticker || "").trim().toUpperCase()).filter(Boolean)));
+      const snaps = {};
+
+      await Promise.all(tickers.map(async (t) => {
+        try { snaps[t] = await fetchSnapshot(t); }
+        catch { snaps[t] = null; }
+      }));
+
+      const next = await Promise.all(positions.map(async (p) => {
+        const t = (p.ticker || "").trim().toUpperCase();
+        const s = snaps[t];
+
+        const live = {
+          spot: ok(s?.spot) ? Number(s.spot) : (p.live?.spot ?? null),
+          rv10: ok(s?.rv10) ? Number(s.rv10) : (p.live?.rv10 ?? null),
+          rv20: ok(s?.rv20) ? Number(s.rv20) : (p.live?.rv20 ?? null),
+          asOf: s?.asOf || Date.now(),
+          shortIv: p.live?.shortIv ?? null,
+          shortDelta: p.live?.shortDelta ?? null,
+          shortMid: p.live?.shortMid ?? null,
+          optAsOf: p.live?.optAsOf ?? null,
+        };
+
+        // Options greeks disabled (no /option route + Polygon entitlement).
+
+        return { ...p, live };
+      }));
+
+      persist(next);
+
+      setDashLiveMsg("LIVE REFRESH OK " + fmtTime(Date.now()));
+      if (openPos) {
+        const u = next.find(x => x.id === openPos.id);
+        if (u) setOpenPos(u);
+      }
+    } catch (e) {
+      setDashLiveMsg("REFRESH FAILED: " + (e?.message || e));
+    }
+
+    setDashRefreshing(false);
+  }, [positions, persist, openPos]);
+
+  useEffect(() => {
+    if (mode !== "DASH") return;
+    refreshDashboardLive();
+    const sec = Math.max(20, parseInt(savedCfg.refreshSec || "60", 10) || 60);
+    const id = setInterval(refreshDashboardLive, sec * 1000);
+    return () => clearInterval(id);
+  }, [mode, refreshDashboardLive, savedCfg.refreshSec]);
+
+  const openEval = useMemo(() => {
+    if (!openPos) return null;
+
+    const p = openPos;
+    const live = p.live || {};
+    const S = ok(live.spot) ? live.spot : p.entry.spot;
+
+    const D = computeDTE(p.identifiers?.expiry || "");
+    const DTEo = parseInt(D, 10);
+
+    const IV = ok(live.shortIv) ? live.shortIv : p.entry.iv;
+
+    const out = evaluateTrade({
+      structure: p.str,
+      spot: String(S),
+      iv: String(IV),
+      dte: String(DTEo),
+      strike: String(p.entry.strike),
+      width: p.str === "PCS" ? String(p.entry.width) : null,
+      credit: String(p.entry.credit),
+      contracts: String(p.entry.contracts || 1),
+      vix: String(sessionVix),
+      vixY: String(sessionVixY),
+      rv10: String(ok(live.rv10) ? live.rv10 : p.entry.rv10),
+      rv20: String(ok(live.rv20) ? live.rv20 : p.entry.rv20),
+    }, savedCfg, positions);
+
+    if (out.error) return null;
+    return { ...out, dteLive: DTEo, spotLive: S, ivLive: IV, vixLive: sessionVix };
+  }, [openPos, savedCfg, positions, sessionVix, sessionVixY]);
+
+  const openStatus = useMemo(() => {
+    if (!openEval || !openPos) return { label: "AWAITING", color: K.tm, action: "ENTER DATA" };
+    return positionStatus({
+      dte: openEval.dteLive,
+      sigma: openEval.sigmaDistance,
+      reqSigma: openEval.reqSigma,
+      pop: openEval.pop,
+      spot: openEval.spotLive,
+      breakEven: openEval.breakEven,
+    });
+  }, [openEval, openPos]);
+
+  const totals = useMemo(() => {
+    const aum = parseFloat(savedCfg.aum) || 0;
+
+    let cspCollateral = 0;
+    let pcsRisk = 0;
+    let premiumCollected = 0;
+
+    for (const p of positions) {
+      const ct = Number(p.entry?.contracts) || 1;
+      const cr = Number(p.entry?.credit) || 0;
+
+      premiumCollected += cr * 100 * ct;
+
+      if (p.str === "CSP") {
+        cspCollateral += (Number(p.entry?.strike) || 0) * 100 * ct;
+      } else if (p.str === "PCS") {
+        const w = Number(p.entry?.width) || 0;
+        const riskPS = w - cr;
+        pcsRisk += riskPS * 100 * ct;
+      }
+    }
+
+    const deployed = cspCollateral + pcsRisk;
+
+    return {
+      aum,
+      cspCollateral,
+      pcsRisk,
+      deployed,
+      deployedPct: aum > 0 ? deployed / aum : 0,
+      premiumCollected,
+    };
+  }, [positions, savedCfg.aum]);
+
+  const gate = useMemo(() => {
+    if (!res) return { sev: SEV.RED, title: "AWAITING", subtitle: !sessionReady ? "SET TODAY VIX IN CONFIG" : "ENTER INPUTS" };
+    const failed = [];
+    if (!res.sigmaPass) failed.push("SIGMA");
+    if (!res.vrpPass) failed.push("VRP");
+    if (!res.rorPass) failed.push("RoR");
+    if (res.capital && !res.capital.pass) failed.push("CAPITAL");
+
+    if (failed.length === 0) return { sev: SEV.PASS, title: "PASS", subtitle: "ALL GATES CLEARED" };
+    const hard = failed.includes("SIGMA") || failed.includes("CAPITAL");
+    return { sev: hard ? SEV.RED : SEV.WARN, title: "FAIL", subtitle: failed.join(" + ") + " FAILED" };
+  }, [res, sessionReady]);
+
+  return (
+    <div style={{ minHeight: "100vh", background: K.bg, color: K.tx, fontFamily: "'DM Sans',-apple-system,sans-serif" }}>
+      {/* HEADER */}
+      <div style={{ borderBottom: "1px solid " + K.cb, padding: "12px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, position: "sticky", top: 0, zIndex: 50, background: K.bg }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={{ fontFamily: M, fontSize: 15, fontWeight: 900, color: K.w, letterSpacing: 2 }}>NUVO</span>
+          <span style={{ fontFamily: M, fontSize: 15, color: K.td, letterSpacing: 2 }}>VSIM</span>
+          <span style={{ fontSize: 9, fontFamily: M, color: K.g, opacity: 0.85, letterSpacing: 1 }}>{APP_VER}</span>
+          <span style={{ fontSize: 8, fontFamily: M, padding: "2px 6px", borderRadius: 4, letterSpacing: 1, fontWeight: 700,
+            color: d1Status === "SYNCED" ? K.g : d1Status === "LOCAL ONLY" ? "#f59e0b" : K.tm,
+            background: d1Status === "SYNCED" ? "rgba(34,197,94,0.08)" : d1Status === "LOCAL ONLY" ? "rgba(245,158,11,0.08)" : "rgba(255,255,255,0.03)",
+            border: "1px solid " + (d1Status === "SYNCED" ? "rgba(34,197,94,0.25)" : d1Status === "LOCAL ONLY" ? "rgba(245,158,11,0.25)" : K.cb),
+          }}>{d1Status === "SYNCED" ? "D1 SYNCED" : d1Status === "LOCAL ONLY" ? "LOCAL ONLY" : "..."}</span>
+        </div>
+        <div style={{ display: "flex", background: K.ib, borderRadius: 6, border: "1px solid " + K.ibr, overflow: "hidden" }}>
+          {[["CONFIG","CONFIG"],["SCAN","SCANNER"],["NEW","NEW TRADE"],["DASH","DASHBOARD"]].map(([k,l]) => (
+            <button
+              key={k}
+              onClick={() => { setMode(k); if (k !== "DASH") setOpenPos(null); }}
+              style={{ padding: "7px 16px", background: mode===k ? K.a : "transparent", color: mode===k ? K.w : K.td, border: "none", fontFamily: M, fontSize: 10, fontWeight: 700, cursor: "pointer", letterSpacing: 1 }}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* CONFIG */}
+      {mode === "CONFIG" && (
+        <div className="fade-in" style={{ maxWidth: 620, margin: "0 auto", padding: "24px 16px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <Cd>
+            <Lb t="CONFIGURATION" />
+            <div style={{ fontSize: 10, fontFamily: M, color: K.tm, opacity: 0.55, lineHeight: 1.6 }}>
+              Session-gated workflow: enter Today VIX once. Yesterday VIX auto-populates from last session. NEW TRADE uses session VIX values (no manual VIX inputs).
+            </div>
+
+            <Inp label="AUM" value={draft.aum} onChange={v => editCfg("aum", v)} sfx="$" ph="100000" />
+            <Inp label="RoR_30 (credit floor at 30 DTE)" value={draft.ror30} onChange={v => editCfg("ror30", v)} sfx="dec" ph="0.04" />
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <Inp label="Max PCS risk % of AUM" value={draft.maxBpsRiskPct} onChange={v => editCfg("maxBpsRiskPct", v)} sfx="dec" ph="0.02" />
+              <Inp label="Max CSP notional % of AUM" value={draft.maxCspNotionalPct} onChange={v => editCfg("maxCspNotionalPct", v)} sfx="dec" ph="0.25" />
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <Inp label="Max deployment % of AUM" value={draft.maxDeploymentPct} onChange={v => editCfg("maxDeploymentPct", v)} sfx="dec" ph="0.80" />
+              <Inp label="Dashboard refresh (sec)" value={draft.refreshSec} onChange={v => editCfg("refreshSec", v)} sfx="s" ph="60" />
+            </div>
+
+            <Cd st={{ background: "rgba(6,182,212,0.05)", border: "1px solid " + K.cyB }}>
+              <Lb t="DAILY SESSION VIX" />
+              <div style={{ fontSize: 10, fontFamily: M, color: K.tm, opacity: 0.7, lineHeight: 1.5 }}>
+                Date: {todayLocalYMD()} | Saved: {savedCfg.sessionLockedAt ? fmtTime(savedCfg.sessionLockedAt) : "-"}
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <Inp label="Today VIX" value={draft.sessionVix} onChange={v => editCfg("sessionVix", v)} ph="19.8" />
+                <Inp label="Yesterday VIX (auto)" value={draft.sessionVixY} onChange={v => editCfg("sessionVixY", v)} ph="auto" />
+              </div>
+              <div style={{ fontFamily: M, fontSize: 10, color: K.tm, opacity: 0.7 }}>
+                Rule: if last saved sessionDate == yesterday, sessionVixY = last sessionVix.
+              </div>
+            </Cd>
+
+            <button
+              onClick={commitCfg}
+              style={{
+                padding: "14px 0",
+                background: cfgDirty ? K.g : K.a,
+                border: "none",
+                borderRadius: 8,
+                color: cfgDirty ? "#000" : K.w,
+                fontFamily: M,
+                fontSize: 14,
+                fontWeight: 900,
+                letterSpacing: 2,
+                cursor: "pointer",
+                opacity: cfgDirty ? 1 : 0.7
+              }}
+            >
+              {cfgDirty ? "SAVE CONFIG" : "CONFIG SAVED"}
+            </button>
+
+            {cfgMsg && <div style={{ fontSize: 11, fontFamily: M, color: cfgMsg.includes("SAVED") ? K.g : K.r, textAlign: "center" }}>{cfgMsg}</div>}
+          </Cd>
+        </div>
+      )}
+
+      {/* SCAN */}
+      {mode === "SCAN" && (
+        <div className="fade-in" style={{ maxWidth: 1250, margin: "0 auto", padding: "18px 14px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <Cd>
+            <div style={{ display:"flex", justifyContent:"space-between", gap:10, flexWrap:"wrap", alignItems:"center" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                <Lb t="SCANNER / WATCHLIST" />
+                {sessionReady && <Pill text={regime(sessionVix)} col={RC[regime(sessionVix)].col} bg={RC[regime(sessionVix)].bg} />}
+              </div>
+              <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                <span style={{ fontFamily:M, fontSize:10, color:K.tm, opacity:0.75 }}>{scanMsg || "-"}</span>
+                <button onClick={refreshWatch} style={{ padding:"10px 14px", background: scanLoading ? K.sf : K.a, border:"none", borderRadius:8, color: scanLoading ? K.tm : K.w, fontFamily:M, fontSize:11, fontWeight:900, letterSpacing:1, cursor: scanLoading ? "wait" : "pointer" }}>
+                  {scanLoading ? "REFRESHING..." : "REFRESH"}
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              <input
+                value={watchInput}
+                onChange={(e)=>setWatchInput(e.target.value.toUpperCase())}
+                onKeyDown={(e)=>e.key==="Enter" && addToWatch()}
+                placeholder="Add tickers: SPY QQQ IBIT TQQQ..."
+                style={{ flex:1, minWidth:240, padding:"10px 12px", background:K.ib, border:"1px solid "+K.ibr, borderRadius:6, color:K.w, fontFamily:M, fontSize:13, fontWeight:900, outline:"none", letterSpacing:1 }}
+              />
+              <button onClick={addToWatch} style={{ padding:"10px 14px", background:K.g, border:"none", borderRadius:8, color:"#000", fontFamily:M, fontSize:11, fontWeight:900, letterSpacing:1, cursor:"pointer" }}>ADD</button>
+              <button onClick={clearWatch} style={{ padding:"10px 14px", background:"rgba(239,68,68,0.10)", border:"1px solid rgba(239,68,68,0.35)", borderRadius:8, color:K.r, fontFamily:M, fontSize:11, fontWeight:900, letterSpacing:1, cursor:"pointer" }}>CLEAR ALL</button>
+            </div>
+
+            {!sessionReady && (
+              <div style={{ fontFamily:M, fontSize:10, color:K.r }}>Set Today VIX in CONFIG to enable signal detection.</div>
+            )}
+          </Cd>
+
+          <Cd>
+            <Lb t="TICKERS" />
+            {watch.length === 0 ? (
+              <div style={{ fontFamily:M, fontSize:11, color:K.tm, opacity:0.75 }}>No watchlist tickers. Add tickers above.</div>
+            ) : (
+              <div style={{ overflowX:"auto" }}>
+                <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:M, fontSize:11 }}>
+                  <thead>
+                    <tr style={{ color:K.tm, textTransform:"uppercase", letterSpacing:1 }}>
+                      {["Ticker","Spot","RV10","RV20","RV10>RV20","Ref Spot","Drop vs Ref","Signal / σ","Updated","Actions"].map(h=>(
+                        <th key={h} style={{ textAlign:"left", padding:"10px 8px", borderBottom:"1px solid "+K.cb, whiteSpace:"nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {watch.map(w=>{
+                      const spot = w.last?.spot;
+                      const rv10x = w.last?.rv10;
+                      const rv20x = w.last?.rv20;
+                      const expanding = rvExpanding(rv10x, rv20x);
+                      const drop = pctDrop(w.refSpot, spot);
+                      const iv20x = w.last?.iv20 ?? null;
+
+                      const sig = signalTier({
+                        refSpot: w.refSpot,
+                        spot,
+                        iv20: iv20x,
+                        rv10: rv10x,
+                        rv20: rv20x,
+                        vix: sessionReady ? sessionVix : null,
+                      });
+
+                      return (
+                        <tr key={w.ticker} style={{ borderBottom:"1px solid "+K.cb, color:K.td }}>
+                          <td style={{ padding:"10px 8px", fontWeight:900, color:K.w }}>{w.ticker}</td>
+                          <td style={{ padding:"10px 8px" }}>{ok(spot) ? "$"+spot.toFixed(2) : (w.last?.spotError ? <span style={{color:K.r,fontSize:9}}>ERR</span> : "-")}</td>
+                          <td style={{ padding:"10px 8px" }}>{ok(rv10x) ? (rv10x*100).toFixed(2)+"%" : "-"}</td>
+                          <td style={{ padding:"10px 8px" }}>{ok(rv20x) ? (rv20x*100).toFixed(2)+"%" : "-"}</td>
+                          <td style={{ padding:"10px 8px", color: expanding ? K.g : K.tm, fontWeight:900 }}>{ok(rv10x)&&ok(rv20x) ? (expanding ? "YES" : "NO") : "-"}</td>
+                          <td style={{ padding:"10px 8px" }}>
+                            <input
+                              value={ok(w.refSpot) ? String(w.refSpot) : ""}
+                              onChange={(e)=>setWatchRefSpot(w.ticker, e.target.value)}
+                              placeholder="yday close"
+                              style={{ width:110, padding:"7px 8px", background:K.ib, border:"1px solid "+K.ibr, borderRadius:6, color:K.w, fontFamily:M, fontSize:11, outline:"none" }}
+                            />
+                          </td>
+                          <td style={{ padding:"10px 8px", color: ok(drop) && drop < 0 ? K.g : ok(drop) && drop > 0 ? K.r : K.tm, fontWeight:900 }}>
+                            {ok(drop) ? (drop*100).toFixed(2)+"%" : "-"}
+                          </td>
+                          <td style={{ padding:"10px 8px", whiteSpace:"nowrap" }}>
+                            <span style={{ padding:"3px 8px", borderRadius:6, fontWeight:900, color: sig.col, background: sig.bg, border:"1px solid "+sig.br }}>
+                              {sig.label}
+                            </span>
+                            <span style={{ marginLeft:8, fontSize:10, color:K.tm }}>
+                              {ok(sig.ds) ? sig.ds.toFixed(2)+"σ" : ""}
+                            </span>
+                          </td>
+                          <td style={{ padding:"10px 8px", whiteSpace:"nowrap" }}>{fmtTime(w.asOf)}</td>
+                          <td style={{ padding:"10px 8px", whiteSpace:"nowrap" }}>
+                            <button onClick={()=>removeFromWatch(w.ticker)} style={{ padding:"7px 10px", background:"rgba(239,68,68,0.10)", border:"1px solid rgba(239,68,68,0.35)", borderRadius:8, color:K.r, fontFamily:M, fontSize:10, fontWeight:900, cursor:"pointer" }}>REMOVE</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Cd>
+        </div>
+      )}
+
+      {/* NEW */}
+      {mode === "NEW" && (
+        <div className="fade-in" style={{ display: "flex", maxWidth: 1150, margin: "0 auto", padding: "18px 14px", gap: 18, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 390px", minWidth: 320, display: "flex", flexDirection: "column", gap: 13 }}>
+            <div className="pulse-border" style={{ background: "rgba(34,197,94,0.04)", border: "1px solid rgba(34,197,94,0.18)", borderRadius: 10, padding: "14px 17px", display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 10, fontFamily: M, color: K.g, letterSpacing: 1.5, fontWeight: 900 }}>LIVE SNAPSHOT</span>
+                <span style={{ fontSize: 8.5, fontFamily: M, color: K.tm, opacity: 0.6 }}>SPOT + RV</span>
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  type="text"
+                  value={ticker}
+                  onChange={e => setTicker(e.target.value.toUpperCase())}
+                  onKeyDown={e => e.key === "Enter" && handleLoadSnapshot()}
+                  placeholder="SPY, QQQ, IBIT..."
+                  style={{ flex: 1, padding: "10px 12px", background: K.ib, border: "1px solid " + K.ibr, borderRadius: 6, color: K.w, fontFamily: M, fontSize: 15, fontWeight: 900, outline: "none", letterSpacing: 2 }}
+                />
+                <button
+                  onClick={handleLoadSnapshot}
+                  disabled={snapLoading || !ticker.trim()}
+                  style={{ padding: "10px 18px", background: snapLoading ? K.sf : K.g, border: "none", borderRadius: 6, color: snapLoading ? K.tm : "#000", fontFamily: M, fontSize: 11, fontWeight: 900, letterSpacing: 1, cursor: snapLoading ? "wait" : "pointer", opacity: !ticker.trim() || snapLoading ? 0.5 : 1, whiteSpace: "nowrap" }}
+                >
+                  {snapLoading ? "..." : "LOAD"}
+                </button>
+              </div>
+
+              {snapMsg && <div style={{ fontSize: 10, fontFamily: M, color: snapMsg.includes("failed") ? K.r : K.g, opacity: 0.9, wordBreak: "break-word" }}>{snapMsg}</div>}
+            </div>
+
+            <Cd>
+              <Lb t="SESSION VIX (FROM CONFIG)" />
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 160, background: K.sf, borderRadius: 8, padding: "12px 14px", border: "1px solid " + K.cb }}>
+                  <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>TODAY VIX</div>
+                  <div style={{ fontFamily: M, fontSize: 18, fontWeight: 900, color: sessionReady ? K.cy : K.r, marginTop: 6 }}>
+                    {sessionReady ? sessionVix.toFixed(2) : "NOT SET"}
+                  </div>
+                </div>
+                <div style={{ flex: 1, minWidth: 160, background: K.sf, borderRadius: 8, padding: "12px 14px", border: "1px solid " + K.cb }}>
+                  <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>YESTERDAY VIX</div>
+                  <div style={{ fontFamily: M, fontSize: 18, fontWeight: 900, color: sessionReady ? K.cy : K.r, marginTop: 6 }}>
+                    {sessionReady ? sessionVixY.toFixed(2) : "NOT SET"}
+                  </div>
+                </div>
+              </div>
+              {!sessionReady && <div style={{ fontFamily: M, fontSize: 10, color: K.r }}>Go to CONFIG and save Today VIX.</div>}
+            </Cd>
+
+            <Cd>
+              <Lb t="TRADE STRATEGY" />
+              <Tog opts={["CSP","PCS"]} val={structure} set={(v) => { setStructure(v); setRes(null); setErr(null); }} />
+            </Cd>
+
+            <Cd>
+              <Lb t="UNDERLYING" />
+              <Inp label="Spot" value={spot} onChange={setSpot} sfx="$" ph="450.25" />
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+                  <label style={{ fontSize: 9.5, fontFamily: M, color: K.tm, letterSpacing: 1.2, textTransform: "uppercase" }}>Expiry</label>
+                  <input
+                    type="date"
+                    value={expiry}
+                    min={todayLocalYMD()}
+                    onChange={(e) => handleExpiryChange(e.target.value)}
+                    style={{ width: "100%", padding: "10px 12px", boxSizing: "border-box", background: K.ib, border: "1px solid " + K.ibr, borderRadius: 6, color: K.tx, fontFamily: M, fontSize: 14, outline: "none" }}
+                  />
+                </div>
+                <div style={{ width: 90 }}>
+                  <Inp label="DTE" value={dte} onChange={() => {}} sfx="d" readOnly={true} />
+                </div>
+              </div>
+            </Cd>
+
+            <Cd>
+              <Lb t="VOLATILITY" />
+              <Inp label="Short Strike IV" value={iv} onChange={setIv} sfx="dec" ph="0.25" />
+              <div style={{ display: "flex", gap: 10 }}>
+                <Inp label="RV 10d" value={rv10} onChange={setRv10} sfx="dec" hl={rv10 !== ""} ph="0.18" />
+                <Inp label="RV 20d" value={rv20} onChange={setRv20} sfx="dec" hl={rv20 !== ""} ph="0.16" />
+              </div>
+            </Cd>
+          </div>
+
+          <div style={{ flex: "1 1 520px", minWidth: 320, display: "flex", flexDirection: "column", gap: 13 }}>
+            <Cd st={{ border: "1px solid " + (rec ? K.cyB : K.cb), background: rec ? K.cyD : K.card }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Lb t={"RECOMMENDATION (" + structure + ")"} />
+                  {rec && <Pill text={rec.rg} col={RC[rec.rg].col} bg={RC[rec.rg].bg} />}
+                </div>
+                <div style={{ fontFamily: M, fontSize: 10, color: K.tm, opacity: 0.7 }}>
+                  VIX {sessionReady ? sessionVix.toFixed(2) : "NA"} | VIXy {sessionReady ? sessionVixY.toFixed(2) : "NA"}
+                </div>
+              </div>
+
+              {!rec ? (
+                <div style={{ fontFamily: M, fontSize: 11, color: K.tm, opacity: 0.8 }}>
+                  {sessionReady ? "Enter Spot, Expiry, DTE, and IV." : "Set today's VIX in CONFIG first."}
+                </div>
+              ) : rec.pcsErr ? (
+                <div style={{ fontFamily: M, fontSize: 11, color: K.r }}>
+                  PCS width suggestion failed: {rec.pcsErr}{rec.riskCap ? ` | Risk Cap $${Number(rec.riskCap).toLocaleString()}` : ""}
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ flex: 1, minWidth: 170, background: K.sf, border: "1px solid " + K.cb, borderRadius: 8, padding: "12px 14px" }}>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>EXPECTED MOVE (1σ)</div>
+                      <div style={{ fontFamily: M, fontSize: 20, fontWeight: 900, color: K.cy, marginTop: 6 }}>${rec.em.toFixed(2)}</div>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, opacity: 0.6, marginTop: 3 }}>Req Sigma {rec.sig.toFixed(2)}</div>
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 170, background: K.sf, border: "1px solid " + K.cb, borderRadius: 8, padding: "12px 14px" }}>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>RECOMMENDED SHORT STRIKE</div>
+                      <div style={{ fontFamily: M, fontSize: 20, fontWeight: 900, color: K.w, marginTop: 6 }}>${rec.recStrike}</div>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, opacity: 0.6, marginTop: 3 }}>Raw ${rec.rawStrike.toFixed(2)}</div>
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 170, background: K.sf, border: "1px solid " + K.cb, borderRadius: 8, padding: "12px 14px" }}>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>DTE-SCALED RoR MIN</div>
+                      <div style={{ fontFamily: M, fontSize: 20, fontWeight: 900, color: K.y, marginTop: 6 }}>{(rec.rMin * 100).toFixed(2)}%</div>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, opacity: 0.6, marginTop: 3 }}>rMin = r30*(DTE/30)</div>
+                    </div>
+
+                    <div style={{ flex: 1, minWidth: 170, background: K.sf, border: "1px solid " + K.cb, borderRadius: 8, padding: "12px 14px" }}>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>MIN CREDIT REQUIRED</div>
+                      <div style={{ fontFamily: M, fontSize: 20, fontWeight: 900, color: K.y, marginTop: 6 }}>
+                        ${rec.minCredit.toFixed(2)}
+                      </div>
+                      <div style={{ fontFamily: M, fontSize: 9, color: K.tm, opacity: 0.6, marginTop: 3 }}>~${(rec.minCredit * 100).toFixed(0)}/ct</div>
+                    </div>
+                  </div>
+
+                  {structure === "PCS" && (
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 170, background: K.sf, border: "1px solid " + K.cb, borderRadius: 8, padding: "12px 14px" }}>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>WIDTH (SUGGESTED)</div>
+                        <div style={{ fontFamily: M, fontSize: 20, fontWeight: 900, color: K.cy, marginTop: 6 }}>
+                          {rec.effWidth}{rec.autoWidth ? " (auto)" : ""}
+                        </div>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, opacity: 0.6, marginTop: 3 }}>
+                          Risk ${Number(rec.risk).toLocaleString()} / Cap ${Number(rec.riskCap).toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 170, background: K.sf, border: "1px solid " + K.cb, borderRadius: 8, padding: "12px 14px" }}>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>LONG STRIKE (REC)</div>
+                        <div style={{ fontFamily: M, fontSize: 20, fontWeight: 900, color: K.w, marginTop: 6 }}>${rec.longStrike}</div>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, opacity: 0.6, marginTop: 3 }}>Long = Short - Width</div>
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleUseRec}
+                    style={{ padding: "10px 0", background: K.cyD, border: "1px solid " + K.cyB, borderRadius: 8, color: K.cy, fontFamily: M, fontSize: 11, fontWeight: 900, letterSpacing: 1.2, cursor: "pointer" }}
+                  >
+                    APPLY RECOMMENDATION TO INPUTS
+                  </button>
+                </>
+              )}
+            </Cd>
+
+            <Cd>
+              <Lb t="TRADE INPUTS" />
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <Inp label="Short Strike" value={strike} onChange={setStrike} sfx="$" ph={rec ? String(rec.recStrike) : "475"} />
+                {structure === "PCS" && <Inp label="Width" value={width} onChange={setWidth} sfx="$" ph={rec && rec.mode==="PCS" && !rec.pcsErr ? String(rec.effWidth) : "2.5"} />}
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <Inp label="Credit" value={credit} onChange={setCredit} sfx="$" ph={rec ? (rec.minCredit?.toFixed ? rec.minCredit.toFixed(2) : "0.50") : "0.50"} />
+                <Inp label="Contracts" value={contracts} onChange={setContracts} ph="1" />
+              </div>
+
+              <div style={{ background: gate.sev.bg, border: gate.sev.br, borderRadius: 10, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontFamily: M, fontSize: 11, fontWeight: 900, color: gate.sev.col, letterSpacing: 1.5 }}>{gate.title}</div>
+                  <div style={{ fontFamily: M, fontSize: 10, color: K.tm, opacity: 0.75, marginTop: 3 }}>{gate.subtitle}</div>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={handleEval} style={{ padding: "10px 14px", background: K.a, border: "none", borderRadius: 8, color: K.w, fontFamily: M, fontSize: 11, fontWeight: 900, letterSpacing: 1, cursor: "pointer" }}>EVALUATE</button>
+                  <button onClick={saveToDash} style={{ padding: "10px 14px", background: K.g, border: "none", borderRadius: 8, color: "#000", fontFamily: M, fontSize: 11, fontWeight: 900, letterSpacing: 1, cursor: "pointer" }}>ADD TO DASH</button>
+                </div>
+              </div>
+
+              {err && <div style={{ fontFamily: M, fontSize: 11, color: K.r }}>{err}</div>}
+            </Cd>
+          </div>
+        </div>
+      )}
+
+      {/* DASH */}
+      {mode === "DASH" && (
+        <div className="fade-in" style={{ maxWidth: 1250, margin: "0 auto", padding: "18px 14px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <Cd>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Lb t="DASHBOARD TOTALS" />
+                <span style={{ fontFamily: M, fontSize: 10, color: K.tm, opacity: 0.75 }}>Last refresh {dashLiveMsg || "-"}</span>
+              </div>
+              <button
+                onClick={refreshDashboardLive}
+                style={{ padding: "10px 14px", background: dashRefreshing ? K.sf : K.a, border: "none", borderRadius: 8, color: dashRefreshing ? K.tm : K.w, fontFamily: M, fontSize: 11, fontWeight: 900, letterSpacing: 1, cursor: dashRefreshing ? "wait" : "pointer", opacity: dashRefreshing ? 0.7 : 1 }}
+              >
+                {dashRefreshing ? "REFRESHING..." : "REFRESH NOW"}
+              </button>
+            </div>
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {[
+                ["AUM", totals.aum ? "$" + totals.aum.toLocaleString() : "-"],
+                ["CSP COLLATERAL", "$" + totals.cspCollateral.toLocaleString()],
+                ["PCS RISK", "$" + totals.pcsRisk.toLocaleString()],
+                ["DEPLOYED", "$" + totals.deployed.toLocaleString()],
+                ["DEPLOYED %", (totals.deployedPct * 100).toFixed(1) + "%"],
+                ["PREMIUM (ENTRY)", "$" + totals.premiumCollected.toLocaleString()],
+              ].map(([n, v]) => (
+                <div key={n} style={{ flex: 1, minWidth: 170, background: K.sf, borderRadius: 8, padding: "12px 14px", border: "1px solid " + K.cb }}>
+                  <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>{n}</div>
+                  <div style={{ fontFamily: M, fontSize: 18, fontWeight: 900, color: n.includes("DEPLOYED %") ? (totals.deployedPct >= parseFloat(savedCfg.maxDeploymentPct || "0.80") ? K.r : totals.deployedPct >= 0.70 ? K.y : K.g) : K.cy, marginTop: 6 }}>
+                    {v}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Cd>
+
+          <Cd>
+            <Lb t="OPEN POSITIONS" />
+            {positions.length === 0 ? (
+              <div style={{ fontFamily: M, fontSize: 11, color: K.tm, opacity: 0.75 }}>No positions saved.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: M, fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ color: K.tm, textTransform: "uppercase", letterSpacing: 1 }}>
+                      {["Time","Ticker","Type","Expiry","DTE","Strike","Width","Credit","Ct","Live Spot","Live IV","Δ","PoP","Sigma","Status","Capital","Updated","Actions"].map(h => (
+                        <th key={h} style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid " + K.cb, whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {positions.map((p) => {
+                      const live = p.live || {};
+                      const S = ok(live.spot) ? live.spot : p.entry.spot;
+                      const IV = ok(live.shortIv) ? live.shortIv : p.entry.iv;
+                      const D = parseInt(computeDTE(p.identifiers?.expiry || ""), 10);
+
+                      const out = evaluateTrade({
+                        structure: p.str,
+                        spot: String(S),
+                        iv: String(IV),
+                        dte: String(D),
+                        strike: String(p.entry.strike),
+                        width: p.str === "PCS" ? String(p.entry.width) : null,
+                        credit: String(p.entry.credit),
+                        contracts: String(p.entry.contracts || 1),
+                        vix: String(sessionVix),
+                        vixY: String(sessionVixY),
+                        rv10: String(ok(live.rv10) ? live.rv10 : p.entry.rv10),
+                        rv20: String(ok(live.rv20) ? live.rv20 : p.entry.rv20),
+                      }, savedCfg, positions);
+
+                      const st = (out && !out.error)
+                        ? positionStatus({ dte: D, sigma: out.sigmaDistance, reqSigma: out.reqSigma, pop: out.pop, spot: S, breakEven: out.breakEven })
+                        : { label: "AWAITING", color: K.tm, action: "ENTER DATA" };
+
+                      const cap = p.str === "CSP"
+                        ? (Number(p.entry.strike) * 100 * (Number(p.entry.contracts)||1))
+                        : ((Number(p.entry.width) - Number(p.entry.credit)) * 100 * (Number(p.entry.contracts)||1));
+
+                      return (
+                        <tr key={p.id} style={{ borderBottom: "1px solid " + K.cb, color: K.td }}>
+                          <td style={{ padding: "10px 8px", whiteSpace: "nowrap" }}>{fmtDate(p.ts)} {fmtTime(p.ts)}</td>
+                          <td style={{ padding: "10px 8px", fontWeight: 900, color: K.w }}>{p.ticker}</td>
+                          <td style={{ padding: "10px 8px", color: p.str === "CSP" ? K.cy : K.a, fontWeight: 900 }}>{p.str}</td>
+                          <td style={{ padding: "10px 8px", whiteSpace: "nowrap" }}>{p.identifiers?.expiry || "-"}</td>
+                          <td style={{ padding: "10px 8px", color: ok(D) && D <= 0 ? K.r : K.td }}>{ok(D) ? D : "-"}</td>
+                          <td style={{ padding: "10px 8px" }}>${Number(p.entry.strike).toFixed(2)}</td>
+                          <td style={{ padding: "10px 8px" }}>{p.str === "PCS" ? Number(p.entry.width).toFixed(2) : "-"}</td>
+                          <td style={{ padding: "10px 8px" }}>${Number(p.entry.credit).toFixed(2)}</td>
+                          <td style={{ padding: "10px 8px" }}>{p.entry.contracts}</td>
+                          <td style={{ padding: "10px 8px" }}>${Number(S).toFixed(2)}</td>
+                          <td style={{ padding: "10px 8px" }}>{ok(IV) ? (IV*100).toFixed(1) + "%" : "-"}</td>
+                          <td style={{ padding: "10px 8px" }}>{ok(live.shortDelta) ? live.shortDelta.toFixed(2) : "-"}</td>
+                          <td style={{ padding: "10px 8px", color: ok(out?.pop) ? (out.pop >= 0.7 ? K.g : out.pop >= 0.6 ? K.a : K.r) : K.tm }}>
+                            {ok(out?.pop) ? (out.pop*100).toFixed(1) + "%" : "-"}
+                          </td>
+                          <td style={{ padding: "10px 8px", color: ok(out?.sigmaDistance) ? (out.sigmaDistance >= out.reqSigma ? K.g : K.r) : K.tm }}>
+                            {ok(out?.sigmaDistance) ? out.sigmaDistance.toFixed(2) : "-"}
+                          </td>
+                          <td style={{ padding: "10px 8px" }}>
+                            <span style={{ padding: "3px 8px", borderRadius: 6, fontWeight: 900, color: st.color, background: "rgba(255,255,255,0.03)", border: "1px solid " + K.cb }}>
+                              {st.label} · {st.action}
+                            </span>
+                          </td>
+                          <td style={{ padding: "10px 8px", whiteSpace: "nowrap" }}>${Number(cap).toLocaleString()}</td>
+                          <td style={{ padding: "10px 8px", whiteSpace: "nowrap" }}>
+                            MKT {fmtTime(live.asOf)} | OPT {fmtTime(live.optAsOf)}
+                          </td>
+                          <td style={{ padding: "10px 8px", whiteSpace: "nowrap" }}>
+                            <button onClick={() => analyzePos(p)} style={{ padding: "7px 10px", background: K.sf, border: "1px solid " + K.cb, borderRadius: 8, color: K.w, fontFamily: M, fontSize: 10, fontWeight: 900, cursor: "pointer", marginRight: 6 }}>ANALYZE</button>
+                            <button onClick={() => deletePos(p.id)} style={{ padding: "7px 10px", background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 8, color: K.r, fontFamily: M, fontSize: 10, fontWeight: 900, cursor: "pointer" }}>DELETE</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Cd>
+
+          {openPos && (
+            <div
+              onClick={() => setOpenPos(null)}
+              style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999, padding: 12 }}
+            >
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="fade-in"
+                style={{ width: "min(1050px, 100%)", background: K.card, border: "1px solid " + K.cb, borderRadius: 14, padding: 16 }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+                    <span style={{ fontFamily: M, fontSize: 14, fontWeight: 900, color: K.w, letterSpacing: 1.5 }}>{openPos.ticker}</span>
+                    <span style={{ fontFamily: M, fontSize: 12, fontWeight: 900, color: openPos.str === "CSP" ? K.cy : K.a }}>{openPos.str}</span>
+                    <span style={{ fontFamily: M, fontSize: 10, color: K.tm }}>{openPos.identifiers?.expiry}</span>
+                  </div>
+                  <button onClick={() => setOpenPos(null)} style={{ padding: "9px 12px", background: K.sf, border: "1px solid " + K.cb, borderRadius: 10, color: K.w, fontFamily: M, fontSize: 11, fontWeight: 900, cursor: "pointer" }}>CLOSE</button>
+                </div>
+
+                {!openEval ? (
+                  <div style={{ marginTop: 12, fontFamily: M, fontSize: 11, color: K.tm }}>Insufficient live data to evaluate.</div>
+                ) : (
+                  <>
+                    <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 200, background: K.sf, border: "1px solid " + K.cb, borderRadius: 10, padding: 12 }}>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>STATUS</div>
+                        <div style={{ fontFamily: M, fontSize: 18, fontWeight: 900, color: openStatus.color, marginTop: 6 }}>{openStatus.label} · {openStatus.action}</div>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, opacity: 0.6, marginTop: 4 }}>DTE {openEval.dteLive}</div>
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 200, background: K.sf, border: "1px solid " + K.cb, borderRadius: 10, padding: 12 }}>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>LIVE SPOT / IV / Δ</div>
+                        <div style={{ fontFamily: M, fontSize: 18, fontWeight: 900, color: K.w, marginTop: 6 }}>${openEval.spotLive.toFixed(2)}</div>
+                        <div style={{ fontFamily: M, fontSize: 10, color: K.tm, opacity: 0.75, marginTop: 4 }}>
+                          IV {ok(openEval.ivLive) ? (openEval.ivLive*100).toFixed(1) + "%" : "-"} | Δ {ok(openPos.live?.shortDelta) ? openPos.live.shortDelta.toFixed(2) : "-"}
+                        </div>
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 200, background: K.sf, border: "1px solid " + K.cb, borderRadius: 10, padding: 12 }}>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>PoP / SIGMA</div>
+                        <div style={{ fontFamily: M, fontSize: 18, fontWeight: 900, color: ok(openEval.pop) ? (openEval.pop >= 0.7 ? K.g : openEval.pop >= 0.6 ? K.a : K.r) : K.tm, marginTop: 6 }}>
+                          {ok(openEval.pop) ? (openEval.pop*100).toFixed(1) + "%" : "-"}
+                        </div>
+                        <div style={{ fontFamily: M, fontSize: 10, color: K.tm, opacity: 0.75, marginTop: 4 }}>
+                          σ {openEval.sigmaDistance.toFixed(2)} (req {openEval.reqSigma.toFixed(2)})
+                        </div>
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 200, background: K.sf, border: "1px solid " + K.cb, borderRadius: 10, padding: 12 }}>
+                        <div style={{ fontFamily: M, fontSize: 9, color: K.tm, letterSpacing: 1 }}>BREAK-EVEN</div>
+                        <div style={{ fontFamily: M, fontSize: 18, fontWeight: 900, color: K.w, marginTop: 6 }}>${openEval.breakEven.toFixed(2)}</div>
+                        <div style={{ fontFamily: M, fontSize: 10, color: K.tm, opacity: 0.75, marginTop: 4 }}>
+                          Cushion {(openEval.cushionPct*100).toFixed(2)}%
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
