@@ -1,151 +1,350 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>NUVO TA Watchlist</title>
 
 <style>
-body{
-background:#050509;
-color:#d0d0e8;
-font-family:JetBrains Mono,monospace;
-padding:30px;
-}
-
-table{
-width:100%;
-border-collapse:collapse;
-}
-
-th,td{
-padding:12px;
-border-bottom:1px solid #16162e;
-text-align:left;
-}
-
-th{
-color:#8787a8;
-}
-
-.buy{
-color:#00e87a;
-font-weight:700;
-}
-
-.watch{
-color:#f0a020;
-font-weight:700;
-}
-
-.none{
-color:#5a5a7a;
-}
-
+  :root{
+    --bg:#050509; --t:#d0d0e8; --d:#8787a8; --mut:#5a5a7a; --border:#16162e;
+    --g:#00e87a; --y:#f0a020; --r:#ff2d55;
+  }
+  body{
+    background:var(--bg);
+    color:var(--t);
+    font-family: JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    padding:30px;
+    margin:0;
+  }
+  h2{ margin:0 0 14px 0; font-weight:800; letter-spacing:0.5px; }
+  .sub{ color:var(--d); font-size:12px; margin:0 0 18px 0; }
+  .bar{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:0 0 16px 0; }
+  input, select, button{
+    background:#0a0a16;
+    color:var(--t);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:10px 12px;
+    font-family:inherit;
+    font-size:12px;
+    outline:none;
+  }
+  button{
+    cursor:pointer;
+    font-weight:800;
+    letter-spacing:0.3px;
+  }
+  button:disabled{ opacity:0.5; cursor:not-allowed; }
+  .pill{ font-size:12px; color:var(--d); border:1px solid var(--border); padding:8px 10px; border-radius:999px; }
+  table{ width:100%; border-collapse:collapse; }
+  th, td{ padding:12px; border-bottom:1px solid var(--border); text-align:left; font-size:13px; }
+  th{ color:var(--d); font-weight:700; font-size:12px; }
+  .buy{ color:var(--g); font-weight:800; }
+  .watch{ color:var(--y); font-weight:800; }
+  .none{ color:var(--mut); font-weight:700; }
+  .bad{ color:var(--r); font-weight:800; }
+  .mono{ font-variant-numeric: tabular-nums; }
+  .right{ text-align:right; }
+  .small{ font-size:11px; color:var(--d); }
 </style>
 </head>
 
 <body>
+  <h2>NUVO Technical Watchlist</h2>
+  <div class="sub">Real bars → RSI(14), MACD(12,26,9), Williams %R(14). No randomness.</div>
 
-<h2>NUVO Technical Watchlist</h2>
+  <div class="bar">
+    <span class="pill" id="status">idle</span>
 
-<table id="watchlist">
-<thead>
-<tr>
-<th>Ticker</th>
-<th>Price</th>
-<th>RSI</th>
-<th>MACD</th>
-<th>Williams %R</th>
-<th>Signal</th>
-</tr>
-</thead>
+    <label class="small">TF</label>
+    <select id="tf">
+      <option value="1d" selected>1d</option>
+      <option value="1h">1h</option>
+      <option value="30m">30m</option>
+      <option value="15m">15m</option>
+      <option value="5m">5m</option>
+    </select>
 
-<tbody></tbody>
+    <label class="small">Limit</label>
+    <select id="limit">
+      <option value="120" selected>120</option>
+      <option value="200">200</option>
+      <option value="300">300</option>
+    </select>
 
-</table>
+    <label class="small">Tickers</label>
+    <input id="tickers" value="SPY,QQQ,NVDA,AMD,TSLA" style="min-width:260px" />
+
+    <button id="run">RUN</button>
+  </div>
+
+  <table id="watchlist">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th class="right">Price</th>
+        <th class="right">RSI</th>
+        <th class="right">MACD</th>
+        <th class="right">Signal</th>
+        <th class="right">W%R</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
 
 <script>
+/* ============================================================
+   CONFIG — SET THIS ONCE
+   ============================================================ */
+// Point this to the Worker that returns: /bars, /spot, etc.
+// Example from your routes JSON: /bars?ticker=SPY&tf=1d
+const WORKER_BASE = "https://nuvo-proxy.yulgutierrez.workers.dev";
 
-const tickers = ["SPY","QQQ","NVDA","AMD","TSLA"]
-
-async function fetchPrice(ticker){
-
-const res = await fetch(`/api/spot?ticker=${ticker}`, { cache: "no-store" })
-if (!res.ok) return null
-
-const data = await res.json()
-const spot = Number(data.spot ?? data.price ?? data.value)
-return Number.isFinite(spot) ? spot : null
-
+/* ============================================================
+   HTTP
+   ============================================================ */
+async function jget(url){
+  const res = await fetch(url, { cache: "no-store" });
+  if(!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+function u(path, params){
+  const qs = new URLSearchParams(params);
+  return `${WORKER_BASE}${path}?${qs.toString()}`;
 }
 
-function calculateRSI(prices){
+/* ============================================================
+   NUMERIC HELPERS
+   ============================================================ */
+function isFiniteNum(x){ return Number.isFinite(x) && !Number.isNaN(x); }
+function fmt(x, d=2){ return isFiniteNum(x) ? Number(x).toFixed(d) : "—"; }
 
-let gains=0
-let losses=0
+/* ============================================================
+   INDICATORS — STANDARD IMPLEMENTATIONS
+   ============================================================ */
 
-for(let i=1;i<prices.length;i++){
+// Wilder RSI (period=14) on closes
+function rsiWilder(closes, period=14){
+  if(!Array.isArray(closes) || closes.length < period + 1) return null;
 
-const diff=prices[i]-prices[i-1]
+  let gain = 0, loss = 0;
+  for(let i=1;i<=period;i++){
+    const ch = closes[i] - closes[i-1];
+    if(ch >= 0) gain += ch;
+    else loss -= ch;
+  }
+  gain /= period;
+  loss /= period;
 
-if(diff>0)gains+=diff
-else losses+=Math.abs(diff)
+  for(let i=period+1;i<closes.length;i++){
+    const ch = closes[i] - closes[i-1];
+    const g = ch > 0 ? ch : 0;
+    const l = ch < 0 ? -ch : 0;
+    gain = (gain*(period-1) + g) / period;
+    loss = (loss*(period-1) + l) / period;
+  }
 
+  if(loss === 0) return 100;
+  const rs = gain / loss;
+  return 100 - (100/(1+rs));
 }
 
-const rs=gains/(losses||1)
-return 100-(100/(1+rs))
+// EMA for MACD
+function ema(series, period){
+  if(series.length < period) return null;
+  const k = 2/(period+1);
+  let v = 0;
+  // seed with SMA
+  for(let i=0;i<period;i++) v += series[i];
+  v /= period;
 
+  for(let i=period;i<series.length;i++){
+    v = series[i]*k + v*(1-k);
+  }
+  return v;
 }
 
-function signalLogic(rsi,macd,wr){
+// Full MACD (12,26,9): returns latest MACD line and Signal line, Histogram
+function macd(series, fast=12, slow=26, signal=9){
+  if(series.length < slow + signal + 5) return null;
 
-if(rsi<30 && macd>0 && wr<-80){
-return {text:"LONG SETUP",class:"buy"}
+  // Build MACD series by walking and producing EMA-fast and EMA-slow incrementally
+  const kf = 2/(fast+1);
+  const ks = 2/(slow+1);
+
+  // seed fast EMA with SMA(fast), slow EMA with SMA(slow)
+  let ef = series.slice(0, fast).reduce((a,b)=>a+b,0) / fast;
+  let es = series.slice(0, slow).reduce((a,b)=>a+b,0) / slow;
+
+  const macdLine = [];
+
+  // advance from fast to slow-1 to align (ef updates earlier but es not ready until slow)
+  for(let i=fast;i<slow;i++){
+    ef = series[i]*kf + ef*(1-kf);
+  }
+
+  for(let i=slow;i<series.length;i++){
+    ef = series[i]*kf + ef*(1-kf);
+    es = series[i]*ks + es*(1-ks);
+    macdLine.push(ef - es);
+  }
+
+  if(macdLine.length < signal) return null;
+
+  // signal EMA on macdLine
+  let sig = macdLine.slice(0, signal).reduce((a,b)=>a+b,0) / signal;
+  const ks2 = 2/(signal+1);
+  for(let i=signal;i<macdLine.length;i++){
+    sig = macdLine[i]*ks2 + sig*(1-ks2);
+  }
+
+  const lastMacd = macdLine[macdLine.length - 1];
+  const hist = lastMacd - sig;
+  return { macd: lastMacd, signal: sig, hist };
 }
 
-if(rsi<40){
-return {text:"WATCH",class:"watch"}
+// Williams %R (period=14) using highs/lows/closes
+function williamsR(highs, lows, closes, period=14){
+  const n = closes.length;
+  if(n < period) return null;
+  let hh = -Infinity;
+  let ll = Infinity;
+  for(let i=n-period;i<n;i++){
+    if(highs[i] > hh) hh = highs[i];
+    if(lows[i] < ll) ll = lows[i];
+  }
+  const c = closes[n-1];
+  const denom = (hh - ll);
+  if(denom === 0) return 0;
+  return -100 * ((hh - c) / denom); // range [-100, 0]
 }
 
-return {text:"NONE",class:"none"}
-
+/* ============================================================
+   SIGNAL LOGIC — SIMPLE + DETERMINISTIC
+   ============================================================ */
+function signalLogic(rsi, macdObj, wr){
+  // "Go time" (mean reversion long bias): oversold oscillator + MACD improving + W%R deep
+  // Use MACD histogram > 0 as "curling up" proxy (momentum shift).
+  if(isFiniteNum(rsi) && isFiniteNum(wr) && macdObj && isFiniteNum(macdObj.hist)){
+    if(rsi <= 30 && macdObj.hist > 0 && wr <= -80) return { text:"LONG SETUP", class:"buy" };
+    if(rsi <= 40 || wr <= -70) return { text:"WATCH", class:"watch" };
+    if(rsi >= 70 && wr >= -20) return { text:"OVERBOUGHT", class:"bad" };
+  }
+  return { text:"NONE", class:"none" };
 }
 
-async function build(){
-
-const table=document.querySelector("#watchlist tbody")
-
-for(const ticker of tickers){
-
-const price=await fetchPrice(ticker)
-
-const rsi=Math.random()*100
-const macd=(Math.random()*2)-1
-const wr=(Math.random()*-100)
-
-const sig=signalLogic(rsi,macd,wr)
-
-const row=`
-<tr>
-<td>${ticker}</td>
-<td>${price}</td>
-<td>${rsi.toFixed(1)}</td>
-<td>${macd.toFixed(2)}</td>
-<td>${wr.toFixed(1)}</td>
-<td class="${sig.class}">${sig.text}</td>
-</tr>
-`
-
-table.innerHTML+=row
-
+/* ============================================================
+   DATA ADAPTER — NORMALIZE BARS FROM YOUR WORKER
+   ============================================================ */
+function normalizeBars(raw){
+  // Accept common shapes:
+  // 1) { bars:[{t,o,h,l,c,v}, ...] }
+  // 2) { results:[...]} (Polygon-style)
+  // 3) direct array [...]
+  const arr = Array.isArray(raw) ? raw : (raw?.bars || raw?.results || []);
+  const bars = arr.map(b => ({
+    t: b.t ?? b.timestamp ?? b.time ?? b.start ?? b.s,
+    o: Number(b.o ?? b.open),
+    h: Number(b.h ?? b.high),
+    l: Number(b.l ?? b.low),
+    c: Number(b.c ?? b.close),
+    v: Number(b.v ?? b.volume ?? 0),
+  })).filter(x => isFiniteNum(x.c) && isFiniteNum(x.h) && isFiniteNum(x.l));
+  // ensure chronological
+  bars.sort((a,b)=> (a.t ?? 0) - (b.t ?? 0));
+  return bars;
 }
 
+/* ============================================================
+   RENDER
+   ============================================================ */
+const $ = (s)=>document.querySelector(s);
+function setStatus(s){ $("#status").textContent = s; }
+
+function rowHTML(ticker, price, rsi, macdVal, sigText, sigClass, wr){
+  return `
+    <tr>
+      <td class="mono">${ticker}</td>
+      <td class="mono right">${price}</td>
+      <td class="mono right">${rsi}</td>
+      <td class="mono right">${macdVal}</td>
+      <td class="mono right ${sigClass}">${sigText}</td>
+      <td class="mono right">${wr}</td>
+    </tr>
+  `;
 }
 
-build()
+/* ============================================================
+   MAIN
+   ============================================================ */
+async function analyzeTicker(ticker, tf, limit){
+  // Prefer bars for price (last close). Spot is optional fallback.
+  const rawBars = await jget(u("/bars", { ticker, tf, limit }));
+  const bars = normalizeBars(rawBars);
+  if(bars.length < 60){
+    // fallback to spot if bars are thin
+    const spot = await jget(u("/spot", { ticker }));
+    const px = Number(spot?.spot ?? spot?.price ?? spot?.value);
+    return { ticker, price: isFiniteNum(px)?px:null, rsi:null, macd:null, wr:null, sig: {text:"NO DATA", class:"none"} };
+  }
 
+  const highs = bars.map(b=>b.h);
+  const lows  = bars.map(b=>b.l);
+  const closes= bars.map(b=>b.c);
+
+  const price = closes[closes.length-1];
+  const rsi = rsiWilder(closes, 14);
+  const macdObj = macd(closes, 12, 26, 9);
+  const wr = williamsR(highs, lows, closes, 14);
+  const sig = signalLogic(rsi, macdObj, wr);
+
+  return { ticker, price, rsi, macdObj, wr, sig };
+}
+
+async function run(){
+  const btn = $("#run");
+  btn.disabled = true;
+  setStatus("running");
+
+  const tf = $("#tf").value;
+  const limit = $("#limit").value;
+  const tickers = $("#tickers").value
+    .split(",")
+    .map(s=>s.trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, 30);
+
+  const tbody = $("#watchlist tbody");
+  tbody.innerHTML = "";
+
+  try{
+    const results = await Promise.allSettled(tickers.map(t => analyzeTicker(t, tf, limit)));
+
+    const rows = results.map((r, i) => {
+      const t = tickers[i];
+      if(r.status !== "fulfilled"){
+        return rowHTML(t, "—", "—", "—", "ERROR", "bad", "—");
+      }
+      const x = r.value;
+      const price = isFiniteNum(x.price) ? fmt(x.price, 2) : "—";
+      const rsi = isFiniteNum(x.rsi) ? fmt(x.rsi, 1) : "—";
+      const macdVal = (x.macdObj && isFiniteNum(x.macdObj.macd)) ? fmt(x.macdObj.macd, 2) : "—";
+      const wr = isFiniteNum(x.wr) ? fmt(x.wr, 1) : "—";
+      return rowHTML(x.ticker, price, rsi, macdVal, x.sig.text, x.sig.class, wr);
+    }).join("");
+
+    tbody.innerHTML = rows;
+    setStatus(`ok • tf=${tf} • ${tickers.length} tickers`);
+  }catch(e){
+    setStatus(`fail • ${e.message}`);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+$("#run").addEventListener("click", run);
+run();
 </script>
-
 </body>
 </html>
