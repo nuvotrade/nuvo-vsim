@@ -70,10 +70,12 @@ const tickers = ["SPY","QQQ","NVDA","AMD","TSLA"]
 
 async function fetchPrice(ticker){
 
-const res = await fetch(`/api/spot?ticker=${ticker}`)
-const data = await res.json()
+const res = await fetch(`/api/spot?ticker=${ticker}`, { cache: "no-store" })
+if (!res.ok) return null
 
-return data.price
+const data = await res.json()
+const spot = Number(data.spot ?? data.price ?? data.value)
+return Number.isFinite(spot) ? spot : null
 
 }
 
