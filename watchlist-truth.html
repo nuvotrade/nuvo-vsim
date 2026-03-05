@@ -1,350 +1,511 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NUVO TA Watchlist</title>
-
-<style>
-  :root{
-    --bg:#050509; --t:#d0d0e8; --d:#8787a8; --mut:#5a5a7a; --border:#16162e;
-    --g:#00e87a; --y:#f0a020; --r:#ff2d55;
-  }
-  body{
-    background:var(--bg);
-    color:var(--t);
-    font-family: JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    padding:30px;
-    margin:0;
-  }
-  h2{ margin:0 0 14px 0; font-weight:800; letter-spacing:0.5px; }
-  .sub{ color:var(--d); font-size:12px; margin:0 0 18px 0; }
-  .bar{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:0 0 16px 0; }
-  input, select, button{
-    background:#0a0a16;
-    color:var(--t);
-    border:1px solid var(--border);
-    border-radius:10px;
-    padding:10px 12px;
-    font-family:inherit;
-    font-size:12px;
-    outline:none;
-  }
-  button{
-    cursor:pointer;
-    font-weight:800;
-    letter-spacing:0.3px;
-  }
-  button:disabled{ opacity:0.5; cursor:not-allowed; }
-  .pill{ font-size:12px; color:var(--d); border:1px solid var(--border); padding:8px 10px; border-radius:999px; }
-  table{ width:100%; border-collapse:collapse; }
-  th, td{ padding:12px; border-bottom:1px solid var(--border); text-align:left; font-size:13px; }
-  th{ color:var(--d); font-weight:700; font-size:12px; }
-  .buy{ color:var(--g); font-weight:800; }
-  .watch{ color:var(--y); font-weight:800; }
-  .none{ color:var(--mut); font-weight:700; }
-  .bad{ color:var(--r); font-weight:800; }
-  .mono{ font-variant-numeric: tabular-nums; }
-  .right{ text-align:right; }
-  .small{ font-size:11px; color:var(--d); }
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>NUVO VSIM — Execution Truth Watchlist</title>
+  <style>
+    :root{
+      --bg:#050509;--panel:#0b0b14;--card:#0d0d18;--border:#1a1a2f;
+      --text:#d7d7f0;--muted:#8a8ab2;--dim:#5c5c78;
+      --g:#00e87a;--gD:rgba(0,232,122,.10);--gB:rgba(0,232,122,.35);
+      --y:#f0a020;--yD:rgba(240,160,32,.10);--yB:rgba(240,160,32,.35);
+      --r:#ff2d55;--rD:rgba(255,45,85,.10);--rB:rgba(255,45,85,.35);
+      --b:#3098e0;--bD:rgba(48,152,224,.10);--bB:rgba(48,152,224,.35);
+      --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+      --sans:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans)}
+    header{
+      position:sticky;top:0;z-index:50;
+      padding:14px 18px;border-bottom:1px solid var(--border);
+      background:rgba(7,7,20,.86);backdrop-filter:blur(10px);
+      display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;
+    }
+    .brand{font-weight:900;letter-spacing:-.02em}
+    .pill{
+      border:1px solid var(--border);border-radius:8px;
+      padding:6px 10px;font-family:var(--mono);font-size:11px;
+      background:rgba(255,255,255,.03);color:var(--muted);
+      display:inline-flex;gap:8px;align-items:center;white-space:nowrap;
+    }
+    .pill b{color:var(--text)}
+    .btn{
+      border:1px solid var(--border);border-radius:8px;
+      padding:8px 12px;font-family:var(--mono);font-size:11px;font-weight:700;
+      background:rgba(255,255,255,.04);color:var(--text);cursor:pointer;
+    }
+    .btn:hover:not(:disabled){background:rgba(255,255,255,.07)}
+    .btn.primary{background:var(--b);border-color:var(--b);color:#fff}
+    .btn.primary:hover:not(:disabled){background:#2580c8}
+    .btn.green{background:var(--gD);border-color:var(--gB);color:var(--g)}
+    .btn:disabled{opacity:.35;cursor:not-allowed}
+    .wrap{padding:14px 18px}
+    .card{border:1px solid var(--border);border-radius:12px;background:var(--card);overflow:hidden}
+    .meta{
+      padding:10px 12px;border-bottom:1px solid var(--border);
+      display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:10px;color:var(--muted)
+    }
+    table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+    th{
+      text-align:left;padding:12px;color:var(--muted);font-size:9px;letter-spacing:1.4px;
+      text-transform:uppercase;border-bottom:2px solid var(--border);background:var(--card);
+      position:sticky;top:0;white-space:nowrap
+    }
+    td{padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.03);white-space:nowrap}
+    td.num,th.num{text-align:right}
+    tr:hover td{background:rgba(48,152,224,.04)}
+    .tag{
+      font-size:8px;font-weight:900;letter-spacing:1px;
+      padding:2px 6px;border-radius:4px;border:1px solid var(--border);
+      color:var(--muted);margin-left:8px
+    }
+    .tag.A{border-color:var(--bB);color:var(--b);background:var(--bD)}
+    .tag.B{border-color:var(--yB);color:var(--y);background:var(--yD)}
+    .st{
+      display:inline-block;min-width:82px;text-align:center;
+      padding:4px 8px;border-radius:7px;font-size:10px;font-weight:900;letter-spacing:1px;
+      border:1px solid transparent
+    }
+    .st.REVIEW{background:var(--gD);border-color:var(--gB);color:var(--g)}
+    .st.WATCH{background:var(--yD);border-color:var(--yB);color:var(--y)}
+    .st.IGNORE{background:rgba(92,92,120,.10);border-color:rgba(92,92,120,.25);color:var(--dim)}
+    .reason{font-size:9px;color:var(--dim);margin-top:4px}
+    .ok{color:var(--g);font-weight:800}
+    .warn{color:var(--y);font-weight:800}
+    .bad{color:var(--r);font-weight:800}
+    .muted{color:var(--muted)}
+    .mono{font-family:var(--mono)}
+    .modalMask{
+      position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+      background:rgba(0,0,0,.82);padding:18px;z-index:999
+    }
+    .modalMask.open{display:flex}
+    .modal{
+      width:min(980px,96vw);max-height:88vh;overflow:auto;
+      border:1px solid var(--border);border-radius:12px;background:#0a0a14
+    }
+    .modalHead{
+      padding:12px 14px;border-bottom:1px solid var(--border);
+      display:flex;justify-content:space-between;align-items:center;gap:12px
+    }
+    .modalBody{padding:14px}
+    .build-card{border:1px solid var(--border);padding:16px;border-radius:8px;margin-bottom:14px;background:rgba(255,255,255,.02)}
+    .gates{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}
+    .gate{font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;border:1px solid var(--border);letter-spacing:.5px}
+    .gate.p{border-color:var(--g);color:var(--g);background:var(--gD)}
+    .gate.f{border-color:var(--r);color:var(--r);background:var(--rD)}
+    .gate.w{border-color:var(--yB);color:var(--y);background:var(--yD)}
+    .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top:2px solid var(--b);border-radius:50%;animation:sp .7s linear infinite}
+    @keyframes sp{to{transform:rotate(360deg)}}
+    .footer{padding:10px 18px;border-top:1px solid var(--border);font-size:9px;color:var(--dim);text-align:center;font-family:var(--mono);letter-spacing:.5px}
+  </style>
 </head>
-
 <body>
-  <h2>NUVO Technical Watchlist</h2>
-  <div class="sub">Real bars → RSI(14), MACD(12,26,9), Williams %R(14). No randomness.</div>
 
-  <div class="bar">
-    <span class="pill" id="status">idle</span>
-
-    <label class="small">TF</label>
-    <select id="tf">
-      <option value="1d" selected>1d</option>
-      <option value="1h">1h</option>
-      <option value="30m">30m</option>
-      <option value="15m">15m</option>
-      <option value="5m">5m</option>
-    </select>
-
-    <label class="small">Limit</label>
-    <select id="limit">
-      <option value="120" selected>120</option>
-      <option value="200">200</option>
-      <option value="300">300</option>
-    </select>
-
-    <label class="small">Tickers</label>
-    <input id="tickers" value="SPY,QQQ,NVDA,AMD,TSLA" style="min-width:260px" />
-
-    <button id="run">RUN</button>
+<header>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <div class="brand">NUVO VSIM — <span style="color:var(--g)">Execution Truth</span></div>
+    <div class="pill">VIX <b id="vixVal">—</b> <span id="vixReg" class="muted">—</span></div>
+    <div class="pill">OPTIONS <b id="optState">—</b></div>
+    <div class="pill">UPDATED <b id="updatedAt">—</b></div>
   </div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span id="scanMsg" class="mono" style="font-size:10px;color:var(--muted)"></span>
+    <button class="btn" id="btnRefresh">REFRESH</button>
+    <button class="btn primary" id="btnBuildTop5" disabled>BUILD TOP 5</button>
+  </div>
+</header>
 
-  <table id="watchlist">
-    <thead>
-      <tr>
-        <th>Ticker</th>
-        <th class="right">Price</th>
-        <th class="right">RSI</th>
-        <th class="right">MACD</th>
-        <th class="right">Signal</th>
-        <th class="right">W%R</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+<div class="wrap">
+  <div class="card">
+    <div class="meta">
+      <div>UNIVERSE <b id="mTotal">0</b></div>
+      <div>REVIEW <b id="mReview" style="color:var(--g)">0</b></div>
+      <div>WATCH <b id="mWatch" style="color:var(--y)">0</b></div>
+      <div>IGNORE <b id="mIgnore">0</b></div>
+      <div class="muted">Truth: watchlist/build only claims what Worker returns.</div>
+    </div>
+    <div style="overflow:auto">
+      <table>
+        <thead><tr>
+          <th>Ticker</th>
+          <th class="num">Spot</th>
+          <th class="num">5Y Fib Support</th>
+          <th class="num">Dist%</th>
+          <th class="num">20Δ Strike</th>
+          <th class="num">Δ</th>
+          <th class="num">Θ</th>
+          <th class="num">IV</th>
+          <th class="num">Bid/Ask</th>
+          <th class="num">OI</th>
+          <th style="text-align:center">Status</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="modalMask" id="mask">
+  <div class="modal">
+    <div class="modalHead">
+      <div class="mono" style="font-weight:800" id="modalTitle">BUILD</div>
+      <button class="btn" id="btnClose">CLOSE</button>
+    </div>
+    <div class="modalBody" id="modalBody"></div>
+  </div>
+</div>
+
+<div class="footer">NUVO FUND — Execution Truth Watchlist — powered by /v1/watchlist + /v1/build</div>
 
 <script>
-/* ============================================================
-   CONFIG — SET THIS ONCE
-   ============================================================ */
-// Point this to the Worker that returns: /bars, /spot, etc.
-// Example from your routes JSON: /bars?ticker=SPY&tf=1d
-const WORKER_BASE = "https://nuvo-proxy.yulgutierrez.workers.dev";
+/**
+ * Matches nuvo-vsim-truth Worker:
+ *   GET /v1/vix
+ *   GET /v1/watchlist?tickers=...
+ *   GET /v1/build?ticker=...
+ */
 
-/* ============================================================
-   HTTP
-   ============================================================ */
-async function jget(url){
-  const res = await fetch(url, { cache: "no-store" });
-  if(!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
-}
-function u(path, params){
-  const qs = new URLSearchParams(params);
-  return `${WORKER_BASE}${path}?${qs.toString()}`;
-}
+// === SET THIS TO YOUR TRUTH WORKER URL ===
+const TRUTH_BASE = "https://nuvo-vsim-truth.yulgutierrez.workers.dev";
 
-/* ============================================================
-   NUMERIC HELPERS
-   ============================================================ */
-function isFiniteNum(x){ return Number.isFinite(x) && !Number.isNaN(x); }
-function fmt(x, d=2){ return isFiniteNum(x) ? Number(x).toFixed(d) : "—"; }
+// Universe
+const TIER_A = ["SPY","QQQ","TQQQ","IBIT"];
+const TIER_B = ["SOFI","HOOD","RKT","F","SNAP","CLSK","OSCR","HIMS","IREN"];
+const UNI = [...TIER_A, ...TIER_B];
 
-/* ============================================================
-   INDICATORS — STANDARD IMPLEMENTATIONS
-   ============================================================ */
+// Gates (UI mirrors Worker intent)
+const FIB_NEAR = 0.05;
+const DELTA_LO = 0.15, DELTA_HI = 0.25;
+const OI_MIN = 500;
 
-// Wilder RSI (period=14) on closes
-function rsiWilder(closes, period=14){
-  if(!Array.isArray(closes) || closes.length < period + 1) return null;
+// WATCHLIST batching to avoid CF subrequest caps.
+// Tune BATCH down if your Worker does additional calls per ticker.
+const BATCH = 4;
 
-  let gain = 0, loss = 0;
-  for(let i=1;i<=period;i++){
-    const ch = closes[i] - closes[i-1];
-    if(ch >= 0) gain += ch;
-    else loss -= ch;
+// helpers
+const $ = id => document.getElementById(id);
+const ok = v => typeof v === "number" && Number.isFinite(v);
+const f2 = v => ok(v) ? v.toFixed(2) : "—";
+const f3 = v => ok(v) ? v.toFixed(3) : "—";
+const fD = v => ok(v) ? "$" + v.toFixed(2) : "—";
+const fP = (v, d=2) => ok(v) ? (v*100).toFixed(d) + "%" : "—";
+const fI = v => ok(v) ? Math.round(v).toLocaleString() : "—";
+const fT = () => new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+
+let ROWS = [];
+let VIX = null;
+let OPTIONS_LIVE = false;
+
+async function api(path, ms=15000) {
+  const c = new AbortController();
+  const id = setTimeout(() => c.abort(), ms);
+  try {
+    const url = TRUTH_BASE + path + (path.includes("?") ? "&" : "?") + "ts=" + Date.now();
+    const r = await fetch(url, { signal: c.signal, mode: "cors", cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  } finally {
+    clearTimeout(id);
   }
-  gain /= period;
-  loss /= period;
-
-  for(let i=period+1;i<closes.length;i++){
-    const ch = closes[i] - closes[i-1];
-    const g = ch > 0 ? ch : 0;
-    const l = ch < 0 ? -ch : 0;
-    gain = (gain*(period-1) + g) / period;
-    loss = (loss*(period-1) + l) / period;
-  }
-
-  if(loss === 0) return 100;
-  const rs = gain / loss;
-  return 100 - (100/(1+rs));
 }
 
-// EMA for MACD
-function ema(series, period){
-  if(series.length < period) return null;
-  const k = 2/(period+1);
-  let v = 0;
-  // seed with SMA
-  for(let i=0;i<period;i++) v += series[i];
-  v /= period;
+function statusFromRow(r) {
+  const reasons = [];
 
-  for(let i=period;i<series.length;i++){
-    v = series[i]*k + v*(1-k);
-  }
-  return v;
-}
+  const nearFib = ok(r.dist_to_fib) && r.dist_to_fib <= FIB_NEAR;
+  reasons.push(nearFib ? ["fib≤5%","ok"] : ["fib>"+(ok(r.dist_to_fib)?(r.dist_to_fib*100).toFixed(1)+"%":"?"), "warn"]);
 
-// Full MACD (12,26,9): returns latest MACD line and Signal line, Histogram
-function macd(series, fast=12, slow=26, signal=9){
-  if(series.length < slow + signal + 5) return null;
-
-  // Build MACD series by walking and producing EMA-fast and EMA-slow incrementally
-  const kf = 2/(fast+1);
-  const ks = 2/(slow+1);
-
-  // seed fast EMA with SMA(fast), slow EMA with SMA(slow)
-  let ef = series.slice(0, fast).reduce((a,b)=>a+b,0) / fast;
-  let es = series.slice(0, slow).reduce((a,b)=>a+b,0) / slow;
-
-  const macdLine = [];
-
-  // advance from fast to slow-1 to align (ef updates earlier but es not ready until slow)
-  for(let i=fast;i<slow;i++){
-    ef = series[i]*kf + ef*(1-kf);
+  if (!r.options_available) {
+    reasons.push(["options_offline","bad"]);
+    return { status: nearFib ? "WATCH" : "IGNORE", reasons };
   }
 
-  for(let i=slow;i<series.length;i++){
-    ef = series[i]*kf + ef*(1-kf);
-    es = series[i]*ks + es*(1-ks);
-    macdLine.push(ef - es);
+  if (!r.opt20) {
+    reasons.push(["no_20Δ","bad"]);
+    return { status: nearFib ? "WATCH" : "IGNORE", reasons };
   }
 
-  if(macdLine.length < signal) return null;
+  const d = Math.abs(r.opt20.delta ?? NaN);
+  const deltaP = ok(d) && d >= DELTA_LO && d <= DELTA_HI;
+  reasons.push(deltaP ? ["Δ_band","ok"] : ["Δ_out","bad"]);
 
-  // signal EMA on macdLine
-  let sig = macdLine.slice(0, signal).reduce((a,b)=>a+b,0) / signal;
-  const ks2 = 2/(signal+1);
-  for(let i=signal;i<macdLine.length;i++){
-    sig = macdLine[i]*ks2 + sig*(1-ks2);
+  const liqP = ok(r.opt20.oi) && r.opt20.oi >= OI_MIN;
+  reasons.push(liqP ? ["liq","ok"] : ["illiquid","bad"]);
+
+  const sp = r.opt20.spread_pct;
+  if (ok(sp)) reasons.push([("sprd "+(sp*100).toFixed(1)+"%"), "ok"]);
+  else reasons.push(["sprd?","warn"]);
+
+  if (nearFib && deltaP && liqP) return { status: "REVIEW", reasons };
+  const score = [nearFib, deltaP, liqP].filter(Boolean).length;
+  if (score >= 2) return { status: "WATCH", reasons };
+  return { status: "IGNORE", reasons };
+}
+
+function render() {
+  const rv = ROWS.filter(r => r._status === "REVIEW").length;
+  const wt = ROWS.filter(r => r._status === "WATCH").length;
+  const ig = ROWS.filter(r => r._status === "IGNORE").length;
+
+  $("mTotal").textContent = ROWS.length;
+  $("mReview").textContent = rv;
+  $("mWatch").textContent = wt;
+  $("mIgnore").textContent = ig;
+
+  $("vixVal").textContent = ok(VIX) ? VIX.toFixed(2) : "—";
+  $("vixVal").style.color = ok(VIX) ? (VIX >= 17 ? "var(--g)" : "var(--y)") : "var(--muted)";
+  $("vixReg").textContent = ok(VIX) ? (VIX >= 25 ? "(PANIC)" : VIX >= 20 ? "(ELEVATED)" : VIX >= 17 ? "(NORMAL)" : "(LOW)") : "—";
+
+  $("optState").textContent = OPTIONS_LIVE ? "ONLINE" : "OFFLINE";
+  $("optState").style.color = OPTIONS_LIVE ? "var(--g)" : "var(--r)";
+
+  $("updatedAt").textContent = fT();
+  $("btnBuildTop5").disabled = rv === 0;
+
+  const ord = { REVIEW:0, WATCH:1, IGNORE:2 };
+  const sorted = [...ROWS].sort((a,b) => {
+    const d = (ord[a._status]??9) - (ord[b._status]??9);
+    if (d) return d;
+    return (ok(a.dist_to_fib) ? a.dist_to_fib : 9) - (ok(b.dist_to_fib) ? b.dist_to_fib : 9);
+  });
+
+  let html = "";
+  for (const r of sorted) {
+    const fibCell = ok(r.fib_support)
+      ? `${fD(r.fib_support)} <span class="muted" style="font-size:10px">(${ok(r.fib_ratio)?(r.fib_ratio*100).toFixed(1):"—"}%)</span>`
+      : `<span class="muted">—</span>`;
+
+    const distCol = ok(r.dist_to_fib)
+      ? (r.dist_to_fib <= 0.03 ? "ok" : r.dist_to_fib <= 0.05 ? "warn" : "muted")
+      : "muted";
+
+    const ho = r.options_available && r.opt20;
+
+    html += `<tr>
+      <td><b>${r.ticker}</b><span class="tag ${r.tier}">${r.tier==="A"?"CORE":"SAT"}</span></td>
+      <td class="num">${fD(r.spot)}</td>
+      <td class="num">${fibCell}</td>
+      <td class="num"><span class="${distCol}">${fP(r.dist_to_fib)}</span></td>
+      <td class="num">${ho && ok(r.opt20.strike) ? fD(r.opt20.strike) : `<span class="muted">—</span>`}</td>
+      <td class="num">${ho && ok(r.opt20.delta) ? `<span class="${Math.abs(r.opt20.delta)>=DELTA_LO&&Math.abs(r.opt20.delta)<=DELTA_HI?"ok":"bad"}">${f3(r.opt20.delta)}</span>` : `<span class="muted">—</span>`}</td>
+      <td class="num">${ho && ok(r.opt20.theta) ? `<span class="ok">${f3(r.opt20.theta)}</span>` : `<span class="muted">—</span>`}</td>
+      <td class="num">${ho && ok(r.opt20.iv) ? fP(r.opt20.iv,2) : `<span class="muted">—</span>`}</td>
+      <td class="num">${ho && ok(r.opt20.bid) && ok(r.opt20.ask) ? `${f2(r.opt20.bid)} / ${f2(r.opt20.ask)}` : `<span class="muted">—</span>`}</td>
+      <td class="num">${ho && ok(r.opt20.oi) ? `<span class="${r.opt20.oi>=OI_MIN?"":"bad"}">${fI(r.opt20.oi)}</span>` : `<span class="muted">—</span>`}</td>
+      <td style="text-align:center">
+        <span class="st ${r._status}">${r._status}</span>
+        <div class="reason">${r._reasons.map(([t, cls]) => {
+          const c = cls === "ok" ? "ok" : cls === "warn" ? "warn" : "bad";
+          return `<span class="${c}" style="margin-right:8px">${t}</span>`;
+        }).join("")}</div>
+      </td>
+      <td class="num">
+        ${r._status !== "IGNORE"
+          ? `<button class="btn green" style="padding:5px 10px;font-size:10px" onclick="runBuild('${r.ticker}')">BUILD</button>`
+          : `<button class="btn" style="padding:5px 10px;font-size:10px" disabled>BUILD</button>`}
+      </td>
+    </tr>`;
   }
 
-  const lastMacd = macdLine[macdLine.length - 1];
-  const hist = lastMacd - sig;
-  return { macd: lastMacd, signal: sig, hist };
+  $("tbody").innerHTML = html || `<tr><td colspan="12" class="muted" style="text-align:center;padding:40px">Click REFRESH</td></tr>`;
 }
 
-// Williams %R (period=14) using highs/lows/closes
-function williamsR(highs, lows, closes, period=14){
-  const n = closes.length;
-  if(n < period) return null;
-  let hh = -Infinity;
-  let ll = Infinity;
-  for(let i=n-period;i<n;i++){
-    if(highs[i] > hh) hh = highs[i];
-    if(lows[i] < ll) ll = lows[i];
+async function refreshAll() {
+  $("btnRefresh").disabled = true;
+  $("btnBuildTop5").disabled = true;
+  $("scanMsg").innerHTML = `<span class="spin"></span> Scanning in batches...`;
+
+  try {
+    // Build batches
+    const batches = [];
+    for (let i = 0; i < UNI.length; i += BATCH) batches.push(UNI.slice(i, i + BATCH));
+
+    let allRows = [];
+    let vixData = null;
+    let optLive = false;
+
+    // Sequential batches to reduce concurrent Worker invocations (safer for rate limits).
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      $("scanMsg").innerHTML = `<span class="spin"></span> Batch ${i+1}/${batches.length}: ${batch.join(", ")}...`;
+
+      const d = await api(`/v1/watchlist?tickers=${encodeURIComponent(batch.join(","))}`, 25000);
+
+      if (!vixData && d?.vix) vixData = d.vix;
+      if (d?.options_available) optLive = true;
+
+      const rows = Array.isArray(d?.rows) ? d.rows : [];
+      allRows = allRows.concat(rows);
+    }
+
+    VIX = ok(vixData?.value) ? vixData.value : null;
+    OPTIONS_LIVE = optLive;
+
+    ROWS = allRows.map(r => {
+      const s = statusFromRow(r);
+      return { ...r, _status: s.status, _reasons: s.reasons };
+    });
+
+    render();
+    $("scanMsg").textContent = "";
+  } catch (e) {
+    $("scanMsg").textContent = "FAILED: " + String(e.message || e);
+    ROWS = [];
+    VIX = null;
+    OPTIONS_LIVE = false;
+    render();
+  } finally {
+    $("btnRefresh").disabled = false;
   }
-  const c = closes[n-1];
-  const denom = (hh - ll);
-  if(denom === 0) return 0;
-  return -100 * ((hh - c) / denom); // range [-100, 0]
 }
 
-/* ============================================================
-   SIGNAL LOGIC — SIMPLE + DETERMINISTIC
-   ============================================================ */
-function signalLogic(rsi, macdObj, wr){
-  // "Go time" (mean reversion long bias): oversold oscillator + MACD improving + W%R deep
-  // Use MACD histogram > 0 as "curling up" proxy (momentum shift).
-  if(isFiniteNum(rsi) && isFiniteNum(wr) && macdObj && isFiniteNum(macdObj.hist)){
-    if(rsi <= 30 && macdObj.hist > 0 && wr <= -80) return { text:"LONG SETUP", class:"buy" };
-    if(rsi <= 40 || wr <= -70) return { text:"WATCH", class:"watch" };
-    if(rsi >= 70 && wr >= -20) return { text:"OVERBOUGHT", class:"bad" };
+async function runBuild(ticker) {
+  $("modalTitle").textContent = "BUILD: " + ticker;
+  $("modalBody").innerHTML = `<div class="build-card"><span class="spin"></span> Loading /v1/build...</div>`;
+  $("mask").classList.add("open");
+
+  try {
+    const d = await api(`/v1/build?ticker=${encodeURIComponent(ticker)}`, 30000);
+
+    if (d?.error) {
+      $("modalBody").innerHTML = `<div class="build-card">
+        <div class="bad" style="font-weight:900">ERROR: ${d.error}</div>
+        <div class="muted mono" style="margin-top:8px">${d.note || ""}</div>
+        <div class="muted mono" style="margin-top:8px">Spot: ${fD(d.spot)} | VIX: ${ok(d?.vix?.value)?d.vix.value.toFixed(2):"—"}</div>
+      </div>`;
+      return;
+    }
+
+    const gates = d?.gates || {};
+    const gateLine = (key, label) => {
+      const g = gates[key];
+      const pass = !!g?.pass;
+      return `<span class="gate ${pass ? "p" : "f"}">${label}: ${pass ? "PASS" : "FAIL"}</span>`;
+    };
+
+    const sug = d?.suggested_fix;
+    const sugHtml = sug ? `<div style="margin-top:12px;padding:12px;border:1px solid var(--yB);background:var(--yD);border-radius:8px">
+        <div class="warn" style="font-weight:900">SUGGESTED FIX</div>
+        <div class="mono" style="font-size:11px;margin-top:6px">
+          Target price: ${fD(sug.target_price)}<br/>
+          Next strike: ${sug.next_strike ? fD(sug.next_strike) : "—"}<br/>
+          Reason: ${sug.reason || ""}
+        </div>
+      </div>` : "";
+
+    $("modalBody").innerHTML = `
+      <div class="build-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+          <div class="mono" style="font-weight:900;font-size:14px">${d.ticker} <span class="tag ${d.tier}">${d.tier==="A"?"CORE":"SAT"}</span></div>
+          <div class="muted mono" style="font-size:11px">${d.timestamp || ""}</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px" class="mono">
+          <div><div class="muted" style="font-size:10px">SPOT</div><div style="font-weight:900">${fD(d.spot)}</div></div>
+          <div><div class="muted" style="font-size:10px">VIX</div><div style="font-weight:900">${ok(d?.vix?.value)?d.vix.value.toFixed(2):"—"} <span class="muted">${d?.vix?.regime?`(${d.vix.regime})`:""}</span></div></div>
+          <div><div class="muted" style="font-size:10px">EXPIRY</div><div style="font-weight:900">${d?.expiry?.date || "—"} <span class="muted">(${d?.expiry?.dte ?? "—"} DTE)</span></div></div>
+          <div><div class="muted" style="font-size:10px">FIB SUPPORT</div><div style="font-weight:900">${fD(d?.fib?.support)}</div></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px" class="mono">
+          <div><div class="muted" style="font-size:10px">K</div><div style="font-weight:900">${fD(d?.opt?.strike)}</div></div>
+          <div><div class="muted" style="font-size:10px">DELTA</div><div style="font-weight:900">${ok(d?.opt?.delta)?d.opt.delta.toFixed(3):"—"}</div></div>
+          <div><div class="muted" style="font-size:10px">IV</div><div style="font-weight:900">${ok(d?.opt?.iv)?(d.opt.iv*100).toFixed(2)+"%":"—"}</div></div>
+          <div><div class="muted" style="font-size:10px">BID/ASK</div><div style="font-weight:900">${ok(d?.opt?.bid)&&ok(d?.opt?.ask)?`${d.opt.bid.toFixed(2)} / ${d.opt.ask.toFixed(2)}`:"—"}</div></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px" class="mono">
+          <div><div class="muted" style="font-size:10px">EM</div><div style="font-weight:900">${fD(d?.math?.em)}</div></div>
+          <div><div class="muted" style="font-size:10px">LOWER EM</div><div style="font-weight:900">${fD(d?.math?.lower_em)}</div></div>
+          <div><div class="muted" style="font-size:10px">SIGMA</div><div style="font-weight:900">${ok(d?.math?.sigma_actual)?d.math.sigma_actual.toFixed(2):"—"}</div></div>
+          <div><div class="muted" style="font-size:10px">MIN CREDIT</div><div style="font-weight:900">${ok(d?.math?.min_credit)?"$"+d.math.min_credit.toFixed(2):"—"}</div></div>
+        </div>
+
+        <div class="gates" style="margin-top:12px">
+          ${gateLine("dte_5_21","DTE 5–21")}
+          ${gateLine("delta_0_15_0_25","Δ 0.15–0.25")}
+          ${gateLine("liquidity","LIQ")}
+          ${gateLine("spread","SPREAD")}
+          ${gateLine("strike_below_fib","K ≤ FIB")}
+          ${gateLine("strike_below_lowerEM","K ≤ LOWER EM")}
+          ${gateLine("gate4_structural","GATE 4")}
+        </div>
+
+        ${sugHtml}
+
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)" class="mono">
+          <div class="muted" style="font-size:10px;margin-bottom:6px">COMPRESSION (Worker)</div>
+          <div style="font-size:11px">
+            RSI14: ${d?.compression?.rsi14 ? `${d.compression.rsi14.value} (${d.compression.rsi14.tag})` : "—"}<br/>
+            Williams %R: ${d?.compression?.williamsR ? `${d.compression.williamsR.value} (${d.compression.williamsR.tag})` : "—"}<br/>
+            MACD: ${d?.compression?.macd?.tag || "—"}
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    $("modalBody").innerHTML = `<div class="build-card"><div class="bad" style="font-weight:900">FAILED</div><div class="muted mono" style="margin-top:8px">${String(e.message || e)}</div></div>`;
   }
-  return { text:"NONE", class:"none" };
 }
 
-/* ============================================================
-   DATA ADAPTER — NORMALIZE BARS FROM YOUR WORKER
-   ============================================================ */
-function normalizeBars(raw){
-  // Accept common shapes:
-  // 1) { bars:[{t,o,h,l,c,v}, ...] }
-  // 2) { results:[...]} (Polygon-style)
-  // 3) direct array [...]
-  const arr = Array.isArray(raw) ? raw : (raw?.bars || raw?.results || []);
-  const bars = arr.map(b => ({
-    t: b.t ?? b.timestamp ?? b.time ?? b.start ?? b.s,
-    o: Number(b.o ?? b.open),
-    h: Number(b.h ?? b.high),
-    l: Number(b.l ?? b.low),
-    c: Number(b.c ?? b.close),
-    v: Number(b.v ?? b.volume ?? 0),
-  })).filter(x => isFiniteNum(x.c) && isFiniteNum(x.h) && isFiniteNum(x.l));
-  // ensure chronological
-  bars.sort((a,b)=> (a.t ?? 0) - (b.t ?? 0));
-  return bars;
-}
+async function buildTop5() {
+  const picks = ROWS.filter(r => r._status !== "IGNORE").slice(0, 5);
+  if (!picks.length) return;
 
-/* ============================================================
-   RENDER
-   ============================================================ */
-const $ = (s)=>document.querySelector(s);
-function setStatus(s){ $("#status").textContent = s; }
+  $("modalTitle").textContent = "BUILD TOP 5";
+  $("modalBody").innerHTML = `<div class="build-card"><span class="spin"></span> Loading...</div>`;
+  $("mask").classList.add("open");
 
-function rowHTML(ticker, price, rsi, macdVal, sigText, sigClass, wr){
-  return `
-    <tr>
-      <td class="mono">${ticker}</td>
-      <td class="mono right">${price}</td>
-      <td class="mono right">${rsi}</td>
-      <td class="mono right">${macdVal}</td>
-      <td class="mono right ${sigClass}">${sigText}</td>
-      <td class="mono right">${wr}</td>
-    </tr>
-  `;
-}
-
-/* ============================================================
-   MAIN
-   ============================================================ */
-async function analyzeTicker(ticker, tf, limit){
-  // Prefer bars for price (last close). Spot is optional fallback.
-  const rawBars = await jget(u("/bars", { ticker, tf, limit }));
-  const bars = normalizeBars(rawBars);
-  if(bars.length < 60){
-    // fallback to spot if bars are thin
-    const spot = await jget(u("/spot", { ticker }));
-    const px = Number(spot?.spot ?? spot?.price ?? spot?.value);
-    return { ticker, price: isFiniteNum(px)?px:null, rsi:null, macd:null, wr:null, sig: {text:"NO DATA", class:"none"} };
-  }
-
-  const highs = bars.map(b=>b.h);
-  const lows  = bars.map(b=>b.l);
-  const closes= bars.map(b=>b.c);
-
-  const price = closes[closes.length-1];
-  const rsi = rsiWilder(closes, 14);
-  const macdObj = macd(closes, 12, 26, 9);
-  const wr = williamsR(highs, lows, closes, 14);
-  const sig = signalLogic(rsi, macdObj, wr);
-
-  return { ticker, price, rsi, macdObj, wr, sig };
-}
-
-async function run(){
-  const btn = $("#run");
-  btn.disabled = true;
-  setStatus("running");
-
-  const tf = $("#tf").value;
-  const limit = $("#limit").value;
-  const tickers = $("#tickers").value
-    .split(",")
-    .map(s=>s.trim().toUpperCase())
-    .filter(Boolean)
-    .slice(0, 30);
-
-  const tbody = $("#watchlist tbody");
-  tbody.innerHTML = "";
-
-  try{
-    const results = await Promise.allSettled(tickers.map(t => analyzeTicker(t, tf, limit)));
-
-    const rows = results.map((r, i) => {
-      const t = tickers[i];
-      if(r.status !== "fulfilled"){
-        return rowHTML(t, "—", "—", "—", "ERROR", "bad", "—");
+  let html = "";
+  for (const row of picks) {
+    try {
+      const d = await api(`/v1/build?ticker=${encodeURIComponent(row.ticker)}`, 30000);
+      if (d?.error) {
+        html += `<div class="build-card" style="border-left:3px solid var(--r)">
+          <div class="mono" style="font-weight:900">${row.ticker}</div>
+          <div class="bad mono" style="margin-top:6px;font-size:11px">ERROR: ${d.error}</div>
+        </div>`;
+        continue;
       }
-      const x = r.value;
-      const price = isFiniteNum(x.price) ? fmt(x.price, 2) : "—";
-      const rsi = isFiniteNum(x.rsi) ? fmt(x.rsi, 1) : "—";
-      const macdVal = (x.macdObj && isFiniteNum(x.macdObj.macd)) ? fmt(x.macdObj.macd, 2) : "—";
-      const wr = isFiniteNum(x.wr) ? fmt(x.wr, 1) : "—";
-      return rowHTML(x.ticker, price, rsi, macdVal, x.sig.text, x.sig.class, wr);
-    }).join("");
-
-    tbody.innerHTML = rows;
-    setStatus(`ok • tf=${tf} • ${tickers.length} tickers`);
-  }catch(e){
-    setStatus(`fail • ${e.message}`);
-  }finally{
-    btn.disabled = false;
+      const pass = !!d?.gates?.gate4_structural?.pass;
+      html += `<div class="build-card" style="border-left:3px solid ${pass?"var(--g)":"var(--y)"}">
+        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap" class="mono">
+          <div style="font-weight:900">${d.ticker} <span class="tag ${d.tier}" style="font-size:9px">${d.tier==="A"?"CORE":"SAT"}</span></div>
+          <div class="muted" style="font-size:10px">${fD(d.spot)} | K ${fD(d?.opt?.strike)} | DTE ${d?.expiry?.dte ?? "—"}</div>
+        </div>
+        <div class="mono" style="font-size:11px;margin-top:8px">
+          EM ${fD(d?.math?.em)} | Lower ${fD(d?.math?.lower_em)} | Sigma ${ok(d?.math?.sigma_actual)?d.math.sigma_actual.toFixed(2):"—"} | MinCredit ${ok(d?.math?.min_credit)?"$"+d.math.min_credit.toFixed(2):"—"}
+        </div>
+        <div class="gates" style="margin-top:10px">
+          <span class="gate ${d?.gates?.strike_below_fib?.pass?"p":"f"}">K≤FIB</span>
+          <span class="gate ${d?.gates?.strike_below_lowerEM?.pass?"p":"f"}">K≤LOWER</span>
+          <span class="gate ${pass?"p":"f"}">GATE4</span>
+        </div>
+        ${d?.suggested_fix ? `<div class="mono warn" style="margin-top:8px;font-size:11px">Fix → ${d.suggested_fix.next_strike ? fD(d.suggested_fix.next_strike) : "—"}</div>` : `<div class="mono ok" style="margin-top:8px;font-size:11px">READY</div>`}
+      </div>`;
+    } catch (e) {
+      html += `<div class="build-card" style="border-left:3px solid var(--r)">
+        <div class="mono" style="font-weight:900">${row.ticker}</div>
+        <div class="bad mono" style="margin-top:6px;font-size:11px">${String(e.message||e)}</div>
+      </div>`;
+    }
   }
+
+  $("modalBody").innerHTML = html || `<div class="build-card" class="muted">No rows.</div>`;
 }
 
-$("#run").addEventListener("click", run);
-run();
+// events
+$("btnRefresh").addEventListener("click", refreshAll);
+$("btnBuildTop5").addEventListener("click", buildTop5);
+$("btnClose").addEventListener("click", () => $("mask").classList.remove("open"));
+
+// boot
+window.addEventListener("load", () => setTimeout(refreshAll, 250));
 </script>
+
 </body>
 </html>
