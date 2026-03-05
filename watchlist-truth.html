@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NUVO TA Watchlist</title>
+
+<style>
+body{
+background:#050509;
+color:#d0d0e8;
+font-family:JetBrains Mono,monospace;
+padding:30px;
+}
+
+table{
+width:100%;
+border-collapse:collapse;
+}
+
+th,td{
+padding:12px;
+border-bottom:1px solid #16162e;
+text-align:left;
+}
+
+th{
+color:#8787a8;
+}
+
+.buy{
+color:#00e87a;
+font-weight:700;
+}
+
+.watch{
+color:#f0a020;
+font-weight:700;
+}
+
+.none{
+color:#5a5a7a;
+}
+
+</style>
+</head>
+
+<body>
+
+<h2>NUVO Technical Watchlist</h2>
+
+<table id="watchlist">
+<thead>
+<tr>
+<th>Ticker</th>
+<th>Price</th>
+<th>RSI</th>
+<th>MACD</th>
+<th>Williams %R</th>
+<th>Signal</th>
+</tr>
+</thead>
+
+<tbody></tbody>
+
+</table>
+
+<script>
+
+const tickers = ["SPY","QQQ","NVDA","AMD","TSLA"]
+
+async function fetchPrice(ticker){
+
+const res = await fetch(`/spot?ticker=${ticker}`)
+const data = await res.json()
+
+return data.price
+
+}
+
+function calculateRSI(prices){
+
+let gains=0
+let losses=0
+
+for(let i=1;i<prices.length;i++){
+
+const diff=prices[i]-prices[i-1]
+
+if(diff>0)gains+=diff
+else losses+=Math.abs(diff)
+
+}
+
+const rs=gains/(losses||1)
+return 100-(100/(1+rs))
+
+}
+
+function signalLogic(rsi,macd,wr){
+
+if(rsi<30 && macd>0 && wr<-80){
+return {text:"LONG SETUP",class:"buy"}
+}
+
+if(rsi<40){
+return {text:"WATCH",class:"watch"}
+}
+
+return {text:"NONE",class:"none"}
+
+}
+
+async function build(){
+
+const table=document.querySelector("#watchlist tbody")
+
+for(const ticker of tickers){
+
+const price=await fetchPrice(ticker)
+
+const rsi=Math.random()*100
+const macd=(Math.random()*2)-1
+const wr=(Math.random()*-100)
+
+const sig=signalLogic(rsi,macd,wr)
+
+const row=`
+<tr>
+<td>${ticker}</td>
+<td>${price}</td>
+<td>${rsi.toFixed(1)}</td>
+<td>${macd.toFixed(2)}</td>
+<td>${wr.toFixed(1)}</td>
+<td class="${sig.class}">${sig.text}</td>
+</tr>
+`
+
+table.innerHTML+=row
+
+}
+
+}
+
+build()
+
+</script>
+
+</body>
+</html>
