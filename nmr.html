@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NUVO NMR TERMINAL</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&display=swap');
+
+:root{
+  --bg:#000000;
+  --fg:#ffffff;
+  --mut:#666666;
+  --line:#1a1a1a;
+  --g:#00ff7f;
+  --o:#ff9f1c;
+  --r:#ff3b30;
+  --b:#007aff;
+  --p:#080808;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--bg);
+  color:var(--fg);
+  font-family:"JetBrains Mono", monospace;
+  margin:0;
+  padding:20px;
+  font-size:12px;
+  letter-spacing:-0.2px;
+  overflow-x:hidden;
+}
+.container{max-width:1100px;margin:auto}
+
+.top-bar{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  border-bottom:2px solid var(--line);
+  padding-bottom:20px;
+  margin-bottom:24px;
+}
+.brand h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-1.5px}
+.brand .tag{color:var(--fg);font-size:9px;font-weight:800;text-transform:uppercase;margin-top:4px;letter-spacing:1.2px}
+
+.controls{
+  flex-grow:1;
+  text-align:right;
+  display:flex;
+  flex-direction:column;
+  align-items:flex-end;
+}
+.search-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-bottom:10px;
+  width:100%;
+  justify-content:flex-end;
+}
+input{
+  background:#000;
+  border:1px solid var(--line);
+  color:var(--g);
+  padding:8px 12px;
+  font-family:inherit;
+  font-weight:800;
+  width:90px;
+  outline:none;
+  font-size:13px;
+}
+button{
+  background:#fff;
+  color:#000;
+  border:none;
+  padding:8px 16px;
+  font-family:inherit;
+  font-weight:800;
+  cursor:pointer;
+  text-transform:uppercase;
+  font-size:11px;
+}
+button.alt-btn{
+  background:#1a1a1a;
+  color:#fff;
+  border:1px solid var(--line);
+}
+button:hover{opacity:.8}
+
+.top-spot{
+  font-size:22px;
+  font-weight:800;
+  border-left:1px solid var(--line);
+  padding-left:15px;
+  margin-left:15px;
+  text-align:right;
+  min-width:120px;
+}
+.top-spot-label{
+  font-size:8px;
+  color:var(--mut);
+  text-transform:uppercase;
+  display:block;
+  margin-bottom:2px;
+  letter-spacing:.5px;
+}
+
+.anchors{
+  font-size:12px;
+  font-weight:800;
+  text-transform:uppercase;
+  color:#fff;
+  margin-top:4px;
+  letter-spacing:.1px;
+}
+
+.directive-box{
+  border:1px solid var(--line);
+  padding:20px 25px;
+  margin-bottom:20px;
+  display:grid;
+  grid-template-columns:1.2fr 1fr 1fr;
+  gap:20px;
+  align-items:center;
+  background:#050505;
+}
+.label{
+  font-size:8.5px;
+  font-weight:800;
+  color:var(--mut);
+  text-transform:uppercase;
+  letter-spacing:1.2px;
+  margin-bottom:8px;
+}
+.badge,.bid-zone-val{
+  font-size:18px;
+  font-weight:800;
+  letter-spacing:-0.5px;
+}
+.bid-zone-display{
+  text-align:center;
+  border-left:1px solid var(--line);
+  border-right:1px solid var(--line);
+  padding:0 20px;
+}
+.trend-display{text-align:right}
+
+.dashboard-grid{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:16px;
+  margin-bottom:20px;
+}
+.panel{
+  border:1px solid var(--line);
+  padding:16px;
+  background:var(--p);
+  display:flex;
+  flex-direction:column;
+}
+.panel h3{
+  margin:0 0 12px 0;
+  font-size:10px;
+  color:var(--mut);
+  border-bottom:1px solid var(--line);
+  padding-bottom:6px;
+  text-transform:uppercase;
+  font-weight:800;
+  display:flex;
+  justify-content:space-between;
+}
+.data-row{
+  display:flex;
+  justify-content:space-between;
+  padding:8px 0;
+  border-bottom:1px dashed #161616;
+  font-size:12.5px;
+  align-items:center;
+}
+.val{font-weight:800;font-size:14px}
+.sub-val-label{
+  font-size:8.5px;
+  color:var(--mut);
+  margin-top:-8px;
+  margin-bottom:6px;
+  font-weight:600;
+  text-transform:uppercase;
+  letter-spacing:.5px;
+}
+
+.exec-box{
+  border:1px solid var(--line);
+  padding:25px;
+  margin-bottom:20px;
+  background:#050505;
+  position:relative;
+}
+.exec-box h3{
+  position:absolute;
+  top:-10px;
+  left:20px;
+  background:#000;
+  padding:0 10px;
+  font-size:10px;
+  color:var(--mut);
+  text-transform:uppercase;
+  letter-spacing:2px;
+}
+.exec-status{
+  font-size:18px;
+  font-weight:800;
+  margin-bottom:15px;
+  display:block;
+  border-bottom:1px solid var(--line);
+  padding-bottom:8px;
+  overflow:hidden;
+}
+.exec-narrative{
+  font-size:13.5px;
+  color:#fff;
+  line-height:1.5;
+  margin-bottom:20px;
+  max-width:950px;
+  font-weight:400;
+}
+.exec-strategy-label{
+  font-size:10px;
+  font-weight:800;
+  color:var(--mut);
+  text-transform:uppercase;
+  letter-spacing:1px;
+  margin-bottom:12px;
+  display:block;
+}
+.exec-bullets{list-style:none;padding:0;margin:0}
+.exec-bullets li{
+  font-size:12.5px;
+  color:#fff;
+  margin-bottom:10px;
+  display:flex;
+  align-items:flex-start;
+}
+.exec-bullets li::before{
+  content:"▶";
+  color:var(--mut);
+  font-size:9px;
+  margin-right:12px;
+  margin-top:3px;
+}
+.exec-bullets li.header-li{
+  color:var(--mut);
+  font-size:10px;
+  font-weight:800;
+  text-transform:uppercase;
+  margin-top:12px;
+  margin-bottom:8px;
+  letter-spacing:1px;
+}
+.exec-bullets li.header-li::before{display:none}
+.exec-val-b{font-weight:800;margin-left:auto}
+
+.red{color:var(--r)!important}
+.green{color:var(--g)!important}
+.orange{color:var(--o)!important}
+.blue{color:var(--b)!important}
+.white{color:#ffffff!important}
+
+#loader{
+  display:none;
+  position:fixed;
+  top:0;
+  left:0;
+  width:100%;
+  height:2px;
+  background:var(--o);
+  z-index:1000;
+}
+
+@media print{
+  body{background:#fff!important;color:#000!important;padding:0}
+  .container{max-width:100%}
+  input,button,#loader{display:none!important}
+  .top-bar,.panel,.exec-box,.directive-box{border-color:#eee!important;background:#fff!important}
+  .tag,.label,.sub-val-label,.header-li{color:#666!important}
+  .exec-narrative{color:#000!important}
+  .panel h3,.exec-box h3{background:#fff!important;color:#666!important}
+  .val,.badge,.bid-zone-val,.exec-val-b{color:#000!important}
+  .red{color:#d00!important}
+  .green{color:#0a0!important}
+  .orange{color:#d80!important}
+  .blue{color:#00d!important}
+}
+</style>
+</head>
+<body>
+<div id="loader"></div>
+<div class="container">
+  <div class="top-bar">
+    <div class="brand">
+      <h1><span class="red">NUVO</span> <span class="white">NMR</span></h1>
+      <div class="tag">NUVO MARKET REPORT</div>
+      <div id="unit-stamp" style="color:var(--g); font-size:10px; margin-top:10px; font-weight:800;">READY_FOR_SIGNAL...</div>
+    </div>
+    <div class="controls">
+      <div class="search-row">
+        <input type="text" id="tickerInput" value="SOFI" placeholder="TICKER">
+        <button onclick="appraise()">APPRAISE</button>
+        <button class="alt-btn" onclick="window.print()">SAVE PDF</button>
+        <div class="top-spot">
+          <span class="top-spot-label">SPOT PRICE</span>
+          <span id="spotVal">$0.00</span>
+        </div>
+      </div>
+      <div id="hAnchors" class="anchors">LOW VALUE: <span class="red">$0.00</span> | BUY: <span class="orange">$0.00</span> | HIGH RETAIL: <span class="blue">$0.00</span></div>
+    </div>
+  </div>
+
+  <div class="directive-box" id="directiveContainer">
+    <div>
+      <div class="label">SYSTEM DIRECTIVE</div>
+      <div id="badge" class="badge">INITIALIZING...</div>
+    </div>
+    <div class="bid-zone-display">
+      <div class="label">PRIMARY ACTION</div>
+      <div id="actionHint" class="bid-zone-val">SCANNING LOT...</div>
+    </div>
+    <div class="trend-display">
+      <div class="label">REGIME STRUCTURE</div>
+      <div id="trendVal" class="badge">—</div>
+    </div>
+  </div>
+
+  <div class="dashboard-grid">
+    <div class="panel">
+      <h3>WHOLESALE [ACQUISITION] <span id="wholesaleRange"></span></h3>
+      <div class="data-row"><span class="mut">100 WEEK AVG</span><span id="w100Val" class="val red">—</span></div>
+      <div class="sub-val-label">100 WEEKLY SMA</div>
+
+      <div class="data-row"><span class="mut">UNDERPRICED</span><span id="underVal" class="val red">—</span></div>
+      <div class="sub-val-label">38.2% STRUCTURAL SUPPORT (5Y)</div>
+
+      <div class="data-row"><span class="mut">OVERPRICED</span><span id="overVal" class="val red">—</span></div>
+      <div class="sub-val-label">61.8% STRUCTURAL CEILING (5Y)</div>
+
+      <div class="data-row"><span class="mut">HOUSE LOW VALUE</span><span id="avgWholesaleVal" class="val red">—</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>RETAIL [DISTRIBUTION] <span id="retailRange"></span></h3>
+      <div class="data-row"><span class="mut">21 DAY MARKET SUPPLY</span><span id="s21Val" class="val blue">—</span></div>
+      <div class="sub-val-label">21D SMA</div>
+
+      <div class="data-row"><span class="mut">RETAIL AVG</span><span id="s50Val" class="val blue">—</span></div>
+      <div class="sub-val-label">50D SMA (BOOK VALUE)</div>
+
+      <div class="data-row"><span class="mut">HIGH RETAIL VALUE</span><span id="s200Val" class="val blue">—</span></div>
+      <div class="sub-val-label">200D SMA (RETAIL VALUE)</div>
+
+      <div class="data-row"><span class="mut">HOUSE RETAIL AVG</span><span id="avgRetailVal" class="val blue">—</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>DEALER SIGNALS</h3>
+      <div class="data-row"><span class="white">SALES VELOCITY</span><span id="velocityVal" class="val">—</span></div>
+      <div class="sub-val-label">RSI + WILLIAMS</div>
+
+      <div class="data-row"><span class="white">PRICE TREND</span><span id="trendValPanel" class="val">—</span></div>
+      <div class="sub-val-label">MOVING AVERAGES</div>
+
+      <div class="data-row"><span class="white">MARKET CONDITION</span><span id="conditionVal" class="val">—</span></div>
+      <div class="sub-val-label">TREND-MOMENTUM COMPOSITE</div>
+
+      <div class="data-row"><span class="white">INVENTORY MARGIN</span><span id="imVerdictVal" class="val">—</span></div>
+      <div class="sub-val-label">RISK-REWARD RATIO</div>
+
+      <div class="data-row"><span class="white">POSITIONAL VERDICT</span><span id="posVal" class="val">—</span></div>
+    </div>
+  </div>
+
+  <div class="exec-box">
+    <h3>LOT EXECUTION PLAN</h3>
+    <span id="execStatus" class="exec-status">AWAITING APPRAISAL...</span>
+    <div id="execNarrative" class="exec-narrative">Run appraisal to generate narrative and execution ladder.</div>
+    <ul id="execBullets" class="exec-bullets"></ul>
+  </div>
+</div>
+
+<script>
+const API_BASE = "https://nuvo-proxy.yulgutierrez.workers.dev/api/appraise?ticker=";
+
+function fmt(n){ return '$' + Number(n).toFixed(2); }
+function roundHalf(n){ return Math.round(Number(n) * 2) / 2; }
+
+async function appraise() {
+  const t = document.getElementById('tickerInput').value.toUpperCase().trim();
+  document.getElementById('loader').style.display = 'block';
+
+  try {
+    const res = await fetch(API_BASE + encodeURIComponent(t));
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+
+    document.getElementById('unit-stamp').innerText = d.ticker + " TERMINAL AUDIT";
+    document.getElementById('spotVal').innerText = fmt(d.spot);
+
+    const imDen = (d.spot - d.w100);
+    const lsDen = (d.overpriced - d.w100);
+    const im = imDen !== 0 ? (d.s50 - d.spot) / imDen : 0;
+    const ls = lsDen !== 0 ? (d.spot - d.w100) / lsDen : 0;
+    const ds = im * (1 - ls);
+
+    let trend = "CONSOLIDATION";
+    if (d.s21 > d.s50 && d.s50 > d.s200) trend = "UPTREND";
+    if (d.s21 < d.s50 && d.s50 < d.s200) trend = "DOWNTREND";
+
+    let status = "RED — NO INVENTORY", color = "red";
+    let gThres = 1.00, oThres = 0.40;
+    if (trend === "UPTREND") { gThres = 0.70; oThres = 0.30; }
+    if (trend === "DOWNTREND") { gThres = 1.20; oThres = 0.60; }
+    if (ds >= gThres) { status = "GREEN — ACQUIRE INVENTORY"; color = "green"; }
+    else if (ds >= oThres) { status = "ORANGE — WAIT / BID LOWER"; color = "orange"; }
+
+    const marginBuy = d.s200 * 0.75;
+    const firstBid = roundHalf(Math.min(d.overpriced, marginBuy));
+    const entryGate = d.w100 + 0.62 * (d.overpriced - d.w100);
+    const lowValue = (d.w100 + d.underpriced) / 2;
+
+    let velocity = "NORMAL", vColor = "white";
+    if (d.rsi > 60 && d.wr > -20) { velocity = "FAST"; vColor = "green"; }
+    else if (d.rsi < 40 && d.wr < -80) { velocity = "SLOW"; vColor = "red"; }
+
+    let condition = "BALANCED", cColor = "white";
+    if (trend === "UPTREND" && velocity === "FAST") { condition = "HEATED"; cColor = "red"; }
+    else if (trend === "UPTREND" && velocity === "NORMAL") { condition = "STRONG"; cColor = "green"; }
+    else if (trend === "DOWNTREND" && velocity === "NORMAL") { condition = "STABLE"; cColor = "orange"; }
+    else if (trend === "DOWNTREND" && velocity === "SLOW") { condition = "SOFT"; cColor = "red"; }
+
+    let imVerdict = "UNFAVORABLE", imColor = "red";
+    if (im >= 1.0) { imVerdict = "FAVORABLE"; imColor = "green"; }
+    else if (im >= 0.5) { imVerdict = "MARGINAL"; imColor = "orange"; }
+
+    let score = 0;
+    if (im >= 1.25) score += 40;
+    else if (im >= 1.0) score += 35;
+    else if (im >= 0.75) score += 25;
+    else if (im >= 0.5) score += 15;
+    else score += 5;
+
+    if (trend === "UPTREND") score += 30;
+    else if (trend === "CONSOLIDATION") score += 20;
+    else score += 10;
+
+    if (velocity === "FAST") score += 15;
+    else if (velocity === "NORMAL") score += 10;
+    else score += 5;
+
+    if (d.spot <= d.overpriced) score += 15;
+    else if (d.spot <= d.overpriced * 1.05) score += 8;
+    else score += 2;
+
+    const scoreColor = (color === "green") ? "var(--g)" : "var(--o)";
+
+    document.getElementById('badge').innerText = status;
+    document.getElementById('badge').className = "badge " + color;
+    document.getElementById('directiveContainer').style.borderColor = `var(--${color === 'red' ? 'r' : color === 'orange' ? 'o' : 'g'})`;
+
+    document.getElementById('actionHint').innerText = "FIRST BID ZONE " + fmt(firstBid);
+    document.getElementById('actionHint').className = "bid-zone-val " + color;
+
+    const trendTop = document.getElementById('trendVal');
+    trendTop.innerText = trend;
+    trendTop.className = "badge " + (trend === "UPTREND" ? "green" : trend === "DOWNTREND" ? "red" : "white");
+
+    document.getElementById('w100Val').innerText = fmt(d.w100);
+    document.getElementById('underVal').innerText = fmt(d.underpriced);
+    document.getElementById('overVal').innerText = fmt(d.overpriced);
+    document.getElementById('avgWholesaleVal').innerText = fmt(lowValue);
+
+    document.getElementById('s21Val').innerText = fmt(d.s21);
+    document.getElementById('s50Val').innerText = fmt(d.s50);
+    document.getElementById('s200Val').innerText = fmt(d.s200);
+    document.getElementById('avgRetailVal').innerText = fmt(d.s50);
+
+    const velEl = document.getElementById('velocityVal');
+    velEl.innerText = velocity;
+    velEl.className = "val " + vColor;
+
+    const trendPanel = document.getElementById('trendValPanel');
+    trendPanel.innerText = trend;
+    trendPanel.className = "val " + (trend === "UPTREND" ? "green" : trend === "DOWNTREND" ? "red" : "white");
+
+    const condEl = document.getElementById('conditionVal');
+    condEl.innerText = condition;
+    condEl.className = "val " + cColor;
+
+    const imEl = document.getElementById('imVerdictVal');
+    imEl.innerText = imVerdict;
+    imEl.className = "val " + imColor;
+
+    const posEl = document.getElementById('posVal');
+    if (ls > 1) { posEl.innerText = "TOO EXPENSIVE"; posEl.className = "val red"; }
+    else if (ls < 0) { posEl.innerText = "BUY NOW"; posEl.className = "val green"; }
+    else { posEl.innerText = "NEUTRAL"; posEl.className = "val orange"; }
+
+    document.getElementById('hAnchors').innerHTML =
+      `LOW VALUE: <span class="red">${fmt(lowValue)}</span> | BUY: <span class="orange">${fmt(firstBid)}</span> | HIGH RETAIL: <span class="blue">${fmt(d.s200)}</span>`;
+
+    document.getElementById('wholesaleRange').innerHTML =
+      `<span class="red">${fmt(d.underpriced)}</span> – <span class="green">${fmt(d.overpriced)}</span>`;
+
+    document.getElementById('retailRange').innerHTML =
+      `<span class="red">${fmt(d.s21)}</span> – <span class="green">${fmt(d.s200)}</span>`;
+
+    const exStatus = document.getElementById('execStatus');
+    exStatus.innerHTML = `${status} <span style="float:right;color:${scoreColor};font-weight:800;">DEALER SCORE ${score}/100</span>`;
+    exStatus.className = "exec-status " + color;
+
+    const exNarrative = document.getElementById('execNarrative');
+    if (color === "red") {
+      exNarrative.innerText = `The market is in a structural ${trend.toLowerCase()}, with price trading below the 21D / 50D / 200D stack. The IM ledger confirms inventory is too expensive at current levels, meaning the unit is still trading above the wholesale lot.`;
+    } else if (color === "orange") {
+      exNarrative.innerText = `The market is in ${trend.toLowerCase()}. The IM ledger indicates margin is present, but the current tape carries a positional premium. Do not market buy; focus on staging bids at structural anchors.`;
+    } else {
+      exNarrative.innerText = `High-conviction acquisition window. Trend is supportive and the IM ledger provides full permission to load inventory. Unit is currently trading at a discount to wholesale cost basis.`;
+    }
+
+    let directiveText = "";
+    if (color === "red") {
+      directiveText = `Wait. Inventory loading begins once price re-enters the wholesale band at ${fmt(firstBid)} or lower.`;
+    } else if (color === "orange") {
+      directiveText = `Bid only. Stage orders at the ${fmt(firstBid)} and ${fmt(entryGate)} levels. No market execution.`;
+    } else {
+      directiveText = `Acquire aggressively. Load units at ${fmt(d.spot)} and scale toward ${fmt(d.w100)}.`;
+    }
+
+    document.getElementById('execBullets').innerHTML = `
+      <li class="header-li">DATA SUMMARY</li>
+      <li>SPOT <span class="exec-val-b">${fmt(d.spot)}</span></li>
+      <li>WHOLESALE CEILING <span class="exec-val-b">${fmt(d.overpriced)}</span></li>
+
+      <li class="header-li">EXECUTION LEVELS</li>
+      <li>FIRST BID ZONE <span class="exec-val-b orange">${fmt(firstBid)}</span></li>
+      <li>ACCUMULATION LEVEL <span class="exec-val-b green">${fmt(entryGate)}</span></li>
+      <li>INSTITUTIONAL WHOLESALE <span class="exec-val-b red">${fmt(d.w100)}</span></li>
+
+      <li class="header-li">DIRECTIVE</li>
+      <li style="color:#fff; font-weight:600;">${directiveText}</li>
+    `;
+  } catch (e) {
+    console.error(e);
+    alert("Appraisal failed. Check Worker or API response.");
+  } finally {
+    document.getElementById('loader').style.display = 'none';
+  }
+}
+
+window.onload = appraise;
+</script>
+</body>
+</html>
