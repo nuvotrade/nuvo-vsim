@@ -1,6 +1,7 @@
 /**
  * NUVO MNR TERMINAL v2.5 - DEALER EDITION
  * Full High-Density UI + Structural Math Engine
+ * FIXED: EMA variable typo & IM below-floor logic
  */
 
 export default {
@@ -63,9 +64,10 @@ function runNMR(ticker, daily, weekly) {
   const f618 = wH - (0.618 * wR);
 
   // Inventory Margin (IM) Logic
+  // If price is below floor, IM is maxed out (Dealer Pass)
   const upside = sma50 - spot;
   const risk = spot - floor200d;
-  const im = risk !== 0 ? upside / risk : 0;
+  const im = risk > 0 ? upside / risk : 9.99; 
 
   return {
     ticker, spot, sma21, sma50, floor200d,
@@ -91,11 +93,11 @@ function generateHTML() {
             --fg: #ffffff;
             --mut: #666666;
             --line: #1a1a1a;
-            --g: #00ff7f; /* Green: Profit/Conviction */
-            --o: #ff9f1c; /* Orange: Warning/Wait */
-            --r: #ff3b30; /* Red: Wholesale/Risk */
-            --b: #007aff; /* Blue: Retail/Book */
-            --p: #080808; /* Panel BG */
+            --g: #00ff7f; 
+            --o: #ff9f1c; 
+            --r: #ff3b30; 
+            --b: #007aff; 
+            --p: #080808; 
         }
 
         * { box-sizing: border-box; }
@@ -111,7 +113,6 @@ function generateHTML() {
 
         .container { max-width: 1100px; margin: auto; }
 
-        /* TOP NAVIGATION & SEARCH */
         .top-bar { 
             display: flex; 
             justify-content: space-between; 
@@ -128,10 +129,8 @@ function generateHTML() {
         .search-row { display: flex; gap: 8px; margin-bottom: 12px; }
         input { background: #000; border: 1px solid var(--line); color: var(--g); padding: 10px 14px; font-family: inherit; font-weight: 800; width: 110px; outline: none; font-size: 14px; }
         button { background: #fff; color: #000; border: none; padding: 10px 20px; font-family: inherit; font-weight: 800; cursor: pointer; text-transform: uppercase; font-size: 12px; transition: opacity 0.2s; }
-        button:hover { opacity: 0.8; }
         .anchors { font-size: 11px; font-weight: 800; text-transform: uppercase; color: var(--mut); }
 
-        /* MAIN DASHBOARD */
         .directive-box { 
             border: 1px solid var(--o); 
             padding: 20px 30px; 
@@ -146,7 +145,6 @@ function generateHTML() {
         .spot-display { text-align: right; }
         .spot-price { font-size: 36px; font-weight: 800; letter-spacing: -1px; }
 
-        /* BOX GRID */
         .dashboard-grid { 
             display: grid; 
             grid-template-columns: repeat(3, 1fr); 
@@ -173,7 +171,6 @@ function generateHTML() {
         .data-row { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px dashed #161616; }
         .val { font-weight: 800; font-size: 18px; }
 
-        /* IM SCORE SECTION */
         .im-footer { 
             display: grid; 
             grid-template-columns: 280px 1fr; 
@@ -190,7 +187,6 @@ function generateHTML() {
         .im-math-formula b { color: #fff; }
         .verdict-text { font-size: 18px; font-weight: 800; text-transform: uppercase; }
 
-        /* COLORS */
         .red { color: var(--r); } .green { color: var(--g); } .orange { color: var(--o); } .blue { color: var(--b); }
 
         #loader { 
@@ -213,12 +209,11 @@ function generateHTML() {
     <div id="loader"></div>
     
     <div class="container">
-        <!-- TOP BAR -->
         <div class="top-bar">
             <div class="brand">
                 <h1><span class="red">NUVO</span> <span class="mut">MNR</span></h1>
-                <div class="subtitle">DEALER TERMINAL v2.5 // QUANT ENGINE</div>
-                <div id="unit-stamp" class="stamp" style="color:var(--mut); font-size:10px; margin-top:10px;">AWAITING SIGNAL...</div>
+                <div class="tag">DEALER TERMINAL v2.5 // QUANT ENGINE</div>
+                <div id="unit-stamp" style="color:var(--mut); font-size:10px; margin-top:10px;">AWAITING SIGNAL...</div>
             </div>
             <div class="controls">
                 <div class="search-row">
@@ -229,7 +224,6 @@ function generateHTML() {
             </div>
         </div>
 
-        <!-- SYSTEM DIRECTIVE -->
         <div class="directive-box">
             <div>
                 <div class="label">SYSTEM DIRECTIVE</div>
@@ -241,9 +235,7 @@ function generateHTML() {
             </div>
         </div>
 
-        <!-- DASHBOARD GRID -->
         <div class="dashboard-grid">
-            <!-- WHOLESALE BOX -->
             <div class="panel">
                 <h3>WHOLESALE BOX [INSTITUTIONAL]</h3>
                 <div class="data-row">
@@ -257,7 +249,6 @@ function generateHTML() {
                 <div style="font-size:9px; color:var(--mut); margin-top:15px; text-transform:uppercase;">Entry Zone: Below Floor</div>
             </div>
 
-            <!-- RETAIL BOX -->
             <div class="panel">
                 <h3>RETAIL BOX [FAIR VALUE]</h3>
                 <div class="data-row">
@@ -271,7 +262,6 @@ function generateHTML() {
                 <div style="font-size:9px; color:var(--mut); margin-top:15px; text-transform:uppercase;">Market Mean: Book Value</div>
             </div>
 
-            <!-- STRUCTURAL LADDER -->
             <div class="panel">
                 <h3>STRUCTURAL LADDER [FIB]</h3>
                 <div class="data-row">
@@ -286,7 +276,6 @@ function generateHTML() {
             </div>
         </div>
 
-        <!-- IM SCORE FOOTER -->
         <div class="im-footer">
             <div class="im-score-wrap">
                 <div class="label">INVENTORY MARGIN (IM)</div>
@@ -304,7 +293,8 @@ function generateHTML() {
 
     <script>
         async function appraise() {
-            const ticker = document.getElementById('tickerInput').value.toUpperCase();
+            const tickerInput = document.getElementById('tickerInput');
+            const ticker = tickerInput.value.toUpperCase();
             document.getElementById('loader').style.display = 'block';
             
             try {
@@ -312,12 +302,10 @@ function generateHTML() {
                 const d = await res.json();
                 if(d.error) throw new Error(d.error);
 
-                // Populate Headers
                 document.getElementById('unit-stamp').innerText = \`UNIT: \${d.ticker} | LEDGER SYNC: \${d.asof}\`;
                 document.getElementById('spotVal').innerText = \`$\${d.spot.toFixed(2)}\`;
                 document.getElementById('hAnchors').innerHTML = \`WHOLESALE: <span class="red">\$\${d.floor200d.toFixed(2)}</span> | RETAIL: <span class="blue">\$\${d.f500.toFixed(2)}</span>\`;
 
-                // Populate Boxes
                 document.getElementById('floorVal').innerText = '$' + d.floor200d.toFixed(2);
                 document.getElementById('f618').innerText = '$' + d.f618.toFixed(2);
                 document.getElementById('bookVal').innerText = '$' + d.sma50.toFixed(2);
@@ -325,10 +313,9 @@ function generateHTML() {
                 document.getElementById('f382').innerText = '$' + d.f382.toFixed(2);
                 document.getElementById('f500').innerText = '$' + d.f500.toFixed(2);
                 
-                // Inventory Margin Score
                 const im = d.im;
                 const imEl = document.getElementById('imScore');
-                imEl.innerText = im.toFixed(2);
+                imEl.innerText = im >= 9.99 ? "MAX" : im.toFixed(2);
                 
                 const badge = document.getElementById('badge');
                 const verdict = document.getElementById('verdictText');
@@ -359,8 +346,6 @@ function generateHTML() {
                 document.getElementById('loader').style.display = 'none'; 
             }
         }
-
-        // Initialize on load
         window.onload = appraise;
     </script>
 </body>
@@ -368,7 +353,15 @@ function generateHTML() {
   `;
 }
 
-function SMA(arr, n) { 
-  const count = Math.min(arr.length, n);
-  return arr.slice(-count).reduce((s,v)=>s+v,0)/count; 
+function SMA(a, n) { 
+  const count = Math.min(a.length, n);
+  return a.slice(-count).reduce((s,v)=>s+v,0)/count; 
+}
+
+function EMA(a, n) { 
+  if (a.length < n) return a[a.length - 1] || 0;
+  const k = 2/(n+1); 
+  let e = a.slice(0,n).reduce((s,v)=>s+v,0)/n;
+  for(let i=n; i<a.length; i++) e = a[i] * k + e * (1 - k); 
+  return e;
 }
