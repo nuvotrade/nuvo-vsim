@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-  <title>NUVO VSIM — Execution Truth Watchlist</title>
+  <title>NUVO VSIM — Execution Watchlist</title>
   <style>
     :root{
       --bg:#050509;--panel:#0b0b14;--card:#0d0d18;--border:#1a1a2f;
@@ -39,7 +39,6 @@
     .btn:hover:not(:disabled){background:rgba(255,255,255,.07)}
     .btn.primary{background:var(--b);border-color:var(--b);color:#fff}
     .btn.primary:hover:not(:disabled){background:#2580c8}
-    .btn.green{background:var(--gD);border-color:var(--gB);color:var(--g)}
     .btn:disabled{opacity:.35;cursor:not-allowed}
     .wrap{padding:14px 18px}
     .card{border:1px solid var(--border);border-radius:12px;background:var(--card);overflow:hidden}
@@ -77,26 +76,6 @@
     .bad{color:var(--r);font-weight:800}
     .muted{color:var(--muted)}
     .mono{font-family:var(--mono)}
-    .modalMask{
-      position:fixed;inset:0;display:none;align-items:center;justify-content:center;
-      background:rgba(0,0,0,.82);padding:18px;z-index:999
-    }
-    .modalMask.open{display:flex}
-    .modal{
-      width:min(980px,96vw);max-height:88vh;overflow:auto;
-      border:1px solid var(--border);border-radius:12px;background:#0a0a14
-    }
-    .modalHead{
-      padding:12px 14px;border-bottom:1px solid var(--border);
-      display:flex;justify-content:space-between;align-items:center;gap:12px
-    }
-    .modalBody{padding:14px}
-    .build-card{border:1px solid var(--border);padding:16px;border-radius:8px;margin-bottom:14px;background:rgba(255,255,255,.02)}
-    .gates{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}
-    .gate{font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;border:1px solid var(--border);letter-spacing:.5px}
-    .gate.p{border-color:var(--g);color:var(--g);background:var(--gD)}
-    .gate.f{border-color:var(--r);color:var(--r);background:var(--rD)}
-    .gate.w{border-color:var(--yB);color:var(--y);background:var(--yD)}
     .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top:2px solid var(--b);border-radius:50%;animation:sp .7s linear infinite}
     @keyframes sp{to{transform:rotate(360deg)}}
     .footer{padding:10px 18px;border-top:1px solid var(--border);font-size:9px;color:var(--dim);text-align:center;font-family:var(--mono);letter-spacing:.5px}
@@ -106,15 +85,14 @@
 
 <header>
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <div class="brand">NUVO VSIM — <span style="color:var(--g)">Execution Truth</span></div>
-    <div class="pill">VIX <b id="vixVal">—</b> <span id="vixReg" class="muted">—</span></div>
-    <div class="pill">OPTIONS <b id="optState">—</b></div>
+    <div class="brand">NUVO VSIM — <span style="color:var(--g)">Execution Watchlist</span></div>
+    <div class="pill">SOURCE <b id="srcVal">/all + /v1/bars</b></div>
+    <div class="pill">OPTIONS <b id="optState">OFFLINE</b></div>
     <div class="pill">UPDATED <b id="updatedAt">—</b></div>
   </div>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <span id="scanMsg" class="mono" style="font-size:10px;color:var(--muted)"></span>
     <button class="btn" id="btnRefresh">REFRESH</button>
-    <button class="btn primary" id="btnBuildTop5" disabled>BUILD TOP 5</button>
   </div>
 </header>
 
@@ -125,23 +103,21 @@
       <div>REVIEW <b id="mReview" style="color:var(--g)">0</b></div>
       <div>WATCH <b id="mWatch" style="color:var(--y)">0</b></div>
       <div>IGNORE <b id="mIgnore">0</b></div>
-      <div class="muted">Truth: watchlist/build only claims what Worker returns.</div>
+      <div class="muted">Truth: this page now uses only the live routes that actually exist.</div>
     </div>
     <div style="overflow:auto">
       <table>
         <thead><tr>
           <th>Ticker</th>
           <th class="num">Spot</th>
-          <th class="num">5Y Fib Support</th>
+          <th class="num">Fib Support</th>
           <th class="num">Dist%</th>
-          <th class="num">20Δ Strike</th>
-          <th class="num">Δ</th>
-          <th class="num">Θ</th>
-          <th class="num">IV</th>
-          <th class="num">Bid/Ask</th>
-          <th class="num">OI</th>
+          <th class="num">Open</th>
+          <th class="num">High</th>
+          <th class="num">Low</th>
+          <th class="num">RV</th>
+          <th class="num">Volume</th>
           <th style="text-align:center">Status</th>
-          <th></th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -149,101 +125,46 @@
   </div>
 </div>
 
-<div class="modalMask" id="mask">
-  <div class="modal">
-    <div class="modalHead">
-      <div class="mono" style="font-weight:800" id="modalTitle">BUILD</div>
-      <button class="btn" id="btnClose">CLOSE</button>
-    </div>
-    <div class="modalBody" id="modalBody"></div>
-  </div>
-</div>
-
-<div class="footer">NUVO FUND — Execution Truth Watchlist — powered by /v1/watchlist + /v1/build</div>
+<div class="footer">NUVO FUND — Execution Watchlist — powered by /all + /v1/bars</div>
 
 <script>
-/**
- * Matches nuvo-vsim-truth Worker:
- *   GET /v1/vix
- *   GET /v1/watchlist?tickers=...
- *   GET /v1/build?ticker=...
- */
+const API_BASE = "https://nuvo-vsim-worker.yulgutierrez.workers.dev";
 
-// === SET THIS TO YOUR TRUTH WORKER URL ===
-const TRUTH_BASE = "https://nuvo-vsim-truth.yulgutierrez.workers.dev";
-
-// Universe
 const TIER_A = ["SPY","QQQ","TQQQ","IBIT"];
 const TIER_B = ["SOFI","HOOD","RKT","F","SNAP","CLSK","OSCR","HIMS","IREN"];
 const UNI = [...TIER_A, ...TIER_B];
 
-// Gates (UI mirrors Worker intent)
-const FIB_NEAR = 0.05;
-const DELTA_LO = 0.15, DELTA_HI = 0.25;
-const OI_MIN = 500;
-
-// WATCHLIST batching to avoid CF subrequest caps.
-// Tune BATCH down if your Worker does additional calls per ticker.
 const BATCH = 4;
 
-// helpers
 const $ = id => document.getElementById(id);
 const ok = v => typeof v === "number" && Number.isFinite(v);
-const f2 = v => ok(v) ? v.toFixed(2) : "—";
-const f3 = v => ok(v) ? v.toFixed(3) : "—";
 const fD = v => ok(v) ? "$" + v.toFixed(2) : "—";
 const fP = (v, d=2) => ok(v) ? (v*100).toFixed(d) + "%" : "—";
 const fI = v => ok(v) ? Math.round(v).toLocaleString() : "—";
 const fT = () => new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
 
 let ROWS = [];
-let VIX = null;
-let OPTIONS_LIVE = false;
 
-async function api(path, ms=15000) {
+async function api(path, ms=20000) {
   const c = new AbortController();
   const id = setTimeout(() => c.abort(), ms);
   try {
-    const url = TRUTH_BASE + path + (path.includes("?") ? "&" : "?") + "ts=" + Date.now();
+    const url = API_BASE + path + (path.includes("?") ? "&" : "?") + "ts=" + Date.now();
     const r = await fetch(url, { signal: c.signal, mode: "cors", cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
-    return r.json();
+    const data = await r.json();
+    if (data && data.error) throw new Error(data.error);
+    return data;
   } finally {
     clearTimeout(id);
   }
 }
 
-function statusFromRow(r) {
-  const reasons = [];
-
-  const nearFib = ok(r.dist_to_fib) && r.dist_to_fib <= FIB_NEAR;
-  reasons.push(nearFib ? ["fib≤5%","ok"] : ["fib>"+(ok(r.dist_to_fib)?(r.dist_to_fib*100).toFixed(1)+"%":"?"), "warn"]);
-
-  if (!r.options_available) {
-    reasons.push(["options_offline","bad"]);
-    return { status: nearFib ? "WATCH" : "IGNORE", reasons };
-  }
-
-  if (!r.opt20) {
-    reasons.push(["no_20Δ","bad"]);
-    return { status: nearFib ? "WATCH" : "IGNORE", reasons };
-  }
-
-  const d = Math.abs(r.opt20.delta ?? NaN);
-  const deltaP = ok(d) && d >= DELTA_LO && d <= DELTA_HI;
-  reasons.push(deltaP ? ["Δ_band","ok"] : ["Δ_out","bad"]);
-
-  const liqP = ok(r.opt20.oi) && r.opt20.oi >= OI_MIN;
-  reasons.push(liqP ? ["liq","ok"] : ["illiquid","bad"]);
-
-  const sp = r.opt20.spread_pct;
-  if (ok(sp)) reasons.push([("sprd "+(sp*100).toFixed(1)+"%"), "ok"]);
-  else reasons.push(["sprd?","warn"]);
-
-  if (nearFib && deltaP && liqP) return { status: "REVIEW", reasons };
-  const score = [nearFib, deltaP, liqP].filter(Boolean).length;
-  if (score >= 2) return { status: "WATCH", reasons };
-  return { status: "IGNORE", reasons };
+function classify(dist) {
+  if (!ok(dist)) return { status: "IGNORE", reasons: [["no_data","bad"]] };
+  if (dist <= 0.05) return { status: "REVIEW", reasons: [["fib≤5%","ok"]] };
+  if (dist <= 0.12) return { status: "WATCH", reasons: [["fib≤12%","warn"]] };
+  return { status: "IGNORE", reasons: [["too_far","bad"]] };
 }
 
 function render() {
@@ -255,16 +176,7 @@ function render() {
   $("mReview").textContent = rv;
   $("mWatch").textContent = wt;
   $("mIgnore").textContent = ig;
-
-  $("vixVal").textContent = ok(VIX) ? VIX.toFixed(2) : "—";
-  $("vixVal").style.color = ok(VIX) ? (VIX >= 17 ? "var(--g)" : "var(--y)") : "var(--muted)";
-  $("vixReg").textContent = ok(VIX) ? (VIX >= 25 ? "(PANIC)" : VIX >= 20 ? "(ELEVATED)" : VIX >= 17 ? "(NORMAL)" : "(LOW)") : "—";
-
-  $("optState").textContent = OPTIONS_LIVE ? "ONLINE" : "OFFLINE";
-  $("optState").style.color = OPTIONS_LIVE ? "var(--g)" : "var(--r)";
-
   $("updatedAt").textContent = fT();
-  $("btnBuildTop5").disabled = rv === 0;
 
   const ord = { REVIEW:0, WATCH:1, IGNORE:2 };
   const sorted = [...ROWS].sort((a,b) => {
@@ -275,27 +187,16 @@ function render() {
 
   let html = "";
   for (const r of sorted) {
-    const fibCell = ok(r.fib_support)
-      ? `${fD(r.fib_support)} <span class="muted" style="font-size:10px">(${ok(r.fib_ratio)?(r.fib_ratio*100).toFixed(1):"—"}%)</span>`
-      : `<span class="muted">—</span>`;
-
-    const distCol = ok(r.dist_to_fib)
-      ? (r.dist_to_fib <= 0.03 ? "ok" : r.dist_to_fib <= 0.05 ? "warn" : "muted")
-      : "muted";
-
-    const ho = r.options_available && r.opt20;
-
     html += `<tr>
       <td><b>${r.ticker}</b><span class="tag ${r.tier}">${r.tier==="A"?"CORE":"SAT"}</span></td>
       <td class="num">${fD(r.spot)}</td>
-      <td class="num">${fibCell}</td>
-      <td class="num"><span class="${distCol}">${fP(r.dist_to_fib)}</span></td>
-      <td class="num">${ho && ok(r.opt20.strike) ? fD(r.opt20.strike) : `<span class="muted">—</span>`}</td>
-      <td class="num">${ho && ok(r.opt20.delta) ? `<span class="${Math.abs(r.opt20.delta)>=DELTA_LO&&Math.abs(r.opt20.delta)<=DELTA_HI?"ok":"bad"}">${f3(r.opt20.delta)}</span>` : `<span class="muted">—</span>`}</td>
-      <td class="num">${ho && ok(r.opt20.theta) ? `<span class="ok">${f3(r.opt20.theta)}</span>` : `<span class="muted">—</span>`}</td>
-      <td class="num">${ho && ok(r.opt20.iv) ? fP(r.opt20.iv,2) : `<span class="muted">—</span>`}</td>
-      <td class="num">${ho && ok(r.opt20.bid) && ok(r.opt20.ask) ? `${f2(r.opt20.bid)} / ${f2(r.opt20.ask)}` : `<span class="muted">—</span>`}</td>
-      <td class="num">${ho && ok(r.opt20.oi) ? `<span class="${r.opt20.oi>=OI_MIN?"":"bad"}">${fI(r.opt20.oi)}</span>` : `<span class="muted">—</span>`}</td>
+      <td class="num">${fD(r.fib_support)}</td>
+      <td class="num"><span class="${r.dist_to_fib <= 0.05 ? "ok" : r.dist_to_fib <= 0.12 ? "warn" : "bad"}">${fP(r.dist_to_fib)}</span></td>
+      <td class="num">${fD(r.open)}</td>
+      <td class="num">${fD(r.high)}</td>
+      <td class="num">${fD(r.low)}</td>
+      <td class="num">${ok(r.rv) ? r.rv.toFixed(3) : "—"}</td>
+      <td class="num">${fI(r.volume)}</td>
       <td style="text-align:center">
         <span class="st ${r._status}">${r._status}</span>
         <div class="reason">${r._reasons.map(([t, cls]) => {
@@ -303,50 +204,87 @@ function render() {
           return `<span class="${c}" style="margin-right:8px">${t}</span>`;
         }).join("")}</div>
       </td>
-      <td class="num">
-        ${r._status !== "IGNORE"
-          ? `<button class="btn green" style="padding:5px 10px;font-size:10px" onclick="runBuild('${r.ticker}')">BUILD</button>`
-          : `<button class="btn" style="padding:5px 10px;font-size:10px" disabled>BUILD</button>`}
-      </td>
     </tr>`;
   }
 
-  $("tbody").innerHTML = html || `<tr><td colspan="12" class="muted" style="text-align:center;padding:40px">Click REFRESH</td></tr>`;
+  $("tbody").innerHTML = html || `<tr><td colspan="10" class="muted" style="text-align:center;padding:40px">Click REFRESH</td></tr>`;
+}
+
+async function fetchTicker(ticker) {
+  const [snap, barsResp] = await Promise.all([
+    api(`/all?ticker=${encodeURIComponent(ticker)}`),
+    api(`/v1/bars?ticker=${encodeURIComponent(ticker)}&tf=1d`)
+  ]);
+
+  const bars = Array.isArray(barsResp?.bars) ? barsResp.bars : [];
+  if (!bars.length) throw new Error(`No bars for ${ticker}`);
+
+  const highs = bars.map(b => b.h).filter(ok);
+  const lows = bars.map(b => b.l).filter(ok);
+
+  const high5 = highs.length ? Math.max(...highs) : NaN;
+  const low5 = lows.length ? Math.min(...lows) : NaN;
+  const range = ok(high5) && ok(low5) ? (high5 - low5) : NaN;
+  const fibSupport = ok(range) ? low5 + 0.382 * range : NaN;
+  const dist = ok(fibSupport) && ok(snap.spot) ? Math.abs(snap.spot - fibSupport) / snap.spot : NaN;
+
+  return {
+    ticker,
+    tier: TIER_A.includes(ticker) ? "A" : "B",
+    spot: Number(snap.spot),
+    open: Number(snap.open),
+    high: Number(snap.high),
+    low: Number(snap.low),
+    volume: Number(snap.volume),
+    rv: Number(snap.rv),
+    fib_support: fibSupport,
+    dist_to_fib: dist
+  };
 }
 
 async function refreshAll() {
   $("btnRefresh").disabled = true;
-  $("btnBuildTop5").disabled = true;
-  $("scanMsg").innerHTML = `<span class="spin"></span> Scanning in batches...`;
+  $("scanMsg").innerHTML = `<span class="spin"></span> Scanning...`;
 
   try {
-    // Build batches
     const batches = [];
     for (let i = 0; i < UNI.length; i += BATCH) batches.push(UNI.slice(i, i + BATCH));
 
     let allRows = [];
-    let vixData = null;
-    let optLive = false;
 
-    // Sequential batches to reduce concurrent Worker invocations (safer for rate limits).
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
       $("scanMsg").innerHTML = `<span class="spin"></span> Batch ${i+1}/${batches.length}: ${batch.join(", ")}...`;
 
-      const d = await api(`/v1/watchlist?tickers=${encodeURIComponent(batch.join(","))}`, 25000);
+      const rows = await Promise.all(
+        batch.map(async (ticker) => {
+          try {
+            return await fetchTicker(ticker);
+          } catch (e) {
+            return {
+              ticker,
+              tier: TIER_A.includes(ticker) ? "A" : "B",
+              spot: NaN,
+              open: NaN,
+              high: NaN,
+              low: NaN,
+              volume: NaN,
+              rv: NaN,
+              fib_support: NaN,
+              dist_to_fib: NaN,
+              _status: "IGNORE",
+              _reasons: [[String(e.message || e), "bad"]]
+            };
+          }
+        })
+      );
 
-      if (!vixData && d?.vix) vixData = d.vix;
-      if (d?.options_available) optLive = true;
-
-      const rows = Array.isArray(d?.rows) ? d.rows : [];
       allRows = allRows.concat(rows);
     }
 
-    VIX = ok(vixData?.value) ? vixData.value : null;
-    OPTIONS_LIVE = optLive;
-
     ROWS = allRows.map(r => {
-      const s = statusFromRow(r);
+      if (r._status) return r;
+      const s = classify(r.dist_to_fib);
       return { ...r, _status: s.status, _reasons: s.reasons };
     });
 
@@ -355,155 +293,13 @@ async function refreshAll() {
   } catch (e) {
     $("scanMsg").textContent = "FAILED: " + String(e.message || e);
     ROWS = [];
-    VIX = null;
-    OPTIONS_LIVE = false;
     render();
   } finally {
     $("btnRefresh").disabled = false;
   }
 }
 
-async function runBuild(ticker) {
-  $("modalTitle").textContent = "BUILD: " + ticker;
-  $("modalBody").innerHTML = `<div class="build-card"><span class="spin"></span> Loading /v1/build...</div>`;
-  $("mask").classList.add("open");
-
-  try {
-    const d = await api(`/v1/build?ticker=${encodeURIComponent(ticker)}`, 30000);
-
-    if (d?.error) {
-      $("modalBody").innerHTML = `<div class="build-card">
-        <div class="bad" style="font-weight:900">ERROR: ${d.error}</div>
-        <div class="muted mono" style="margin-top:8px">${d.note || ""}</div>
-        <div class="muted mono" style="margin-top:8px">Spot: ${fD(d.spot)} | VIX: ${ok(d?.vix?.value)?d.vix.value.toFixed(2):"—"}</div>
-      </div>`;
-      return;
-    }
-
-    const gates = d?.gates || {};
-    const gateLine = (key, label) => {
-      const g = gates[key];
-      const pass = !!g?.pass;
-      return `<span class="gate ${pass ? "p" : "f"}">${label}: ${pass ? "PASS" : "FAIL"}</span>`;
-    };
-
-    const sug = d?.suggested_fix;
-    const sugHtml = sug ? `<div style="margin-top:12px;padding:12px;border:1px solid var(--yB);background:var(--yD);border-radius:8px">
-        <div class="warn" style="font-weight:900">SUGGESTED FIX</div>
-        <div class="mono" style="font-size:11px;margin-top:6px">
-          Target price: ${fD(sug.target_price)}<br/>
-          Next strike: ${sug.next_strike ? fD(sug.next_strike) : "—"}<br/>
-          Reason: ${sug.reason || ""}
-        </div>
-      </div>` : "";
-
-    $("modalBody").innerHTML = `
-      <div class="build-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-          <div class="mono" style="font-weight:900;font-size:14px">${d.ticker} <span class="tag ${d.tier}">${d.tier==="A"?"CORE":"SAT"}</span></div>
-          <div class="muted mono" style="font-size:11px">${d.timestamp || ""}</div>
-        </div>
-
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px" class="mono">
-          <div><div class="muted" style="font-size:10px">SPOT</div><div style="font-weight:900">${fD(d.spot)}</div></div>
-          <div><div class="muted" style="font-size:10px">VIX</div><div style="font-weight:900">${ok(d?.vix?.value)?d.vix.value.toFixed(2):"—"} <span class="muted">${d?.vix?.regime?`(${d.vix.regime})`:""}</span></div></div>
-          <div><div class="muted" style="font-size:10px">EXPIRY</div><div style="font-weight:900">${d?.expiry?.date || "—"} <span class="muted">(${d?.expiry?.dte ?? "—"} DTE)</span></div></div>
-          <div><div class="muted" style="font-size:10px">FIB SUPPORT</div><div style="font-weight:900">${fD(d?.fib?.support)}</div></div>
-        </div>
-
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px" class="mono">
-          <div><div class="muted" style="font-size:10px">K</div><div style="font-weight:900">${fD(d?.opt?.strike)}</div></div>
-          <div><div class="muted" style="font-size:10px">DELTA</div><div style="font-weight:900">${ok(d?.opt?.delta)?d.opt.delta.toFixed(3):"—"}</div></div>
-          <div><div class="muted" style="font-size:10px">IV</div><div style="font-weight:900">${ok(d?.opt?.iv)?(d.opt.iv*100).toFixed(2)+"%":"—"}</div></div>
-          <div><div class="muted" style="font-size:10px">BID/ASK</div><div style="font-weight:900">${ok(d?.opt?.bid)&&ok(d?.opt?.ask)?`${d.opt.bid.toFixed(2)} / ${d.opt.ask.toFixed(2)}`:"—"}</div></div>
-        </div>
-
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px" class="mono">
-          <div><div class="muted" style="font-size:10px">EM</div><div style="font-weight:900">${fD(d?.math?.em)}</div></div>
-          <div><div class="muted" style="font-size:10px">LOWER EM</div><div style="font-weight:900">${fD(d?.math?.lower_em)}</div></div>
-          <div><div class="muted" style="font-size:10px">SIGMA</div><div style="font-weight:900">${ok(d?.math?.sigma_actual)?d.math.sigma_actual.toFixed(2):"—"}</div></div>
-          <div><div class="muted" style="font-size:10px">MIN CREDIT</div><div style="font-weight:900">${ok(d?.math?.min_credit)?"$"+d.math.min_credit.toFixed(2):"—"}</div></div>
-        </div>
-
-        <div class="gates" style="margin-top:12px">
-          ${gateLine("dte_5_21","DTE 5–21")}
-          ${gateLine("delta_0_15_0_25","Δ 0.15–0.25")}
-          ${gateLine("liquidity","LIQ")}
-          ${gateLine("spread","SPREAD")}
-          ${gateLine("strike_below_fib","K ≤ FIB")}
-          ${gateLine("strike_below_lowerEM","K ≤ LOWER EM")}
-          ${gateLine("gate4_structural","GATE 4")}
-        </div>
-
-        ${sugHtml}
-
-        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)" class="mono">
-          <div class="muted" style="font-size:10px;margin-bottom:6px">COMPRESSION (Worker)</div>
-          <div style="font-size:11px">
-            RSI14: ${d?.compression?.rsi14 ? `${d.compression.rsi14.value} (${d.compression.rsi14.tag})` : "—"}<br/>
-            Williams %R: ${d?.compression?.williamsR ? `${d.compression.williamsR.value} (${d.compression.williamsR.tag})` : "—"}<br/>
-            MACD: ${d?.compression?.macd?.tag || "—"}
-          </div>
-        </div>
-      </div>
-    `;
-  } catch (e) {
-    $("modalBody").innerHTML = `<div class="build-card"><div class="bad" style="font-weight:900">FAILED</div><div class="muted mono" style="margin-top:8px">${String(e.message || e)}</div></div>`;
-  }
-}
-
-async function buildTop5() {
-  const picks = ROWS.filter(r => r._status !== "IGNORE").slice(0, 5);
-  if (!picks.length) return;
-
-  $("modalTitle").textContent = "BUILD TOP 5";
-  $("modalBody").innerHTML = `<div class="build-card"><span class="spin"></span> Loading...</div>`;
-  $("mask").classList.add("open");
-
-  let html = "";
-  for (const row of picks) {
-    try {
-      const d = await api(`/v1/build?ticker=${encodeURIComponent(row.ticker)}`, 30000);
-      if (d?.error) {
-        html += `<div class="build-card" style="border-left:3px solid var(--r)">
-          <div class="mono" style="font-weight:900">${row.ticker}</div>
-          <div class="bad mono" style="margin-top:6px;font-size:11px">ERROR: ${d.error}</div>
-        </div>`;
-        continue;
-      }
-      const pass = !!d?.gates?.gate4_structural?.pass;
-      html += `<div class="build-card" style="border-left:3px solid ${pass?"var(--g)":"var(--y)"}">
-        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap" class="mono">
-          <div style="font-weight:900">${d.ticker} <span class="tag ${d.tier}" style="font-size:9px">${d.tier==="A"?"CORE":"SAT"}</span></div>
-          <div class="muted" style="font-size:10px">${fD(d.spot)} | K ${fD(d?.opt?.strike)} | DTE ${d?.expiry?.dte ?? "—"}</div>
-        </div>
-        <div class="mono" style="font-size:11px;margin-top:8px">
-          EM ${fD(d?.math?.em)} | Lower ${fD(d?.math?.lower_em)} | Sigma ${ok(d?.math?.sigma_actual)?d.math.sigma_actual.toFixed(2):"—"} | MinCredit ${ok(d?.math?.min_credit)?"$"+d.math.min_credit.toFixed(2):"—"}
-        </div>
-        <div class="gates" style="margin-top:10px">
-          <span class="gate ${d?.gates?.strike_below_fib?.pass?"p":"f"}">K≤FIB</span>
-          <span class="gate ${d?.gates?.strike_below_lowerEM?.pass?"p":"f"}">K≤LOWER</span>
-          <span class="gate ${pass?"p":"f"}">GATE4</span>
-        </div>
-        ${d?.suggested_fix ? `<div class="mono warn" style="margin-top:8px;font-size:11px">Fix → ${d.suggested_fix.next_strike ? fD(d.suggested_fix.next_strike) : "—"}</div>` : `<div class="mono ok" style="margin-top:8px;font-size:11px">READY</div>`}
-      </div>`;
-    } catch (e) {
-      html += `<div class="build-card" style="border-left:3px solid var(--r)">
-        <div class="mono" style="font-weight:900">${row.ticker}</div>
-        <div class="bad mono" style="margin-top:6px;font-size:11px">${String(e.message||e)}</div>
-      </div>`;
-    }
-  }
-
-  $("modalBody").innerHTML = html || `<div class="build-card" class="muted">No rows.</div>`;
-}
-
-// events
 $("btnRefresh").addEventListener("click", refreshAll);
-$("btnBuildTop5").addEventListener("click", buildTop5);
-$("btnClose").addEventListener("click", () => $("mask").classList.remove("open"));
-
-// boot
 window.addEventListener("load", () => setTimeout(refreshAll, 250));
 </script>
 
