@@ -6,9 +6,5 @@ compatibility_date = "2024-03-06"
 [observability]
 enabled = true
 
-# This ensures your Worker can talk to the Polygon API
 [browser]
 enabled = false
-
-# If you ever want to use a database later, we can add that here.
-# For now, we are focusing on the live Market Terminal.
