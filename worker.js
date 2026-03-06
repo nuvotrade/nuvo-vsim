@@ -10,7 +10,6 @@ export default {
     const url = new URL(request.url);
 
     // --- ROUTE 1: THE DATA API ---
-    // Triggered when the "APPRAISE" button is clicked in the UI
     if (url.pathname.includes("/v1/nmr")) {
       const ticker = (url.searchParams.get("ticker") || "IREN").toUpperCase();
       const apiKey = env.POLYGON_API_KEY; 
@@ -51,7 +50,6 @@ export default {
     }
 
     // --- ROUTE 2: THE UI (CATCH-ALL) ---
-    // Serves the HTML Terminal for any other request (Fixes 404/Not Found)
     return new Response(generateHTML(), {
       headers: { "Content-Type": "text/html" }
     });
@@ -103,64 +101,99 @@ function generateHTML() {
         :root { --bg: #000; --fg: #fff; --mut: #666; --line: #1a1a1a; --g: #00ff7f; --o: #ff9f1c; --r: #ff3b30; --b: #007aff; }
         body { background: var(--bg); color: var(--fg); font-family: "JetBrains Mono", monospace; margin: 0; padding: 16px; line-height: 1.4; font-size: 13px; }
         .wrap { max-width: 1000px; margin: auto; }
+        
+        /* HEADER */
         .header { border: 1px solid var(--line); padding: 16px; margin-bottom: 16px; display: flex; justify-content: space-between; background: #050505; }
+        h1 { margin:0; font-size: 22px; font-weight: 800; letter-spacing: -1.2px; }
         .red { color: var(--r); } .green { color: var(--g); } .orange { color: var(--o); } .blue { color: var(--b); } .mut { color: var(--mut); }
-        .directive-box { border: 1px solid var(--o); padding: 10px 20px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; background: rgba(255,159,28,0.05); }
+        .subtitle { color: var(--o); font-size: 9px; font-weight: 800; text-transform: uppercase; margin-top: 2px; letter-spacing: 1px; }
+        .stamp { color: var(--mut); font-size: 10px; margin-top: 8px; }
+
+        /* CONTROLS */
+        .header-right { text-align: right; }
+        .input-group { display: flex; gap: 6px; margin-bottom: 8px; }
+        input { background: #000; border: 1px solid var(--line); color: var(--g); padding: 8px 12px; font-family: inherit; font-weight: 800; width: 90px; outline: none; text-transform: uppercase; }
+        button { background: #fff; color: #000; border: none; padding: 8px 14px; font-family: inherit; font-weight: 800; cursor: pointer; text-transform: uppercase; font-size: 11px; }
+        .header-anchors { font-size: 12px; font-weight: 800; }
+
+        /* DIRECTIVE */
+        .directive-box { border: 1px solid var(--o); padding: 12px 20px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; background: rgba(255, 159, 28, 0.05); }
+        .label { font-size: 9px; font-weight: 800; color: var(--mut); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }
+        .badge { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+        .spot-val { font-size: 24px; font-weight: 800; }
+
+        /* GRID */
         .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
         .panel { border: 1px solid var(--line); padding: 14px; background: #050505; }
+        h3 { margin: 0 0 12px 0; font-size: 10px; color: var(--mut); border-bottom: 1px solid var(--line); padding-bottom: 6px; text-transform: uppercase; font-weight: 800; letter-spacing: 1px; }
         .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #161616; }
         .v { font-weight: 800; font-size: 15px; }
-        .im-val { font-size: 64px; font-weight: 800; color: var(--g); letter-spacing: -3px; }
-        input { background: #000; border: 1px solid var(--line); color: var(--g); padding: 8px 12px; font-family: inherit; font-weight: 800; width: 90px; outline: none; text-transform: uppercase; }
-        button { background: #fff; color: #000; border: none; padding: 8px 14px; font-family: inherit; font-weight: 800; cursor: pointer; }
+
+        /* IM SCORE SECTION */
+        .im-section { display: flex; align-items: center; gap: 30px; padding: 24px; border: 1px solid var(--line); background: #080808; margin-top: 16px;}
+        .im-val { font-size: 64px; font-weight: 800; color: var(--g); letter-spacing: -3px; line-height: 0.8; }
+        .im-math { font-size: 11px; color: var(--mut); line-height: 1.6; }
+        .im-math b { color: #fff; }
+
+        #loader { display:none; color: var(--o); font-size: 10px; font-weight: 800; margin-bottom: 10px; }
     </style>
 </head>
 <body>
     <div class="wrap">
         <div class="header">
             <div>
-                <h1 style="margin:0; font-size:22px;"><span class="red">NUVO</span> <span class="mut">MNR</span></h1>
-                <div style="font-size:9px; color:var(--o); font-weight:800;">NMR | NUVO MARKET REPORT v2.1</div>
-                <div id="stamp" style="font-size:10px; color:var(--mut); margin-top:8px;">READY FOR SCAN</div>
+                <h1><span class="red">NUVO</span> <span class="mut">MNR</span></h1>
+                <div class="subtitle">NMR | NUVO MARKET REPORT v2.1</div>
+                <div id="stamp" class="stamp">READY FOR SCAN</div>
             </div>
-            <div style="text-align:right">
-                <input type="text" id="ticker" value="IREN">
-                <button onclick="appraise()">APPRAISE</button>
+            <div class="header-right">
+                <div class="input-group">
+                    <input type="text" id="ticker" value="SOFI">
+                    <button onclick="appraise()">APPRAISE</button>
+                </div>
+                <div id="hAnchors" class="header-anchors"></div>
             </div>
         </div>
 
-        <div id="loader" style="display:none; color:var(--o); font-size:10px; margin-bottom:10px; font-weight:800;">SCANNING BARS... SYNCING LEDGER...</div>
+        <div id="loader">SCANNING BARS... SYNCING LEDGER...</div>
 
-        <div id="content">
-            <div class="directive-box">
-                <div><div style="font-size:9px;" class="mut">SYSTEM DIRECTIVE</div><div id="badge" class="badge">AWAITING INPUT</div></div>
-                <div style="text-align:right"><div style="font-size:9px;" class="mut">CURRENT SPOT</div><div id="spot" class="v" style="font-size:24px">—</div></div>
+        <div id="directiveBox" class="directive-box">
+            <div>
+                <div class="label">SYSTEM DIRECTIVE</div>
+                <div id="badge" class="badge orange">AWAITING INPUT</div>
             </div>
-
-            <div class="grid">
-                <div class="panel">
-                    <h3 style="font-size:10px; color:var(--mut); border-bottom:1px solid var(--line); padding-bottom:5px; margin:0 0 10px 0;">WHOLESALE BOX</h3>
-                    <div class="row"><span class="mut">Institutional Floor</span><span id="floorVal" class="v red">—</span></div>
-                    <div class="row"><span class="mut">Weekly FIB .618</span><span id="fib618" class="v red">—</span></div>
-                </div>
-                <div class="panel">
-                    <h3 style="font-size:10px; color:var(--mut); border-bottom:1px solid var(--line); padding-bottom:5px; margin:0 0 10px 0;">RETAIL BOX</h3>
-                    <div class="row"><span class="mut">Book Value (50D)</span><span id="bookVal" class="v blue">—</span></div>
-                    <div class="row"><span class="mut">21D Supply Wall</span><span id="wallVal" class="v">—</span></div>
-                </div>
-                <div class="panel">
-                    <h3 style="font-size:10px; color:var(--mut); border-bottom:1px solid var(--line); padding-bottom:5px; margin:0 0 10px 0;">STRUCTURAL STACK</h3>
-                    <div class="row"><span class="mut">Weekly FIB .382</span><span id="fib382" class="v green">—</span></div>
-                    <div class="row"><span class="mut">Weekly FIB .500</span><span id="fib500" class="v blue">—</span></div>
-                </div>
+            <div style="text-align:right">
+                <div class="label">CURRENT SPOT</div>
+                <div id="spot" class="spot-val">—</div>
             </div>
+        </div>
 
-            <div class="panel" style="display:flex; align-items:center; gap:30px; padding:20px; background:#080808;">
-                <div><div style="font-size:9px;" class="mut">INVENTORY MARGIN (IM)</div><div id="imVal" class="im-val">—</div></div>
-                <div style="font-size:11px;" class="mut">
-                    <b>IM = (Supply - Spot) / (Spot - Floor)</b><br>
-                    <span id="verdict" class="green">SCAN REQUIRED</span>
-                </div>
+        <div class="grid">
+            <div class="panel">
+                <h3>WHOLESALE BOX</h3>
+                <div class="row"><span class="mut">Institutional Floor</span><span id="floorVal" class="v red">—</span></div>
+                <div class="row"><span class="mut">Weekly FIB .618</span><span id="fib618" class="v red">—</span></div>
+            </div>
+            <div class="panel">
+                <h3>RETAIL BOX</h3>
+                <div class="row"><span class="mut">Book Value (50D)</span><span id="bookVal" class="v blue">—</span></div>
+                <div class="row"><span class="mut">21D Supply Wall</span><span id="wallVal" class="v">—</span></div>
+            </div>
+            <div class="panel">
+                <h3>STRUCTURAL STACK</h3>
+                <div class="row"><span class="mut">Weekly FIB .382</span><span id="fib382" class="v green">—</span></div>
+                <div class="row"><span class="mut">Weekly FIB .500</span><span id="fib500" class="v blue">—</span></div>
+            </div>
+        </div>
+
+        <div class="im-section">
+            <div>
+                <div class="label">INVENTORY MARGIN (IM)</div>
+                <div id="imVal" class="im-val">—</div>
+            </div>
+            <div class="im-math">
+                <b>IM = (Supply - Spot) / (Spot - Floor)</b><br>
+                <span id="verdict" class="green">SCAN REQUIRED</span>
             </div>
         </div>
     </div>
@@ -183,14 +216,17 @@ function generateHTML() {
                 document.getElementById('fib382').innerText = '$' + d.f382.toFixed(2);
                 document.getElementById('fib500').innerText = '$' + d.f500.toFixed(2);
                 document.getElementById('imVal').innerText = d.im.toFixed(2);
+                
+                document.getElementById('hAnchors').innerHTML = \`WHOLESALE: <span class="red">\${d.floor200d.toFixed(2)}</span> | RETAIL: <span class="blue">\${d.f500.toFixed(2)}</span>\`;
 
                 const badge = document.getElementById('badge');
+                const verdict = document.getElementById('verdict');
                 if(d.im >= 1) { 
                     badge.innerText = "🟩 HIGH CONVICTION ACQUIRE"; badge.className = "badge green"; 
-                    document.getElementById('verdict').innerText = "VERDICT: LEDGER PASS - CONVICTION BUY";
+                    verdict.innerText = "VERDICT: LEDGER PASS - CONVICTION BUY"; verdict.className = "green";
                 } else { 
                     badge.innerText = "🟧 WAIT / BID AT FLOOR"; badge.className = "badge orange"; 
-                    document.getElementById('verdict').innerText = "VERDICT: LEDGER LIMIT - BIDS ONLY";
+                    verdict.innerText = "VERDICT: LEDGER LIMIT - BIDS ONLY"; verdict.className = "orange";
                 }
 
             } catch(e) { alert("SCAN ERROR: " + e.message); }
