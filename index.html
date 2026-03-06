@@ -338,8 +338,7 @@ async function fetchWithTimeout(url, ms=15000) {
 }
 
 // ── Worker-primary bar fetch ──────────────────────────────────────────
-const WORKER = "https://nuvo-proxy.yulgutierrez.workers.dev";
-
+const WORKER = "https://nuvo-vsim-worker.yulgutierrez.workers.dev";
 async function fetchBars(sym, tf) {
   const s = sym.trim().toUpperCase();
   if (!s) return [];
