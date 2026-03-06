@@ -1,7 +1,14 @@
-name = "nuvo-vsim"
-compatibility_date = "2026-03-03"
+#:schema https://mod.cloudflare.com/schemas/wrangler/config-schema.json
+name = "nuvo-proxy"
+main = "worker.js"
+compatibility_date = "2024-03-06"
 
-[[d1_databases]]
-binding = "DB"
-database_name = "nuvo-vsim"
-database_id = "ed3c4304-b7f0-4bbf-a887-28a262b0430f"
+[observability]
+enabled = true
+
+# This ensures your Worker can talk to the Polygon API
+[browser]
+enabled = false
+
+# If you ever want to use a database later, we can add that here.
+# For now, we are focusing on the live Market Terminal.
