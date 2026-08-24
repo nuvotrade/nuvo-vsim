@@ -401,7 +401,10 @@ function dashboardHtml() {
   </script></body></html>`;
 }
 
-const DESIGN_ORIGIN = 'https://nuvo-vsim-v5-preview.pages.dev';
+// Pin the reviewed visual assets to the immutable Pages deployment. The public
+// preview alias is retired because its example values could be mistaken for
+// live market and account data.
+const DESIGN_ORIGIN = 'https://c8c17621.nuvo-vsim-v5-preview.pages.dev';
 const DASHBOARD_HEADERS = Object.freeze({
   'content-type': 'text/html; charset=utf-8',
   'cache-control': 'private, no-store',
