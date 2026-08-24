@@ -35,6 +35,7 @@ function publicStatus(env) {
     broker_execution_mode: 'SHADOW_ONLY',
     mutation_routes: false,
     existing_vsim_untouched: true,
+    schedule: 'Every 15 minutes',
     version: env.CF_VERSION_METADATA?.id ?? 'local',
   };
 }
@@ -400,20 +401,298 @@ function dashboardHtml() {
   </script></body></html>`;
 }
 
+const DESIGN_ORIGIN = 'https://nuvo-vsim-v5-preview.pages.dev';
+const DASHBOARD_HEADERS = Object.freeze({
+  'content-type': 'text/html; charset=utf-8',
+  'cache-control': 'private, no-store',
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+});
+
+export function rewriteDesignHtml(source) {
+  return source
+    .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
+    .replace('href="styles.css"', 'href="/design/styles.css"')
+    .replace('src="app.js"', 'src="/design/app.js"')
+    .replace('</head>', '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('</body>', '<script src="/design/live.js"></script></body>');
+}
+
+async function designAsset(path) {
+  const upstream = await fetch(`${DESIGN_ORIGIN}/${path}`, { signal: AbortSignal.timeout(5_000) });
+  if (!upstream.ok) throw new Error('DESIGN_ASSET_UNAVAILABLE');
+  const type = path.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8';
+  let source = await upstream.text();
+  if (path.endsWith('.js')) source = source.replace(' · preview`', ' · live shadow`');
+  return new Response(source, { headers: {
+    'content-type': type,
+    'cache-control': 'private, no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  } });
+}
+
+async function fullDashboard() {
+  const upstream = await fetch(`${DESIGN_ORIGIN}/`, { signal: AbortSignal.timeout(5_000) });
+  if (!upstream.ok) throw new Error('DESIGN_UNAVAILABLE');
+  return new Response(rewriteDesignHtml(await upstream.text()), { headers: DASHBOARD_HEADERS });
+}
+
+export function liveDashboardScript() {
+  return `(() => {
+  'use strict';
+  const q = (selector, root = document) => root.querySelector(selector);
+  const qa = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const present = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+  const money = value => present(value) ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(Number(value)) : '—';
+  const number = value => present(value) ? Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—';
+  const percent = value => present(value) ? (Number(value) * 100).toFixed(1) + '%' : '—';
+  const when = value => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) : 'Not available';
+  const text = (node, value) => { if (node) node.textContent = value; };
+  const clear = node => { if (node) node.replaceChildren(); };
+  const make = (tag, value, className) => { const node = document.createElement(tag); if (value !== undefined) node.textContent = value; if (className) node.className = className; return node; };
+  const api = async (path, options) => { const response = await fetch(path, options); const body = await response.json(); if (!response.ok) throw new Error(body.error || body.reason || ('HTTP ' + response.status)); return body; };
+  const connectorOk = status => status === 'CONNECTED' || status === 'LIVE_READ_ONLY';
+  const structure = value => ({ CSP: 'Cash-secured put', BULL_PUT_SPREAD: 'Bull put spread', CASH_SECURED_PUT: 'Cash-secured put' }[value] || value || '—');
+
+  function scrubPreviewLanguage() {
+    text(q('.header-status strong'), 'Protected shadow');
+    text(q('.header-status small'), 'Loading verified data…');
+    text(q('.safety-title'), '◇  LIVE SHADOW');
+    text(q('.safety-banner p'), 'Loading protected account, market, and evidence state. Broker mutation remains disabled.');
+    text(q('footer span:first-child'), 'NUVO VSIM v5 · Protected live shadow');
+    text(q('footer span:nth-child(2)'), 'Schwab read-only · Massive live market data · no broker mutation');
+  }
+
+  function renderRows(tbody, rows, cells) {
+    clear(tbody);
+    if (!rows.length) {
+      const row = make('tr'); const cell = make('td', 'No current candidates. The system remains in NO TRADE until every truth and risk gate passes.');
+      cell.colSpan = cells.length; cell.className = 'muted'; row.append(cell); tbody.append(row); return;
+    }
+    rows.forEach((item, index) => {
+      const row = make('tr');
+      cells.forEach(formatter => { const cell = make('td'); const result = formatter(item, index); if (result instanceof Node) cell.append(result); else cell.textContent = result; row.append(cell); });
+      tbody.append(row);
+    });
+  }
+
+  function renderOverview(status) {
+    const custody = status.custody || {};
+    const account = custody.account || {};
+    const positions = custody.positions || [];
+    const baseline = status.baseline || {};
+    const cycle = status.latestCycle || {};
+    const market = status.marketCheck;
+    const marked = positions.reduce((sum, position) => sum + Math.abs(Number(position.marketValue) || 0), 0);
+    const cards = qa('#overview .metric-card');
+    if (cards[0]) { text(q('.metric-label', cards[0]), 'Net asset value'); text(q('.metric-value', cards[0]), money(account.nav)); text(q('.metric-foot', cards[0]), 'Schwab read-only · ' + when(custody.observedAt)); }
+    if (cards[1]) { text(q('.metric-label', cards[1]), 'Buying power'); text(q('.metric-value', cards[1]), money(account.buyingPower)); const bar = q('.bar', cards[1]); if (bar) bar.remove(); text(q('.metric-foot', cards[1]), 'Broker-reported available buying power'); }
+    if (cards[2]) { text(q('.metric-label', cards[2]), 'Marked positions'); text(q('.metric-value', cards[2]), money(marked)); text(q('.metric-foot', cards[2]), positions.length + ' synchronized position' + (positions.length === 1 ? '' : 's')); }
+    if (cards[3]) { text(q('.metric-label', cards[3]), 'Reconciliation baseline'); text(q('.metric-value', cards[3]), baseline.status || 'REQUIRED'); text(q('.metric-foot', cards[3]), baseline.status === 'CAPTURED' ? (baseline.positionCount + ' positions · ' + baseline.openOrderCount + ' open orders') : 'Required before a cycle may proceed'); }
+    text(q('#overview .snapshot strong'), when(custody.observedAt));
+
+    const environment = q('#overview .environment-panel');
+    if (environment) {
+      const session = market && market.marketState ? (market.marketState.status || market.marketState.error || 'UNKNOWN') : 'NOT CHECKED';
+      const confidence = present(cycle.regimeConfidence) ? Math.round(Number(cycle.regimeConfidence) * 100) : null;
+      text(q('.regime', environment), cycle.regime || session);
+      text(q('.score-ring span', environment), confidence === null ? '—' : String(confidence));
+      text(q('.score-ring small', environment), confidence === null ? '' : '/ 100');
+      text(q('.regime-score strong', environment), cycle.regime ? 'Live model classification' : 'Awaiting an admissible live cycle');
+      text(q('.regime-score p', environment), market ? (market.ok ? 'Massive quotes and option chains passed freshness checks.' : 'Market data is fail-closed: ' + (market.marketState && (market.marketState.error || market.marketState.status) || 'freshness check failed') + '.') : 'Run the live market verification before opportunity analysis.');
+      const signals = qa('.signal-grid > div', environment);
+      const contractCount = market && market.symbols ? market.symbols.reduce((sum, row) => sum + Number(row.contractCount || 0), 0) : 0;
+      const values = [
+        ['Market session', session, market && market.marketState && market.marketState.asOf ? when(market.marketState.asOf) : 'Not checked'],
+        ['Massive', market ? (market.ok ? 'VERIFIED' : 'BLOCKED') : 'NOT CHECKED', market ? when(market.checkedAt) : 'Strict freshness'],
+        ['Live contracts', market ? number(contractCount) : '—', market && market.symbols ? market.symbols.length + ' underlyings checked' : 'Not checked'],
+        ['Schwab', status.schwab && status.schwab.status || 'UNKNOWN', when(status.schwab && status.schwab.lastSuccessfulSyncAt)],
+      ];
+      signals.forEach((node, index) => { const value = values[index]; if (!value) return; text(q('span', node), value[0]); text(q('strong', node), value[1]); text(q('small', node), value[2]); });
+      text(q('.confidence span', environment), 'Regime confidence'); text(q('.confidence strong', environment), confidence === null ? 'Not available' : confidence + '%');
+      const fill = q('.confidence .bar i', environment); if (fill) fill.style.width = (confidence || 0) + '%';
+    }
+
+    const decision = q('#overview .decision-panel');
+    if (decision) {
+      const outcome = cycle.outcome || 'NO CYCLE';
+      text(q('h3', decision), outcome === 'REFUSED' ? 'Proposal withheld' : outcome);
+      text(q('.decision-badge', decision), outcome);
+      text(q('.decision-copy strong', decision), cycle.reason || 'No completed live decision yet');
+      text(q('.decision-copy p', decision), cycle.cycleId ? ('Cycle ' + cycle.cycleId + ' · Authority 1 cannot allocate capital.') : 'Run a verified live shadow scan after reconciliation and market freshness pass.');
+      const trace = q('.trace-mini', decision); clear(trace);
+      const steps = cycle.trace && cycle.trace.length ? cycle.trace.slice(-4) : ['Custody synchronized', 'Reconciliation baseline checked', 'Live market freshness checked', 'Risk governor retained'];
+      steps.forEach((step, index) => { const li = make('li', undefined, index === steps.length - 1 && outcome === 'REFUSED' ? 'stop' : 'pass'); li.append(make('span', typeof step === 'string' ? step : (step.layer || step.stage || 'Verified gate')), make('small', index === steps.length - 1 ? (cycle.reason || 'Shadow only') : 'Recorded')); trace.append(li); });
+    }
+
+    const opportunities = cycle.opportunities || [];
+    const topBody = q('#overview .table-panel tbody');
+    renderRows(topBody, opportunities.slice(0, 10), [
+      (_item, index) => String(index + 1).padStart(2, '0'),
+      item => item.underlying || '—', item => structure(item.structure),
+      item => [item.shortStrike, item.longStrike].filter(present).join(' / ') || '—',
+      item => number(item.dte), item => money(item.nev), item => percent(item.raroc),
+      item => money(item.economicCapital), item => item.admissible ? 'ELIGIBLE' : (item.rejection || 'DECLINED'),
+    ]);
+    text(q('#overview .panel-note'), 'Live ranked shadow candidates. Values are generated from current Massive option chains; no order can be submitted.');
+
+    const positionPanel = q('#overview .positions-empty');
+    if (positionPanel) {
+      clear(positionPanel);
+      const head = make('div', undefined, 'panel-head'); const title = make('div'); title.append(make('p', 'Layer 8 · Live custody', 'kicker'), make('h3', 'Open positions')); head.append(title, make('span', positions.length + ' open', 'count')); positionPanel.append(head);
+      if (!positions.length) positionPanel.append(make('div', 'No synchronized positions.', 'empty-state'));
+      else { const wrap = make('div', undefined, 'table-wrap'); const table = make('table'); const thead = make('thead'); const hr = make('tr'); ['Symbol','Type','Quantity','Market value'].forEach(label => hr.append(make('th', label))); thead.append(hr); const body = make('tbody'); positions.forEach(position => { const row = make('tr'); [position.symbol || '—', position.type || '—', number(position.quantity), money(position.marketValue)].forEach(value => row.append(make('td', value))); body.append(row); }); table.append(thead, body); wrap.append(table); positionPanel.append(wrap); }
+    }
+
+    const health = q('#overview .health-list');
+    if (health) {
+      clear(health);
+      const entries = [
+        ['Evidence chain', status.evidence && status.evidence.records + ' RECORDS', true],
+        ['Constitution', 'AUTHORITY 1', true],
+        ['Market adapter', market ? (market.ok ? 'LIVE' : 'BLOCKED') : 'NOT CHECKED', Boolean(market && market.ok)],
+        ['Broker adapter', status.schwab && status.schwab.status || 'UNKNOWN', connectorOk(status.schwab && status.schwab.status)],
+        ['Order mutation', 'DISABLED', true],
+      ];
+      entries.forEach(entry => { const li = make('li'); const label = make('span'); label.append(make('i', undefined, 'health ' + (entry[2] ? 'green' : 'amber')), document.createTextNode(entry[0])); li.append(label, make('strong', entry[1])); health.append(li); });
+      text(q('#overview .system-brief .status-badge'), 'LIVE SHADOW');
+      text(q('#overview .readiness'), '1 / 5');
+      const scoreNotes = qa('#overview .scorecard .score-rows small');
+      ['Collecting shadow outcomes','Awaiting 50 mature observations','Mutation intentionally disabled','Clean','Collecting survival evidence'].forEach((value, index) => text(scoreNotes[index], value));
+    }
+  }
+
+  function renderOpportunities(status) {
+    const cycle = status.latestCycle || {};
+    const rows = cycle.opportunities || [];
+    const chips = qa('#opportunities .chip');
+    if (chips[0]) text(chips[0], 'Current candidates ' + rows.length);
+    if (chips[1]) text(chips[1], 'Eligible ' + rows.filter(row => row.admissible).length);
+    if (chips[2]) text(chips[2], 'Declined ' + rows.filter(row => !row.admissible).length);
+    if (chips[3]) text(chips[3], cycle.outcome || 'NO CYCLE');
+    text(q('#opportunities .as-of'), cycle.at ? ('As of ' + when(cycle.at)) : 'No completed cycle');
+    renderRows(q('#opportunities .detailed tbody'), rows, [
+      (_item, index) => String(index + 1).padStart(2, '0'), item => item.underlying || '—',
+      item => structure(item.structure), () => '—', () => '—', () => '—',
+      item => money(item.cvar), () => '—', item => money(item.nev), item => percent(item.raroc),
+      item => item.admissible ? 'ELIGIBLE' : (item.rejection || 'DECLINED'),
+    ]);
+    const detail = q('#opportunities .candidate-detail');
+    if (detail) {
+      clear(detail);
+      const panel = make('article', undefined, 'panel');
+      panel.append(make('p', 'Current shadow result', 'kicker'), make('h3', cycle.outcome || 'No live cycle yet'), make('p', cycle.reason || 'Run a verified shadow scan. Missing values are intentionally shown as unavailable instead of synthetic estimates.'));
+      const actions = make('div', undefined, 'operator-actions');
+      const run = make('button', 'Run live shadow scan', 'chip active'); run.dataset.action = 'cycle'; actions.append(run); panel.append(actions); detail.append(panel);
+    }
+  }
+
+  async function renderEvidence(status) {
+    const payload = await api('/api/evidence');
+    const records = payload.records || [];
+    text(q('#evidence .chain-valid strong'), records.length ? 'VALID' : 'EMPTY');
+    const layout = q('#evidence .evidence-layout'); clear(layout);
+    const list = make('article', undefined, 'panel evidence-list');
+    const head = make('div', undefined, 'panel-head'); const title = make('div'); title.append(make('p', 'Append-only D1 index · immutable R2 packages', 'kicker'), make('h3', records.length + ' sealed evidence record' + (records.length === 1 ? '' : 's'))); head.append(title, make('span', 'SHA-256 chained', 'hash')); list.append(head);
+    const tableWrap = make('div', undefined, 'table-wrap'); const table = make('table'); const thead = make('thead'); const hr = make('tr'); ['Sequence','Cycle','Decision','Authority','Fingerprint','Created'].forEach(label => hr.append(make('th', label))); thead.append(hr); const body = make('tbody');
+    records.forEach(record => { const row = make('tr'); [record.sequence, record.cycle_id, record.decision, record.authority_level, (record.decision_fingerprint || '').slice(0, 16) + '…', when(record.created_at)].forEach(value => row.append(make('td', String(value ?? '—')))); body.append(row); });
+    if (!records.length) { const row = make('tr'); const cell = make('td', 'No evidence records have been sealed.'); cell.colSpan = 6; row.append(cell); body.append(row); }
+    table.append(thead, body); tableWrap.append(table); list.append(tableWrap); layout.append(list);
+    const side = make('aside', undefined, 'evidence-side'); const facts = make('article', undefined, 'panel'); facts.append(make('p', 'Protected evidence storage', 'kicker'), make('h3', status.evidence.storage)); const dl = make('dl', undefined, 'package-facts'); [['Index','Cloudflare D1'],['Raw packages','Protected R2'],['Records',String(records.length)],['Mutation request','None'],['Authority','1 · Shadow']].forEach(pair => { const div = make('div'); div.append(make('dt', pair[0]), make('dd', pair[1])); dl.append(div); }); facts.append(dl); side.append(facts); layout.append(side);
+    text(q('#evidence .preview-disclaimer'), 'Live protected evidence metadata. Raw evidence packages remain private and are not exposed to the browser.');
+  }
+
+  function renderSystem(status) {
+    text(q('#system .readiness-banner strong'), 'Operational live shadow system');
+    text(q('#system .readiness-banner p'), 'Schwab custody is read-only, Massive market data is fail-closed, and D1/R2 evidence is active. Live-order mutation remains constitutionally and technically unavailable.');
+    text(q('#system .readiness-number'), 'SHADOW');
+    const connectors = qa('#system .connector');
+    const market = status.marketCheck;
+    const states = [
+      { status: market ? (market.ok ? 'Verified live' : 'Blocked safely') : 'Not checked', note: market ? ('Last check ' + when(market.checkedAt)) : 'Run the live chain verification.', values: ['Private service binding','Options chains + Greeks','Strict freshness gate','Session + event data'] },
+      { status: status.schwab && status.schwab.status || 'Unknown', note: 'Custody reads only. No order mutation route exists.', values: ['Account + cash live','Positions + orders live','Baseline reconciliation','Order mutation locked'] },
+      { status: status.evidence.records + ' records', note: 'Ordered D1 index with protected immutable R2 packages.', values: ['Decision metadata in D1','Raw packages in R2','Append-only hash chain','Raw packages not browser-exposed'] },
+      { status: status.schedule || 'Every 15 minutes', note: 'Single-flight cycles use distributed D1 leases and deterministic IDs.', values: ['Market-session gate','Distributed idempotency','Single-flight lease','Fail-closed refusal evidence'] },
+    ];
+    connectors.forEach((card, index) => { const state = states[index]; if (!state) return; text(q('.connector-status', card), state.status); text(q('.connector-note', card), state.note); qa('li b', card).forEach((node, valueIndex) => text(node, state.values[valueIndex] || 'Active')); });
+    const ladder = qa('#system .ladder > div'); if (ladder[1]) { text(q('small', ladder[1]), 'Current live shadow'); }
+    let controls = q('#system .operator-controls');
+    if (!controls) {
+      controls = make('article', undefined, 'panel operator-controls');
+      controls.append(make('p', 'Protected operator controls', 'kicker'), make('h3', 'Live shadow operations'));
+      const actions = make('div', undefined, 'filter-row');
+      [['refresh','Refresh status'],['custody','Refresh Schwab'],['market','Verify Massive chains'],['baseline','Capture reconciliation baseline'],['cycle','Run opportunity scan']].forEach(pair => { const button = make('button', pair[1], 'chip'); button.dataset.action = pair[0]; actions.append(button); });
+      controls.append(actions, make('p', 'These controls read custody, verify market data, capture a reconciliation baseline, or run a shadow simulation. None can submit, replace, or cancel an order.', 'connector-note'), make('pre', 'Ready.', 'operator-output'));
+      const ladderPanel = q('#system .authority-ladder'); ladderPanel.parentNode.insertBefore(controls, ladderPanel);
+    }
+  }
+
+  let currentStatus = null;
+  async function refresh() {
+    currentStatus = await api('/api/status');
+    renderOverview(currentStatus); renderOpportunities(currentStatus); renderSystem(currentStatus); await renderEvidence(currentStatus);
+    text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
+    text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
+    text(q('.safety-banner p'), 'Live Schwab custody, Massive market data, and D1/R2 evidence are connected. Broker order mutation is disabled.');
+    text(q('footer span:nth-child(3)'), 'Worker ' + String(currentStatus.version || '').slice(0, 12));
+  }
+
+  async function operate(action, button) {
+    const output = q('.operator-output');
+    const operations = {
+      refresh: () => Promise.resolve(),
+      custody: () => api('/api/operator/custody/refresh', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'REFRESH_READ_ONLY_CUSTODY' }) }),
+      market: () => api('/api/operator/market/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
+      baseline: () => api('/api/operator/baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'CAPTURE_READ_ONLY_BASELINE' }) }),
+      cycle: () => api('/api/cycle', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() }, body: '{}' }),
+    };
+    const confirmations = { custody: 'Refresh the read-only Schwab custody snapshot?', baseline: 'Capture the current Schwab state as the reconciliation baseline?', cycle: 'Run a live-data shadow opportunity simulation? It cannot place an order.' };
+    if (confirmations[action] && !window.confirm(confirmations[action])) return;
+    if (!operations[action]) return;
+    if (button) button.disabled = true; text(output, 'Working…');
+    try { const result = await operations[action](); text(output, result ? JSON.stringify(result, null, 2) : 'Status refreshed.'); await refresh(); }
+    catch (error) { text(output, 'REFUSED: ' + error.message); }
+    finally { if (button) button.disabled = false; }
+  }
+
+  document.addEventListener('click', event => { const button = event.target.closest('[data-action]'); if (button) operate(button.dataset.action, button); });
+  scrubPreviewLanguage();
+  refresh().catch(error => {
+    text(q('.header-status strong'), 'Live data unavailable');
+    text(q('.safety-title'), '◇  FAIL-CLOSED');
+    text(q('.safety-banner p'), 'The protected live state could not be loaded: ' + error.message + '. No synthetic account or opportunity values are displayed.');
+    qa('.metric-value').forEach(node => text(node, 'UNAVAILABLE'));
+    qa('tbody').forEach(clear);
+  }).finally(() => document.body.classList.add('live-ready'));
+})();`;
+}
+
 async function route(request, env) {
   const url = new URL(request.url);
   if (url.pathname === '/health') return json(publicStatus(env));
-  if (url.pathname === '/' && request.method === 'GET') {
+  if (request.method === 'GET' && (url.pathname === '/' || url.pathname.startsWith('/design/'))) {
     try { await authenticateAccess(request, env); }
     catch (error) { return json({ error: error.message }, 401); }
-    return new Response(dashboardHtml(), { headers: {
-      'content-type': 'text/html; charset=utf-8',
+    if (url.pathname === '/design/styles.css') return designAsset('styles.css');
+    if (url.pathname === '/design/app.js') return designAsset('app.js');
+    if (url.pathname === '/design/live.js') return new Response(liveDashboardScript(), { headers: {
+      'content-type': 'text/javascript; charset=utf-8',
       'cache-control': 'private, no-store',
-      'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-      'referrer-policy': 'no-referrer',
       'x-content-type-options': 'nosniff',
-      'x-frame-options': 'DENY',
+      'referrer-policy': 'no-referrer',
     } });
+    if (url.pathname !== '/') return json({ error: 'NOT_FOUND' }, 404);
+    try { return await fullDashboard(); }
+    catch (error) {
+      console.error('Full dashboard unavailable; serving protected fail-safe console', error);
+      return new Response(dashboardHtml(), { headers: {
+        ...DASHBOARD_HEADERS,
+        'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      } });
+    }
   }
   if (!url.pathname.startsWith('/api/')) return json({ error: 'NOT_FOUND' }, 404);
 

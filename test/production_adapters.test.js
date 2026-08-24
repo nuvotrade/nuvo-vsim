@@ -4,12 +4,33 @@ import { MassiveProvider } from '../src/truth/providers/massive.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
-import { cycleIdFor } from '../cloudflare/worker.js';
+import { cycleIdFor, liveDashboardScript, rewriteDesignHtml } from '../cloudflare/worker.js';
 import { availableContractDtes } from '../src/pipeline/cycle.js';
 import { aggregatePositions, normalizePosition, SchwabD1Client } from '../cloudflare/schwab-client.js';
 import { D1R2EvidencePersistence } from '../cloudflare/evidence-persistence.js';
 
 const NOW = Date.UTC(2026, 7, 23, 18, 0, 0);
+
+describe('protected live dashboard', () => {
+  test('rewrites the polished design to same-origin protected assets and live bindings', () => {
+    const html = rewriteDesignHtml('<title>NUVO VSIM v5 — Shadow Preview</title><link rel="stylesheet" href="styles.css"></head><body><script src="app.js"></script></body>');
+    assert.match(html, /NUVO VSIM v5 — Live Shadow/u);
+    assert.match(html, /href="\/design\/styles\.css"/u);
+    assert.match(html, /src="\/design\/app\.js"/u);
+    assert.match(html, /src="\/design\/live\.js"/u);
+    assert.match(html, /visibility:hidden/u);
+  });
+
+  test('ships syntactically valid live bindings for every protected shadow surface', () => {
+    const source = liveDashboardScript();
+    assert.doesNotThrow(() => new Function(source));
+    for (const path of ['/api/status', '/api/evidence', '/api/operator/custody/refresh',
+      '/api/operator/market/check', '/api/operator/baseline', '/api/cycle']) {
+      assert.match(source, new RegExp(path.replaceAll('/', '\\/'), 'u'));
+    }
+    assert.doesNotMatch(source, /submitOrder|replaceOrder|cancelOrder/u);
+  });
+});
 
 function marketFetcher({ staleChain = false } = {}) {
   return async (request) => {

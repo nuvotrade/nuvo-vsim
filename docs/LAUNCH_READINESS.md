@@ -33,6 +33,10 @@ Cloudflare resources:
   power, positions, and open orders from one timestamped snapshot.
 - The operator dashboard displays the current snapshot and never presents
   missing numeric fields as zero.
+- The full four-tab operator design now runs directly on the protected Worker.
+  Its account, position, opportunity, evidence, connector, and cycle state is
+  loaded from the authenticated APIs; hard-coded preview values are never
+  shown while live state is loading or unavailable.
 - Existing positions are mapped into the Portfolio Governor. A missing
   quantity, unsupported instrument, unpriceable position, or undefined-risk
   short call refuses the entire map.
@@ -55,7 +59,7 @@ Cloudflare resources:
   same durable evidence path.
 - A downloaded live R2 package passed payload verification and deterministic
   replay with the identical decision fingerprint and zero differences.
-- The complete local suite passes: **270/270 tests**.
+- The complete local suite passes: **272/272 tests**.
 
 ## What remains blocked
 
