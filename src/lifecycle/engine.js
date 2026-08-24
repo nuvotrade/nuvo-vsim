@@ -45,8 +45,11 @@ export const ACTION = Object.freeze({
  * whole point of 13.
  */
 export function evHold({
-  position, structure, dist, diffusionDist, currentMarkDebit, costs, lambdas,
+  structure, dist, diffusionDist, currentMarkDebit, costs, lambdas,
 }) {
+  // `position` is deliberately NOT a parameter. Nothing about what was paid
+  // may reach this valuation, and the surest way to guarantee that is for
+  // the function to have no access to it.
   // The shift is taken against the STRUCTURE's own credit, never against
   // position.entryCredit. They are normally the same number, but reading it
   // from the position would make anchor-freedom a coincidence that a
@@ -157,7 +160,7 @@ export function decide({
   }
 
   // ── The §13 comparison ──
-  const hold = evHold({ position, structure, dist, diffusionDist, currentMarkDebit, costs, lambdas });
+  const hold = evHold({ structure, dist, diffusionDist, currentMarkDebit, costs, lambdas });
   const close = evClose({ currentMarkDebit, exitCost, freedCapital: position.buyingPower });
   const roll = evRoll({ closeResult: close, newCandidate: rollCandidate });
 
