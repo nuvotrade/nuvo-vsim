@@ -31,6 +31,7 @@ export * from './truth/contract.js';
 export * from './truth/reconciliation.js';
 export * from './truth/providers/provider.js';
 export * from './truth/providers/synthetic.js';
+export * from './truth/providers/massive.js';
 
 export const VERSION = '5.0.0';
 export const MANDATE =

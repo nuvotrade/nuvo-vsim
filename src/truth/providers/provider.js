@@ -16,6 +16,7 @@ export class DataProvider {
   async history(symbol, opts) { return { error: 'not implemented' }; }
   async events(symbol) { return { error: 'not implemented' }; }
   async accountState() { return { error: 'not implemented' }; }
+  async marketState() { return { error: 'not implemented' }; }
   /* eslint-enable no-unused-vars */
 }
 
@@ -30,4 +31,5 @@ export class NullProvider extends DataProvider {
   async history() { return { error: 'no provider configured' }; }
   async events() { return { error: 'no provider configured' }; }
   async accountState() { return { error: 'no provider configured' }; }
+  async marketState() { return { error: 'no provider configured' }; }
 }

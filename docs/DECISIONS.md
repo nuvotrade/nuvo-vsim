@@ -367,11 +367,12 @@ right that they gate production use:
 
 - **No demonstrated trading edge.** The Research Lab is a framework; there is
   no completed historical implementation of VSIM-001, and the demo command
-  generates synthetic gate results. 225 tests prove code behaviour, not
+  generates synthetic gate results. 270 tests prove code behaviour, not
   expectancy. This is Phase 2 and cannot be closed by writing code.
-- **No production adapters.** Massive and Schwab are integration work, and
-  the adapter contract — every method must be able to say *I do not know* —
-  is only provable against the real API.
+- **No live mutation adapter.** Massive live chains and a Schwab read-only
+  custody adapter are deployed in the private shadow runtime. Order submit,
+  replace and cancel remain deliberately absent until the shadow evidence,
+  execution outbox and canary authority gates are satisfied.
 - **Lifecycle is a library, not a closed loop.** Scheduling, persistent
   position state, broker close/roll execution and partial-fill recovery are
   not wired into the engine.

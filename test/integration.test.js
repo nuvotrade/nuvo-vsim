@@ -144,6 +144,17 @@ describe('the machine fails closed (§18)', () => {
     assert.equal(r.outcome, OUTCOME.REFUSED);
   });
 
+  test('an unverified event calendar on any scan symbol refuses the cycle', async () => {
+    const { eng, provider } = build({ ivMult: 1.45 });
+    const real = provider.events.bind(provider);
+    provider.events = async (symbol) => symbol === 'XOM'
+      ? { error: 'event feed unavailable' }
+      : real(symbol);
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(r.outcome, OUTCOME.REFUSED);
+    assert.equal(r.trace.find((entry) => entry.name === 'truth')?.detail?.symbol, 'XOM');
+  });
+
   test('an unconfident regime call blocks new exposure', async () => {
     const { eng, provider } = build({ ivMult: 1.45 });
     // Withhold the volatility-level inputs entirely, leaving the classifier

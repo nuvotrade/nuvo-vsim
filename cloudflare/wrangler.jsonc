@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nuvo-vsim-v5-shadow",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "triggers": { "crons": ["*/15 13-21 * * 1-5"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nuvo-vsim-v5-shadow",
+      "database_id": "20eb40a8-c162-43b8-b480-0d28042501de",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "EVIDENCE", "bucket_name": "nuvo-vsim-v5-evidence-shadow" }
+  ],
+  "services": [
+    { "binding": "MARKET", "service": "master", "environment": "production" }
+  ],
+  "vars": {
+    "NUVO_ENVIRONMENT": "shadow",
+    "NUVO_BROKER_MODE": "READ_ONLY",
+    "NUVO_BROKER_EXECUTION_MODE": "SHADOW_ONLY",
+    "NUVO_SYMBOLS": "SPY,QQQ,IWM",
+    "NUVO_FUND_SYMBOLS": "SPY,QQQ,IWM",
+    "NUVO_DTE_TARGETS": "14,30,45",
+    "NUVO_MAX_CHAIN_AGE_MS": "120000",
+    "NUVO_SCREEN_SAMPLES": "1500",
+    "NUVO_DECISION_SAMPLES": "8000",
+    "NUVO_REFINE_TOP": "8",
+    "PUBLIC_ORIGIN": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev",
+    "SCHWAB_CALLBACK_URL": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev/api/integrations/schwab/callback",
+    "ACCESS_TEAM_DOMAIN": "yulgutierrez",
+    "ACCESS_AUD": "9ff9966020d5438ee91a675d8ab2edc27860f1778c85c5f7f6503fd3ef00b679"
+  }
+}

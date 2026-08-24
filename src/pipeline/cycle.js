@@ -42,6 +42,12 @@ export const OUTCOME = Object.freeze({
   REFUSED: 'REFUSED',     // truth/authority failure: fail closed
 });
 
+/** Listed expirations rarely equal a requested target DTE exactly. */
+export function availableContractDtes(chain) {
+  return [...new Set((chain?.contracts ?? []).map((contract) => contract.dte)
+    .filter((dte) => Number.isFinite(dte) && dte > 0))].sort((a, b) => a - b);
+}
+
 /**
  * Build the forward distribution for one underlying at one tenor.
  *
@@ -107,6 +113,7 @@ export async function runCycle(ctx) {
     dteTargets = [14, 30, 45], baseRiskPct = 0.02, maxGovernanceAttempts = 25,
     screenSamples = 3000, decisionSamples = 20_000, refineTop = 12,
     commitmentsThisCycle = 0, closedTradePnl = null, externalizeRaw = false,
+    portfolioReturnsBySymbol = {}, portfolioSectors = {},
   } = ctx;
 
   const trace = [];
@@ -174,17 +181,13 @@ export async function runCycle(ctx) {
     events[sym] = await provider.events(sym);
   }
 
-  const snapshot = {
+  const sharedSnapshot = {
     accountState: account,
     marketStatus: { value: indexState.value?.status, asOf: indexState.asOf, source: 'provider' },
-    underlyingQuote: quotes[symbols[0]],
-    optionChain: chains[symbols[0]],
-    greeks: { value: chains[symbols[0]]?.value ? true : undefined, asOf: chains[symbols[0]]?.asOf, source: 'chain' },
     positions: brokerPositions,
     openOrders: brokerOrders,
     buyingPower: { value: account.value?.buyingPower, asOf: account.asOf, source: 'broker' },
     modelVersion: { value: modelVersion, asOf: now, source: 'engine' },
-    eventCalendar: events[symbols[0]],
   };
 
   /**
@@ -203,6 +206,7 @@ export async function runCycle(ctx) {
     brokerOpenOrdersAsOf: brokerOrders.asOf ?? null,
     indexState: { ...(indexState.value ?? {}), ...(ctx.indexExtras ?? {}) },
     indexAsOf: indexState.asOf ?? null,
+    indexError: indexState.error ?? null,
     symbols: Object.fromEntries(symbols.map((sym) => [sym, {
       quote: quotes[sym]?.value ?? null,
       quoteAsOf: quotes[sym]?.asOf ?? null,
@@ -227,6 +231,8 @@ export async function runCycle(ctx) {
       dteTargets, baseRiskPct, maxGovernanceAttempts,
       commitmentsThisCycle,
       closedTradePnl: closedTradePnl ?? null,
+      portfolioReturnsBySymbol,
+      portfolioSectors,
       indexExtras: ctx.indexExtras ?? {},
       strategyState: registry?.get(strategyId)?.state ?? null,
       calibration: calibrationStore ? {
@@ -243,14 +249,24 @@ export async function runCycle(ctx) {
   };
 
   capturedRaw = rawInputs;
-  const truthReport = verify(snapshot, { limits, now });
-  if (!truthReport.tradeable) {
-    killSwitches?.trip(SWITCH.DATA_INTEGRITY, 'Truth contract not satisfied.',
-      truthReport.summary());
-    step('truth', false, truthReport.summary());
-    return refuse(truthReport.violations, { truthReport });
+  let truthReport = null;
+  for (const sym of symbols) {
+    const report = verify({
+      ...sharedSnapshot,
+      underlyingQuote: quotes[sym],
+      optionChain: chains[sym],
+      greeks: { value: chains[sym]?.value ? true : undefined, asOf: chains[sym]?.asOf, source: 'chain' },
+      eventCalendar: events[sym],
+    }, { limits, now });
+    truthReport ??= report;
+    if (!report.tradeable) {
+      killSwitches?.trip(SWITCH.DATA_INTEGRITY, `Truth contract not satisfied for ${sym}.`,
+        { symbol: sym, ...report.summary() });
+      step('truth', false, { symbol: sym, ...report.summary() });
+      return refuse(report.violations, { truthReport: report });
+    }
   }
-  step('truth', true, { verdict: truthReport.verdict });
+  step('truth', true, { verdict: truthReport.verdict, symbols: [...symbols] });
 
   // Chain-level structural audit for every symbol, not just the first.
   for (const sym of symbols) {
@@ -344,7 +360,12 @@ export async function runCycle(ctx) {
   for (const sym of universe.tradeable) {
     const st = underlyings[sym];
     // Event clearance BEFORE any scoring — §7's "do not score garbage".
-    const maxDte = Math.max(...dteTargets);
+    const listedDtes = availableContractDtes(chains[sym].value);
+    if (!listedDtes.length) {
+      trace.push({ name: 'listedExpirations', ok: false, detail: { symbol: sym, reason: 'NO_LISTED_DTE' } });
+      continue;
+    }
+    const maxDte = Math.max(...listedDtes);
     const evFails = eventClearance(st, { dte: maxDte, limits, now });
     if (evFails.length) {
       trace.push({ name: 'eventClearance', ok: false, detail: { symbol: sym, reasons: evFails.map(String) } });
@@ -356,7 +377,7 @@ export async function runCycle(ctx) {
       continue;
     }
 
-    for (const dte of dteTargets) {
+    for (const dte of listedDtes) {
       const seedBase = `${cycleId}:${sym}:${dte}`;
       // Coarse pass to rank the field, full pass to decide. Both are
       // seeded from the cycle, so the whole thing stays reproducible.
@@ -427,12 +448,16 @@ export async function runCycle(ctx) {
   // rather than giving up: a candidate that cannot be sized is not evidence
   // that the next one cannot either, and abandoning the whole cycle over it
   // would silently convert a capital constraint into a false NO_TRADE.
-  const returnsBySymbol = Object.fromEntries(
-    Object.entries(underlyings).map(([s, u]) => [s, u.returns]),
-  );
-  const sectors = Object.fromEntries(
-    Object.entries(underlyings).map(([s, u]) => [s, u.quote?.sector ?? 'UNKNOWN']),
-  );
+  const returnsBySymbol = {
+    ...portfolioReturnsBySymbol,
+    ...Object.fromEntries(Object.entries(underlyings).map(([s, u]) => [s, u.returns])),
+  };
+  const sectors = { ...portfolioSectors };
+  for (const [symbol, underlying] of Object.entries(underlyings)) {
+    const observed = underlying.quote?.sector;
+    if (observed && observed !== 'UNKNOWN') sectors[symbol] = observed;
+    else if (!sectors[symbol]) sectors[symbol] = 'UNKNOWN';
+  }
 
   const governanceAttempts = [];
   let selected = null;

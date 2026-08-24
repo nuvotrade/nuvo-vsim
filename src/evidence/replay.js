@@ -51,11 +51,17 @@ export class ReplayProvider extends DataProvider {
 
   async events(symbol) {
     const s = this._sym(symbol);
-    if (!s) return { error: `no captured events for ${symbol}` };
-    return { value: s.events ?? [], asOf: s.eventsAsOf, source: 'replay' };
+    // `null` means the live provider failed to verify the calendar; `[]`
+    // means it verified that there were no events. Conflating those states
+    // makes a refused live cycle replay with fabricated event clearance.
+    if (!s || s.events === null || s.events === undefined) {
+      return { error: `no captured events for ${symbol}` };
+    }
+    return { value: s.events, asOf: s.eventsAsOf, source: 'replay' };
   }
 
   async marketState() {
+    if (this.raw.indexError) return { error: this.raw.indexError };
     if (!this.raw.indexState) return { error: 'no captured index state' };
     return { value: this.raw.indexState, asOf: this.raw.indexAsOf, source: 'replay' };
   }
@@ -161,6 +167,8 @@ export async function replay(pkg, { limits = null, rawInputs = null } = {}) {
     baseRiskPct: es.baseRiskPct,
     maxGovernanceAttempts: es.maxGovernanceAttempts,
     commitmentsThisCycle: es.commitmentsThisCycle,
+    portfolioReturnsBySymbol: es.portfolioReturnsBySymbol ?? {},
+    portfolioSectors: es.portfolioSectors ?? {},
     screenSamples: es.sampling?.screenSamples,
     decisionSamples: es.sampling?.decisionSamples,
     refineTop: es.sampling?.refineTop,
