@@ -77,7 +77,8 @@ export function buildDistribution({ spot, vol, dte, returns, seed, drift = 0.05,
 export async function runCycle(ctx) {
   const {
     cycleId, now, provider, broker, limits, killSwitches, ledger, registry,
-    calibrationStore, authorityLevel, positions = [], symbols, approved,
+    calibrationStore, authorityLevel, positions = [], reconcilePositions = null,
+    symbols, approved,
     nav, drawdownPct = 0, strategyId = 'VSIM-001',
     modelVersion = 'nuvo-model-5.0.0', codeVersion = 'nuvo-5.0.0',
     dteTargets = [14, 30, 45], baseRiskPct = 0.02, maxGovernanceAttempts = 25,
@@ -169,8 +170,12 @@ export async function runCycle(ctx) {
 
   // ── 1b. Reconciliation (§16) ─────────────────────────────────────────
   const recon = reconcile({
+    // Compared at LEG level in the broker's own schema — see
+    // NuvoEngine.brokerView(). Passing strategy-level contracts here makes
+    // every position look both phantom and unknown.
     engine: {
-      positions, cash: account.value.cash, buyingPower: account.value.buyingPower,
+      positions: reconcilePositions ?? [],
+      cash: account.value.cash, buyingPower: account.value.buyingPower,
       openOrders: brokerOrders.value ?? [],
     },
     broker: {

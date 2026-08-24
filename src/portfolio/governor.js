@@ -148,7 +148,7 @@ export function govern({
 
   const sizing = sizePosition({
     candidate, nav, ledger, regime, clusterExposure, clusterCorrelation,
-    limits, authorityLevel, baseRiskPct,
+    limits, authorityLevel, baseRiskPct, holdingsCount: positions.length,
   });
 
   if (sizing.contracts === 0) {

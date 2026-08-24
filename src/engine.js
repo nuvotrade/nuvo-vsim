@@ -47,6 +47,16 @@ export class NuvoEngine {
     this.orders = new OrderBook();
 
     this.positions = [];
+    /**
+     * Leg-level mirror of the book, in the BROKER's schema.
+     *
+     * Reconciliation compares like with like. Position contracts are
+     * multi-leg strategy objects (shortStrike/longStrike); the broker knows
+     * only individual contracts (strike/right). Comparing the two directly
+     * makes every filled position look simultaneously phantom and unknown,
+     * which quarantines the engine permanently after its first fill.
+     */
+    this.legPositions = new Map();
     this.closedTrades = [];
     this.fills = [];
     this.equityCurve = [nav];
@@ -56,6 +66,34 @@ export class NuvoEngine {
 
   get drawdownPct() {
     return maxDrawdown(this.equityCurve).current;
+  }
+
+  /** The book expressed the way the broker reports it, for reconciliation. */
+  brokerView() {
+    return [...this.legPositions.values()];
+  }
+
+  /** Apply a fill's legs to the leg-level mirror. */
+  _applyLegs(order, sign = 1) {
+    for (const leg of order.legs) {
+      const key = leg.symbol;
+      const prev = this.legPositions.get(key);
+      const signed = sign * (leg.action === 'SELL' ? -1 : 1) * leg.quantity;
+      const quantity = (prev?.quantity ?? 0) + signed;
+      if (quantity === 0) this.legPositions.delete(key);
+      else {
+        this.legPositions.set(key, {
+          underlying: order.intent.underlying,
+          symbol: key,
+          type: leg.right === 'shares' ? 'EQUITY' : 'OPTION',
+          right: leg.right,
+          strike: leg.strike,
+          expiration: leg.expiration,
+          quantity,
+          multiplier: leg.right === 'shares' ? 1 : 100,
+        });
+      }
+    }
   }
 
   /** Run one decision cycle and file the evidence, whatever the outcome. */
@@ -69,7 +107,9 @@ export class NuvoEngine {
       provider: this.provider, broker: this.broker, limits: this.limits,
       killSwitches: this.killSwitches, ledger: this.ledger, registry: this.registry,
       calibrationStore: this.calibration, authorityLevel: this.authorityLevel,
-      positions: this.positions, symbols: this.symbols, approved: this.approved,
+      positions: this.positions,
+      reconcilePositions: this.brokerView(),
+      symbols: this.symbols, approved: this.approved,
       nav: this.nav, drawdownPct: this.drawdownPct, strategyId,
       modelVersion: this.modelVersion, codeVersion: this.codeVersion,
       ...opts,
@@ -106,7 +146,9 @@ export class NuvoEngine {
       const q = fillQuality({ order: result.order, fill: resp.value.fill });
       this.fills.push(q);
       this.orders.update(result.order.clientOrderId, { state: 'FILLED', fill: resp.value.fill });
+      this._applyLegs(result.order, 1);
       result.positionContract.state = 'OPEN';
+      result.positionContract.order = result.order;
       result.positionContract.fill = resp.value.fill;
       this.positions.push({
         ...result.positionContract,
@@ -151,7 +193,11 @@ export class NuvoEngine {
     }
     const idx = this.positions.findIndex((p) => p.id === position.id);
     if (idx >= 0) {
-      this.ledger.move('AT_RISK', 'AVAILABLE', this.positions[idx].buyingPower, `close ${position.id}`);
+      const held = this.positions[idx];
+      this.ledger.move('AT_RISK', 'AVAILABLE', held.buyingPower, `close ${position.id}`);
+      // Unwind the leg mirror too, or the next reconciliation will report
+      // a phantom position and quarantine the engine.
+      if (held.order) this._applyLegs(held.order, -1);
       this.positions.splice(idx, 1);
     }
     // Drawdown halt is checked on every resolution, not once a day.

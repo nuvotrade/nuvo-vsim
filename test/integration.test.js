@@ -163,6 +163,66 @@ describe('authority gates behaviour, not just labels', () => {
   });
 });
 
+describe('the book stays reconciled across fills', () => {
+  test('a filled position does not quarantine the next cycle', async () => {
+    const { eng } = build({ ivMult: 1.35 });
+    const first = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(first.outcome, OUTCOME.ORDER);
+    const s = await eng.submit(first);
+    assert.equal(s.filled, true);
+
+    const second = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.notEqual(second.outcome, OUTCOME.REFUSED,
+      'the engine must recognise its own filled position at the broker');
+    assert.equal(eng.killSwitches.isTripped(SWITCH.RECONCILIATION), false);
+  });
+
+  test('the leg mirror matches the broker exactly after a fill', async () => {
+    const { eng, broker } = build({ ivMult: 1.35 });
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    await eng.submit(r);
+    const mine = eng.brokerView();
+    const theirs = (await broker.positions()).value;
+    assert.equal(mine.length, theirs.length);
+    for (const t of theirs) {
+      const m = mine.find((x) => x.symbol === t.symbol);
+      assert.ok(m, `engine is missing broker position ${t.symbol}`);
+      assert.equal(m.quantity, t.quantity);
+      assert.equal(m.strike, t.strike);
+      assert.equal(m.right, t.right);
+    }
+  });
+
+  test('closing a position unwinds the leg mirror', async () => {
+    const { eng } = build({ ivMult: 1.35 });
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    await eng.submit(r);
+    assert.ok(eng.brokerView().length > 0);
+    eng.recordOutcome({ position: eng.positions[0], realizedPnl: 50, breached: false });
+    assert.equal(eng.brokerView().length, 0,
+      'a stale leg would read as a phantom position on the next cycle');
+  });
+
+  test('an unexpected broker position still quarantines', async () => {
+    const { eng, broker } = build({ ivMult: 1.35 });
+    const real = broker.positions.bind(broker);
+    broker.positions = async () => {
+      const r = await real();
+      return {
+        ...r,
+        value: [...r.value, {
+          underlying: 'GME', symbol: 'GME_X', type: 'OPTION', right: 'put',
+          strike: 10, expiration: '2024-07-19', quantity: -5, multiplier: 100,
+        }],
+      };
+    };
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(r.outcome, OUTCOME.REFUSED);
+    assert.equal(eng.killSwitches.isTripped(SWITCH.RECONCILIATION), true);
+    assert.ok(eng.ledger.snapshot().QUARANTINED > 0);
+  });
+});
+
 describe('portfolio limits bind end to end', () => {
   test('correlated positions eventually exhaust the cluster budget', async () => {
     const { eng } = build({ ivMult: 1.45 });

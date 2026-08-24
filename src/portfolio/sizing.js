@@ -35,12 +35,25 @@ export const regimeMultiplier = (regime) => clamp(regime?.sizeMultiplier ?? 0, 0
  * D — diversification. Falls as the cluster fills up, reaching zero at the
  * constitutional cap so sizing cannot even propose a breach.
  */
-export function diversificationMultiplier({ clusterExposure, clusterLimit, correlation: rho }) {
+export function diversificationMultiplier({
+  clusterExposure, clusterLimit, correlation: rho, holdingsCount = null,
+}) {
   if (!isNum(clusterExposure) || !isNum(clusterLimit) || clusterLimit <= 0) return 0;
   const used = clamp(clusterExposure / clusterLimit, 0, 1);
   const room = 1 - used;
+
   // A highly correlated addition is worth less room than an uncorrelated one.
-  const corrPenalty = isNum(rho) ? clamp(1 - Math.max(0, Math.abs(rho) - 0.3) / 0.7, 0.2, 1) : 0.7;
+  //
+  // The empty-book case is handled explicitly: with nothing held there is
+  // nothing to be correlated WITH, so the first position gets the full
+  // diversification benefit. Treating an empty portfolio as "correlation
+  // unknown" and haircutting it was penalising NUVO for having no
+  // positions, which is the one state that carries no correlation risk at all.
+  let corrPenalty;
+  if (holdingsCount === 0) corrPenalty = 1;
+  else if (isNum(rho)) corrPenalty = clamp(1 - Math.max(0, Math.abs(rho) - 0.3) / 0.7, 0.2, 1);
+  else corrPenalty = 0.7; // holdings exist but correlation could not be measured
+
   return clamp(room * corrPenalty, 0, 1);
 }
 
@@ -61,6 +74,7 @@ export function sizePosition({
   limits,
   authorityLevel,
   baseRiskPct = 0.02,
+  holdingsCount = null,
 }) {
   const Q = qualityMultiplier(candidate.capital.raroc, candidate.hurdle);
   const C = confidenceMultiplier(candidate.probabilities?.confidence);
@@ -69,6 +83,7 @@ export function sizePosition({
     clusterExposure,
     clusterLimit: nav * limits.maxClusterPct,
     correlation: clusterCorrelation,
+    holdingsCount,
   });
 
   const authorityFraction = CAPITAL_AUTHORITY_FRACTION[authorityLevel] ?? 0;
