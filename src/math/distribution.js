@@ -172,14 +172,7 @@ export function bootstrapTerminal({
   const tradingSessions = Math.max(1, Math.round(horizonDays * 252 / 365));
   const sampleLogMean = mean(returns);
   const shocks = returns.map((value) => value - sampleLogMean);
-  const dailyVariance = shocks.length > 1
-    ? shocks.reduce((sum, value) => sum + value * value, 0) / (shocks.length - 1)
-    : 0;
-  // `drift` has the same arithmetic-return meaning as the parametric members.
-  // Centering removes the historical sample period's direction; the variance
-  // correction converts the explicit arithmetic drift to a log-return mean.
-  const targetDailyLogMean = drift / 252 - dailyVariance / 2;
-  const samples = new Array(n);
+  const terminalFactors = new Array(n);
   for (let i = 0; i < n; i += 1) {
     let cum = 0;
     let d = 0;
@@ -187,18 +180,27 @@ export function bootstrapTerminal({
       const start = rng.int(shocks.length);
       const take = Math.min(blockSize, tradingSessions - d);
       for (let j = 0; j < take; j += 1) {
-        cum += shocks[(start + j) % shocks.length] + targetDailyLogMean;
+        cum += shocks[(start + j) % shocks.length];
       }
       d += take;
     }
-    samples[i] = spot * Math.exp(cum);
+    terminalFactors[i] = Math.exp(cum);
   }
+  // De-meaning log returns removes the historical sample direction, but it
+  // does not remove arithmetic growth caused by Jensen's inequality. Exact
+  // deterministic normalization makes the empirical member use the same
+  // drift convention as the parametric members:
+  //   E[S_T] = S_0 * exp(drift * calendar_year_fraction).
+  const rawMeanFactor = mean(terminalFactors);
+  const targetGrowth = Math.exp(drift * horizonDays / 365);
+  const normalizationFactor = targetGrowth / rawMeanFactor;
+  const samples = terminalFactors.map((factor) => spot * factor * normalizationFactor);
   return new TerminalDistribution({
     samples, spot, t: horizonDays / 365, model: 'block-bootstrap',
     params: {
       blockSize, horizonDays, tradingSessions, sourceLength: returns.length,
       drift, sampleLogMean, sampleAnnualizedLogReturn: sampleLogMean * 252,
-      targetDailyLogMean,
+      rawMeanFactor, targetGrowth, normalizationFactor,
     },
     seed,
   });

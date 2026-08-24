@@ -58,7 +58,9 @@ and regime, mechanically manufacturing part of the apparent short-put edge.
 The empirical block bootstrap was a second path for hidden drift because it
 resampled raw historical returns, including the direction of the selected
 lookback period. It now resamples centered historical shocks and adds only
-the cycle's explicit drift.
+the cycle's explicit drift. The terminal sample is normalized exactly to
+`E[S_T] = S_0·exp(drift·DTE/365)`, removing Jensen drift without assuming
+the empirical shocks are normally distributed.
 A positive unconditional equity premium may be defensible over long periods,
 but applying it inside a 7–45 DTE underwriting horizon without a validated,
 regime-specific estimator is not. The drift used by each cycle is captured

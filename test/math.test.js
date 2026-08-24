@@ -160,6 +160,24 @@ describe('forward distributions', () => {
     assert.equal(neutral.params.drift, 0);
     assert.ok(neutral.samples.every((sample) => Math.abs(sample - spot) < 1e-12));
     assert.ok(bullish.samples[0] > neutral.samples[0]);
+    assert.ok(Math.abs(mean(bullish.samples) - spot * Math.exp(0.05 * 30 / 365)) < 1e-10,
+      'explicit drift must use the calendar-horizon convention');
+  });
+
+  test('bootstrap removes Jensen drift from volatile empirical shocks exactly', () => {
+    const trendingAndVolatile = Array.from({ length: 252 }, (_, index) =>
+      0.0005 + (index % 2 === 0 ? 0.02 : -0.02));
+    const neutral = bootstrapTerminal({
+      spot, returns: trendingAndVolatile, horizonDays: 30, n: 20_000, seed: 'jensen',
+    });
+    const explicit = bootstrapTerminal({
+      spot, returns: trendingAndVolatile, horizonDays: 30, drift: 0.08,
+      n: 20_000, seed: 'jensen',
+    });
+    assert.ok(Math.abs(mean(neutral.samples) - spot) < 1e-10,
+      'zero arithmetic drift must mean E[S_T] = spot');
+    assert.ok(Math.abs(mean(explicit.samples) - spot * Math.exp(0.08 * 30 / 365)) < 1e-10,
+      'nonzero drift must be honored without a 252/365 unit error');
   });
 
   test('bootstrap converts calendar DTE to trading sessions', () => {
@@ -168,6 +186,22 @@ describe('forward distributions', () => {
     });
     assert.equal(dist.params.tradingSessions, 21);
     assert.equal(dist.t, 30 / 365);
+  });
+
+  test('bootstrap and parametric members use a coherent calendar horizon', () => {
+    const rng = new Rng('bootstrap-vol');
+    const annualVol = 0.25;
+    const returns = Array.from({ length: 1000 }, () => rng.normal() * annualVol / Math.sqrt(252));
+    const empirical = bootstrapTerminal({
+      spot, returns, horizonDays: 30, n: 20_000, seed: 'empirical-horizon',
+    });
+    const parametric = lognormalTerminal({
+      spot, vol: annualVol, t: 30 / 365, n: 20_000, seed: 'parametric-horizon',
+    });
+    const empiricalSd = stdev(empirical.samples.map((sample) => Math.log(sample / spot)));
+    const parametricSd = stdev(parametric.samples.map((sample) => Math.log(sample / spot)));
+    const ratio = empiricalSd / parametricSd;
+    assert.ok(ratio > 0.9 && ratio < 1.1, `dispersion ratio ${ratio} must be calendar-coherent`);
   });
 
   test('payoff stats are internally consistent', () => {

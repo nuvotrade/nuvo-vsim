@@ -59,7 +59,7 @@ Cloudflare resources:
   same durable evidence path.
 - A downloaded live R2 package passed payload verification and deterministic
   replay with the identical decision fingerprint and zero differences.
-- The complete local suite passes: **275/275 tests**.
+- The complete local suite passes: **277/277 tests**.
 
 ## What remains blocked
 
