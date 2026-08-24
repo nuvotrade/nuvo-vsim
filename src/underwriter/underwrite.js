@@ -49,7 +49,7 @@ export function underwrite({
     structure, dist, diffusionDist, costs, lambdas,
     pNeedExit: isNum(pTouch) ? pTouch : 0.35,
   });
-  const capital = capitalProfile({ evaluation, structure, dte });
+  const capital = capitalProfile({ evaluation, structure, dte, dist });
   const condLoss = conditionalLoss({ structure, dist });
 
   // ── The three probabilities (§4) ──
