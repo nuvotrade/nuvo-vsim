@@ -227,6 +227,161 @@ results that mean nothing.
 
 ---
 
+---
+
+## Defects found by external review
+
+A structural review of the v5 package identified nine gaps. Six were
+correctness defects and are fixed; three are scope, not bugs, and are
+addressed at the end of this section. Each defect below was reproduced
+before being changed.
+
+### 1. Multi-leg Greeks were read from `legs[0]`
+
+The Portfolio Governor took a spread's delta, gamma, vega and theta from its
+**short leg alone**. A bull put spread's long leg exists precisely to offset
+the short one:
+
+```
+short 25-delta / long 10-delta, 1 contract
+  leg[0] only:  delta 25   gamma -3.0
+  both legs:    delta 15   gamma -1.2
+```
+
+The consequence ran both ways. Sizing consumed 67% more delta budget than
+the position actually used, and the reported book looked more directional
+than it was. `structureGreeks()` now sums every leg with its correct sign
+and quantity; `positionGreeks()` prefers a position's legs over any flat
+single-leg shape.
+
+### 2. Hypothetical positions carried no spot price
+
+The line was:
+
+```js
+spot: candidate.structure.legs[0]?.contract ? undefined : undefined,
+```
+
+Unconditionally `undefined`. Beta-weighted delta is a **dollar** figure —
+position delta × spot × beta — so every candidate contributed exactly zero
+to it, and a book whose exposure could not be measured read as a book with
+no exposure.
+
+Spot is now required (the Governor refuses without a verified one), and
+positions lacking a spot are counted and raised as `EXPOSURE_UNMEASURABLE`
+rather than silently absorbed.
+
+### 3. Five constitutional limits were never evaluated
+
+`maxNetGammaPctNav`, `maxPortfolioCVaRPct`, `maxRuinProbability`,
+`stressScenarioLossPct` and `maxNewCommitmentsPerCycle` were declared in the
+constitution and never checked at entry. The stress test in particular was
+skipped because the cycle supplied no repricer — and a stress test that is
+silently skipped reads exactly like one that passed.
+
+A limit that cannot block a trade is documentation. All five are now gates.
+`src/portfolio/repricer.js` supplies Black-Scholes repricing that values a
+spread by its legs (preserving each leg's position on the skew, since
+shocking both legs to one vol collapses the skew and understates the loss),
+and a **missing repricer now refuses** rather than passing quietly.
+
+### 4. The ensemble ignored the empirical bootstrap
+
+`buildDistribution` accepted a `returns` parameter and never used it. The
+live forward model was three parametric members — lognormal, Student-t,
+jump-diffusion — each of which imposes a shape on returns, and none of which
+asks what the underlying has actually done.
+
+The block-bootstrap member existed in `src/math/distribution.js` and was
+simply never wired in. It is now the fourth member when at least 120
+observations are available, and omitted with `bootstrapIncluded: false`
+recorded when they are not.
+
+### 5. Calibration scored the wrong event
+
+The most consequential of the six, because calibration is what the authority
+ladder promotes on.
+
+`p_model` is a **terminal** probability: P(S_T < K) at expiry. The outcome
+was recorded as `breached`, which normally means the strike was touched at
+any point. These are different events with different probabilities — touch
+is always the larger — and a position that finished above its strike having
+traded through it mid-life scored a **correct** terminal forecast as a miss.
+
+The effect is systematic, not random: it makes NUVO look overconfident when
+it is merely being graded on a question it did not answer, and that
+mis-scored slope is the number Authority 2 and above are gated on.
+
+The two events are now namespaced apart (`VSIM-001|terminal`,
+`VSIM-001|touch`), `recordOutcome` **refuses** the ambiguous flag, the touch
+board is never inferred from the terminal outcome (an unobserved path is not
+recorded at all), and the calibration scoreboard reads the terminal board
+only.
+
+### 6. Evidence packages were not reconstructable
+
+Three separate problems behind one claim:
+
+- **The hash was 64-bit FNV-1a** — a checksum. It detects accidental
+  corruption and offers nothing against a deliberately substituted record,
+  which is the only threat an audit trail exists to address. Replaced with
+  SHA-256, written out in pure JavaScript so it stays synchronous and runs
+  identically in Node and in a Worker, verified against the FIPS 180-4
+  vectors including the million-byte case.
+- **Only summaries were stored.** The package described a decision but could
+  not reproduce one. Raw chains, histories, quotes, account state, positions
+  and open orders are now captured verbatim, with an `externalizeRaw` path
+  that keeps the hash and drops the payload for deployments putting the
+  bytes in object storage.
+- **Screened-out candidates were omitted**, so the recorded field looked
+  like the field considered when it was only the shortlist.
+
+`src/evidence/replay.js` now closes the loop: it rebuilds a provider and
+broker that serve nothing but the captured payload, reruns the cycle, and
+compares. Reproduction is judged on a `decisionFingerprint` computed over
+decision content with provenance excluded — a faithful replay necessarily
+reads from a different provider, so judging on the full-record hash would
+report every correct replay as a failure. Replay reproduces the fingerprint
+exactly, and raw inputs that do not match the recorded hash are rejected.
+
+### Two defects the fixes themselves introduced
+
+Worth recording, because both were found by running rather than reading.
+
+**Position ids were a module-level counter.** The same decision replayed in
+a fresh process produced `POS-000001` instead of `POS-000002`, so an
+otherwise byte-identical reconstruction did not match. Ids are now derived
+from position content.
+
+**The new persistence layer raced.** `JsonlPersistence.append` fired
+`appendFile` calls without serialising them, and the runtime does not order
+concurrent appends to one path. Records persisted out of sequence, breaking
+the hash chain on reload — **6 of 12 runs**. Writes now go through a promise
+chain, with an ordering regression test that fires 25 appends without
+awaiting any of them.
+
+### What was NOT fixed, and why
+
+Three of the nine findings are scope rather than defects, and the review is
+right that they gate production use:
+
+- **No demonstrated trading edge.** The Research Lab is a framework; there is
+  no completed historical implementation of VSIM-001, and the demo command
+  generates synthetic gate results. 225 tests prove code behaviour, not
+  expectancy. This is Phase 2 and cannot be closed by writing code.
+- **No production adapters.** Massive and Schwab are integration work, and
+  the adapter contract — every method must be able to say *I do not know* —
+  is only provable against the real API.
+- **Lifecycle is a library, not a closed loop.** Scheduling, persistent
+  position state, broker close/roll execution and partial-fill recovery are
+  not wired into the engine.
+
+The review's conclusion stands unchanged by this work: the software is
+further along than the empirical proof, and shadow evidence — not more
+code — is what should decide the next investment.
+
+---
+
 ## Deliberate non-optimisations
 
 **No parameter fitting.** Nothing here was tuned to make a backtest look

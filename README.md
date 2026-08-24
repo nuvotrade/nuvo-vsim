@@ -23,7 +23,7 @@ with spectacular expectancy that violates a survival limit is rejected as
 ## Quick start
 
 ```bash
-npm test                              # 191 tests, no dependencies
+npm test                              # 225 tests, no dependencies
 
 node bin/nuvo.js cycle                # one decision cycle + the dashboard
 node bin/nuvo.js simulate --cycles 12 # repeated cycles against a synthetic market
@@ -200,13 +200,29 @@ positions, and breach the 25% limit.
 ### Determinism as an audit requirement
 
 `Math.random()` is banned engine-wide. Every simulation is seeded from the
-cycle id, so an evidence package can be replayed years later. A Monte Carlo
-run that cannot be reproduced is an anecdote, not evidence.
+cycle id, and position ids are derived from content rather than a counter,
+so a decision replayed in a fresh process is identical. A Monte Carlo run
+that cannot be reproduced is an anecdote, not evidence.
 
-Evidence packages record the inputs, the regime call *with every component
-that produced it*, the full candidate field including rejections and their
-reasons, the selection, the governance decision, and the order — hash-chained
-so alteration or deletion is detectable.
+Evidence packages record the **raw** inputs verbatim — chains, histories,
+quotes, account state, positions, open orders — alongside the regime call
+*with every component that produced it*, the full candidate field including
+both rejections and coarse-screen discards, the selection, the governance
+decision, and the order. SHA-256 hash-chained, so alteration or deletion is
+detectable, and durable behind a persistence port that refuses to extend a
+chain it cannot verify.
+
+And the claim is testable rather than asserted:
+
+```js
+const rep = await replay(pkg);   // rebuilds provider + broker from the capture
+rep.reproduced === true          // decision fingerprint matches exactly
+```
+
+Two hashes, deliberately: `hash` covers the whole record (integrity), while
+`decisionFingerprint` covers decision content with provenance excluded
+(reproducibility). A faithful replay reads from a different provider, so
+judging reproduction on the full-record hash would fail every correct replay.
 
 ---
 
@@ -360,7 +376,7 @@ src/
   pipeline/       the decision cycle
   dashboard/      the five-panel view
   engine.js       assembled engine
-test/             191 tests
+test/             225 tests
 docs/             architecture and operating notes
 ```
 
