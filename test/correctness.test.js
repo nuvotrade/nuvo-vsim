@@ -182,6 +182,15 @@ describe('GAP: the ensemble ignored the empirical bootstrap', () => {
     assert.equal(d.bootstrapIncluded, false);
     assert.ok(d.dist.n > 0);
   });
+
+  test('the default model has no undisclosed bullish drift', () => {
+    const implicit = buildDistribution({ spot: 100, vol: 0.25, dte: 30, seed: 'drift', n: 5000 });
+    const neutral = buildDistribution({ spot: 100, vol: 0.25, dte: 30, seed: 'drift', drift: 0, n: 5000 });
+    const bullish = buildDistribution({ spot: 100, vol: 0.25, dte: 30, seed: 'drift', drift: 0.05, n: 5000 });
+    assert.equal(implicit.dist.probBelow(90), neutral.dist.probBelow(90));
+    assert.ok(bullish.dist.probBelow(90) < neutral.dist.probBelow(90),
+      'a positive drift mechanically makes a short put look safer');
+  });
 });
 
 describe('GAP: calibration mixed terminal and touch events', () => {

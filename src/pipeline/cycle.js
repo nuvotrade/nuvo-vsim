@@ -56,7 +56,7 @@ export function availableContractDtes(chain) {
  * simulation is replayable from the evidence package.
  */
 export function buildDistribution({
-  spot, vol, dte, returns = null, seed, drift = 0.05, n = 20000,
+  spot, vol, dte, returns = null, seed, drift = 0, n = 20000,
   minBootstrapReturns = 120,
 }) {
   const t = dteToT(dte);
@@ -112,6 +112,7 @@ export async function runCycle(ctx) {
     modelVersion = 'nuvo-model-5.0.0', codeVersion = 'nuvo-5.0.0',
     dteTargets = [14, 30, 45], baseRiskPct = 0.02, maxGovernanceAttempts = 25,
     screenSamples = 3000, decisionSamples = 20_000, refineTop = 12,
+    modelDrift = 0,
     commitmentsThisCycle = 0, closedTradePnl = null, externalizeRaw = false,
     portfolioReturnsBySymbol = {}, portfolioSectors = {},
   } = ctx;
@@ -383,13 +384,16 @@ export async function runCycle(ctx) {
       // seeded from the cycle, so the whole thing stays reproducible.
       const screen = buildDistribution({
         spot: st.spot, vol: st.realized, dte, returns: st.returns,
-        seed: seedBase, n: screenSamples,
+        seed: seedBase, n: screenSamples, drift: modelDrift,
       });
       const full = buildDistribution({
         spot: st.spot, vol: st.realized, dte, returns: st.returns,
-        seed: seedBase, n: decisionSamples,
+        seed: seedBase, n: decisionSamples, drift: modelDrift,
       });
-      distributionLog.push({ symbol: sym, dte, bootstrapIncluded: full.bootstrapIncluded });
+      distributionLog.push({
+        symbol: sym, dte, modelDrift,
+        bootstrapIncluded: full.bootstrapIncluded,
+      });
       const chain = {
         ...chains[sym].value,
         contracts: chains[sym].value.contracts.filter((c) => c.dte === dte),

@@ -50,6 +50,19 @@ Demanding, but reachable — the intended calibration.
 
 ---
 
+## Neutral drift until a directional model is validated
+
+The forward ensemble defaults to zero annual drift. The earlier uniform
+`+5%` assumption lowered modeled downside probability for every underlying
+and regime, mechanically manufacturing part of the apparent short-put edge.
+A positive unconditional equity premium may be defensible over long periods,
+but applying it inside a 7–45 DTE underwriting horizon without a validated,
+regime-specific estimator is not. The drift used by each cycle is captured
+in its distribution evidence. Any future nonzero drift must be explicit and
+independently calibrated; it may not be a hidden default.
+
+---
+
 ## Economic capital, and the deep-wing trap
 
 **This was the most consequential bug in the build.**

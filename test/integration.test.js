@@ -390,6 +390,9 @@ describe('evidence is complete and tamper-evident (§19)', () => {
     assert.ok(e.universe.tierA.length > 0);
     assert.ok(e.modelVersion && e.codeVersion && e.limitsVersion);
     assert.ok(e.truth.factsAsOf, 'every fact must carry its observation time');
+    assert.ok(e.distributions.length > 0);
+    assert.ok(e.distributions.every((distribution) => distribution.modelDrift === 0),
+      'the neutral drift assumption must be explicit in every distribution record');
     assert.equal(verifyEvidence(e), true);
   });
 
