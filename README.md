@@ -23,7 +23,7 @@ with spectacular expectancy that violates a survival limit is rejected as
 ## Quick start
 
 ```bash
-npm test                              # 225 tests, no dependencies
+npm test                              # 239 tests, no dependencies
 
 node bin/nuvo.js cycle                # one decision cycle + the dashboard
 node bin/nuvo.js simulate --cycles 12 # repeated cycles against a synthetic market
@@ -376,7 +376,7 @@ src/
   pipeline/       the decision cycle
   dashboard/      the five-panel view
   engine.js       assembled engine
-test/             225 tests
+test/             239 tests
 docs/             architecture and operating notes
 ```
 

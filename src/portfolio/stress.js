@@ -36,16 +36,27 @@ export const STRESS_SCENARIOS = Object.freeze([
 export function applyScenario({ positions, scenario, repricer }) {
   let pnl = 0;
   const byPosition = [];
+  const errors = [];
   for (const pos of positions) {
     const shockedSpot = pos.spot * (1 + scenario.priceShock);
     const shockedVol = Math.max(0.01, pos.iv * (1 + scenario.volShock));
     const before = repricer(pos, pos.spot, pos.iv);
     const after = repricer(pos, shockedSpot, shockedVol);
+    if (![shockedSpot, shockedVol, before, after].every(isNum)) {
+      errors.push({
+        id: pos.id, underlying: pos.underlying,
+        reason: 'position could not be repriced from verified spot/vol/terms',
+      });
+      continue;
+    }
     const delta = after - before;
     pnl += delta;
     byPosition.push({ id: pos.id, underlying: pos.underlying, pnl: delta, shockedSpot, shockedVol });
   }
-  return { scenario: scenario.id, pnl, byPosition, note: scenario.note ?? null };
+  return {
+    scenario: scenario.id, pnl, byPosition, errors,
+    valid: errors.length === 0, note: scenario.note ?? null,
+  };
 }
 
 /** Run the whole mandated set. */
@@ -55,13 +66,16 @@ export function stressTest({ positions, nav, repricer, limits, scenarios = STRES
     return { ...r, pctOfNav: nav > 0 ? r.pnl / nav : NaN, scenarioDef: s };
   });
   const worst = results.reduce((a, b) => (b.pnl < a.pnl ? b : a), results[0]);
+  const invalid = results.filter((r) => !r.valid || !isNum(r.pctOfNav));
   const breaches = results.filter((r) => isNum(r.pctOfNav) && -r.pctOfNav > limits.stressScenarioLossPct);
   return {
     results,
     worst,
     worstPctOfNav: worst?.pctOfNav ?? NaN,
     breaches,
-    passed: breaches.length === 0,
+    valid: invalid.length === 0,
+    invalid,
+    passed: invalid.length === 0 && breaches.length === 0,
     limit: limits.stressScenarioLossPct,
   };
 }
@@ -88,7 +102,16 @@ export function portfolioLossDistribution({ positions, repricer, rng, paths = 50
       // Vol rises when price falls — the leverage effect, and the reason a
       // delta-only stress understates a short-put book's loss.
       const shockedVol = Math.max(0.01, pos.iv * (1 - 2.5 * move));
-      total += repricer(pos, shockedSpot, shockedVol) - repricer(pos, pos.spot, pos.iv);
+      const before = repricer(pos, pos.spot, pos.iv);
+      const after = repricer(pos, shockedSpot, shockedVol);
+      if (![before, after].every(isNum)) {
+        return {
+          pnls: [], mean: NaN, cvar95: NaN, cvar99: NaN, var95: NaN,
+          worst: NaN, horizonDays, valid: false,
+          error: `Position ${pos.id ?? pos.underlying ?? 'UNKNOWN'} could not be repriced.`,
+        };
+      }
+      total += after - before;
     }
     pnls[i] = total;
   }
@@ -100,6 +123,7 @@ export function portfolioLossDistribution({ positions, repricer, rng, paths = 50
     var95: Math.max(0, -quantile(pnls, 0.05)),
     worst: Math.min(...pnls),
     horizonDays,
+    valid: true,
   };
 }
 

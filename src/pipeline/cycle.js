@@ -100,6 +100,7 @@ export async function runCycle(ctx) {
   const {
     cycleId, now, provider, broker, limits, killSwitches, ledger, registry,
     calibrationStore, authorityLevel, positions = [], reconcilePositions = null,
+    reconcileAccount = null, reconcileOpenOrders = null,
     symbols, approved,
     nav, drawdownPct = 0, strategyId = 'VSIM-001',
     modelVersion = 'nuvo-model-5.0.0', codeVersion = 'nuvo-5.0.0',
@@ -197,7 +198,9 @@ export async function runCycle(ctx) {
     account: account.value ?? null,
     accountAsOf: account.asOf ?? null,
     brokerPositions: brokerPositions.value ?? null,
+    brokerPositionsAsOf: brokerPositions.asOf ?? null,
     brokerOpenOrders: brokerOrders.value ?? null,
+    brokerOpenOrdersAsOf: brokerOrders.asOf ?? null,
     indexState: { ...(indexState.value ?? {}), ...(ctx.indexExtras ?? {}) },
     indexAsOf: indexState.asOf ?? null,
     symbols: Object.fromEntries(symbols.map((sym) => [sym, {
@@ -208,10 +211,31 @@ export async function runCycle(ctx) {
       history: histories[sym]?.value ?? null,
       historyAsOf: histories[sym]?.asOf ?? null,
       events: events[sym]?.value ?? null,
+      eventsAsOf: events[sym]?.asOf ?? null,
     }])),
     engineState: {
-      positions: reconcilePositions ?? [],
+      // Strategy-level positions drive concentration, Greeks, stress and
+      // sizing; the leg mirror exists only for broker reconciliation. Both
+      // are decision inputs and must be captured separately.
+      positions,
+      reconcilePositions: reconcilePositions ?? [],
+      reconcileAccount,
+      reconcileOpenOrders: reconcileOpenOrders ?? [],
       nav, drawdownPct, authorityLevel, strategyId,
+      approved: approved ?? [],
+      limits,
+      dteTargets, baseRiskPct, maxGovernanceAttempts,
+      commitmentsThisCycle,
+      closedTradePnl: closedTradePnl ?? null,
+      indexExtras: ctx.indexExtras ?? {},
+      strategyState: registry?.get(strategyId)?.state ?? null,
+      calibration: calibrationStore ? {
+        bins: calibrationStore.binCount,
+        minPerBin: calibrationStore.minPerBin,
+        minTotal: calibrationStore.minTotal,
+        observations: calibrationStore.observations,
+      } : null,
+      ledger: ledger?.snapshot?.() ?? null,
       limitsVersion: limits.version,
       seeds: { governor: `${cycleId}:governor`, distributions: `${cycleId}:<symbol>:<dte>` },
       sampling: { screenSamples, decisionSamples, refineTop },
@@ -245,8 +269,8 @@ export async function runCycle(ctx) {
     // every position look both phantom and unknown.
     engine: {
       positions: reconcilePositions ?? [],
-      cash: account.value.cash, buyingPower: account.value.buyingPower,
-      openOrders: brokerOrders.value ?? [],
+      cash: reconcileAccount?.cash, buyingPower: reconcileAccount?.buyingPower,
+      openOrders: reconcileOpenOrders ?? [],
     },
     broker: {
       positions: brokerPositions.value ?? [], cash: account.value.cash,

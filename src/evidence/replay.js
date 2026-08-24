@@ -52,7 +52,7 @@ export class ReplayProvider extends DataProvider {
   async events(symbol) {
     const s = this._sym(symbol);
     if (!s) return { error: `no captured events for ${symbol}` };
-    return { value: s.events ?? [], asOf: this.raw.capturedAt, source: 'replay' };
+    return { value: s.events ?? [], asOf: s.eventsAsOf, source: 'replay' };
   }
 
   async marketState() {
@@ -74,11 +74,19 @@ export class ReplayBroker extends BrokerAdapter {
   }
 
   async positions() {
-    return { value: this.raw.brokerPositions ?? [], asOf: this.raw.accountAsOf, source: 'replay' };
+    return {
+      value: this.raw.brokerPositions ?? [],
+      asOf: this.raw.brokerPositionsAsOf,
+      source: 'replay',
+    };
   }
 
   async openOrders() {
-    return { value: this.raw.brokerOpenOrders ?? [], asOf: this.raw.accountAsOf, source: 'replay' };
+    return {
+      value: this.raw.brokerOpenOrders ?? [],
+      asOf: this.raw.brokerOpenOrdersAsOf,
+      source: 'replay',
+    };
   }
 
   async submit() { return { error: 'replay is read-only; it may not submit orders' }; }
@@ -93,7 +101,7 @@ export class ReplayBroker extends BrokerAdapter {
  * to the recorded one — anything less is a failure to reproduce, not a
  * near miss.
  */
-export async function replay(pkg, { limits = DEFAULT_LIMITS, rawInputs = null } = {}) {
+export async function replay(pkg, { limits = null, rawInputs = null } = {}) {
   const raw = rawInputs ?? pkg.inputs?.data;
   if (!raw) {
     return {
@@ -114,34 +122,49 @@ export async function replay(pkg, { limits = DEFAULT_LIMITS, rawInputs = null } 
   }
 
   const es = raw.engineState ?? {};
+  const replayLimits = limits ?? es.limits ?? DEFAULT_LIMITS;
+  if (pkg.limitsVersion && replayLimits.version !== pkg.limitsVersion) {
+    return {
+      reproduced: false,
+      reason: `Recorded limits ${pkg.limitsVersion} are unavailable (got ${replayLimits.version}).`,
+    };
+  }
   const provider = new ReplayProvider(raw);
   const broker = new ReplayBroker(raw);
+  const calibrationStore = restoreCalibration(es.calibration);
+  const ledger = restoreLedger(es.ledger, es.nav, replayLimits);
 
   const result = await runCycle({
     cycleId: pkg.cycleId,
     now: raw.capturedAt,
     provider,
     broker,
-    limits,
+    limits: replayLimits,
     killSwitches: new KillSwitchBoard(() => raw.capturedAt),
-    ledger: new CapitalLedger({ nav: es.nav, limits }),
-    registry: liveRegistry(es.strategyId),
-    calibrationStore: new CalibrationStore(),
+    ledger,
+    registry: restoredRegistry(es.strategyId, es.strategyState),
+    calibrationStore,
     authorityLevel: es.authorityLevel,
-    positions: [],
-    reconcilePositions: es.positions ?? [],
+    positions: es.positions ?? [],
+    reconcilePositions: es.reconcilePositions ?? [],
+    reconcileAccount: es.reconcileAccount ?? null,
+    reconcileOpenOrders: es.reconcileOpenOrders ?? [],
     symbols: Object.keys(raw.symbols ?? {}),
-    approved: Object.keys(raw.symbols ?? {}),
+    approved: es.approved ?? Object.keys(raw.symbols ?? {}),
     nav: es.nav,
     drawdownPct: es.drawdownPct ?? 0,
     strategyId: es.strategyId,
     modelVersion: pkg.modelVersion,
     codeVersion: pkg.codeVersion,
-    closedTradePnl: null,
+    closedTradePnl: es.closedTradePnl ?? null,
+    dteTargets: es.dteTargets,
+    baseRiskPct: es.baseRiskPct,
+    maxGovernanceAttempts: es.maxGovernanceAttempts,
+    commitmentsThisCycle: es.commitmentsThisCycle,
     screenSamples: es.sampling?.screenSamples,
     decisionSamples: es.sampling?.decisionSamples,
     refineTop: es.sampling?.refineTop,
-    indexExtras: {},
+    indexExtras: es.indexExtras ?? {},
   });
 
   // Reproduction is judged on the DECISION fingerprint, not the whole
@@ -168,15 +191,45 @@ export async function replay(pkg, { limits = DEFAULT_LIMITS, rawInputs = null } 
 }
 
 /** Registry with the recorded strategy live, so permissions match the original run. */
-function liveRegistry(strategyId) {
+function restoredRegistry(strategyId, targetState = 'LIVE') {
   const r = registerCatalogue(new StrategyRegistry());
   const s = r.get(strategyId);
-  if (s && s.state === 'RESEARCH') {
-    s.transition('VALIDATED', 'replay: restoring recorded state')
-      .transition('SHADOW', 'replay: restoring recorded state')
-      .transition('LIVE', 'replay: restoring recorded state');
+  if (!s || targetState === 'RESEARCH') return r;
+  const reason = 'replay: restoring recorded state';
+  if (targetState === 'REJECTED') {
+    s.transition('REJECTED', reason);
+    return r;
   }
+  s.transition('VALIDATED', reason);
+  if (targetState === 'VALIDATED') return r;
+  s.transition('SHADOW', reason);
+  if (targetState === 'SHADOW') return r;
+  if (targetState === 'SUSPENDED' || targetState === 'TERMINATED') {
+    s.transition(targetState, reason);
+    return r;
+  }
+  s.transition('LIVE', reason);
   return r;
+}
+
+function restoreCalibration(saved) {
+  const store = new CalibrationStore({
+    bins: saved?.bins,
+    minPerBin: saved?.minPerBin,
+    minTotal: saved?.minTotal,
+  });
+  for (const obs of saved?.observations ?? []) store.record(obs);
+  return store;
+}
+
+function restoreLedger(saved, nav, limits) {
+  const ledger = new CapitalLedger({ nav, limits });
+  if (saved) {
+    for (const key of ['RESERVE', 'AVAILABLE', 'COMMITTED', 'AT_RISK', 'ASSIGNED', 'QUARANTINED']) {
+      if (Number.isFinite(saved[key])) ledger.buckets[key] = saved[key];
+    }
+  }
+  return ledger;
 }
 
 /** First-order comparison of the fields that decide a trade. */

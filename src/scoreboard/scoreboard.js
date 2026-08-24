@@ -58,13 +58,15 @@ export function economicScoreboard({ trades, nav, startingNav, days }) {
 }
 
 /** ── CALIBRATION ─────────────────────────────────────────────────────── */
-export function calibrationScoreboard({ store, tag, tagSuffix }) {
+export function calibrationScoreboard({ store, tag, tagSuffix, evidenceMode = null }) {
   // `tagSuffix` selects one forecast EVENT across all strategies; `tag`
   // selects one exact series. Neither defaults to "everything", because
   // averaging a terminal board with a touch board describes nothing.
-  const filter = tag
+  const eventFilter = tag
     ? (o) => o.tag === tag
     : (tagSuffix ? (o) => String(o.tag ?? '').endsWith(tagSuffix) : () => true);
+  const filter = (o) => eventFilter(o)
+    && (evidenceMode === null || o.evidenceMode === evidenceMode);
   const n = store.observations.filter(filter).length;
   const slope = store.slope(filter);
   return {
@@ -88,15 +90,18 @@ function interpretSlope(s) {
 }
 
 /** ── EXECUTION ───────────────────────────────────────────────────────── */
-export function executionScoreboard({ fills }) {
-  if (!fills.length) return { sufficient: false, n: 0, note: 'No fills recorded.' };
-  const slip = fills.map((f) => f.slippagePct).filter(isNum);
-  const retained = fills.map((f) => f.edgeRetained).filter(isNum);
-  const latency = fills.map((f) => f.latencyMs).filter(isNum);
-  const attempted = fills.length + (fills.attempted ?? 0);
+export function executionScoreboard({ fills, evidenceMode = null }) {
+  const selected = evidenceMode === null
+    ? fills
+    : fills.filter((f) => f.evidenceMode === evidenceMode);
+  if (!selected.length) return { sufficient: false, n: 0, note: 'No fills recorded.' };
+  const slip = selected.map((f) => f.slippagePct).filter(isNum);
+  const retained = selected.map((f) => f.edgeRetained).filter(isNum);
+  const latency = selected.map((f) => f.latencyMs).filter(isNum);
+  const attempted = selected.length + (selected.attempted ?? 0);
   return {
-    sufficient: fills.length >= 20,
-    n: fills.length,
+    sufficient: selected.length >= 20,
+    n: selected.length,
     meanSlippagePct: mean(slip),
     medianSlippagePct: quantile(slip, 0.5),
     worstSlippagePct: slip.length ? Math.max(...slip) : NaN,
@@ -106,7 +111,7 @@ export function executionScoreboard({ fills }) {
      */
     edgeRetained: mean(retained),
     edgeRetainedP10: quantile(retained, 0.10),
-    fillRate: attempted > 0 ? fills.length / attempted : NaN,
+    fillRate: attempted > 0 ? selected.length / attempted : NaN,
     medianLatencyMs: quantile(latency, 0.5),
     interpretation: mean(retained) < 0.5
       ? 'Execution is consuming more than half the modelled edge — the edge may not be real.'

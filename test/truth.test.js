@@ -138,6 +138,24 @@ describe('reconciliation quarantines on disagreement', () => {
     }, { cashTolerance: 0.2 });
     assert.equal(r.status, RECON.DRIFT);
   });
+
+  test('a material cash mismatch quarantines', () => {
+    const r = reconcile({
+      engine: { positions: [], cash: 10_000, buyingPower: 10_000, openOrders: [] },
+      broker: { positions: [], cash: 9_000, buyingPower: 10_000, openOrders: [] },
+    });
+    assert.equal(r.status, RECON.QUARANTINE);
+    assert.ok(r.problems.some((p) => p.code === 'CASH_MISMATCH_FATAL'));
+  });
+
+  test('an engine-only working order quarantines', () => {
+    const r = reconcile({
+      engine: { positions: [], cash: 100, buyingPower: 1000, openOrders: [{ clientOrderId: 'X1' }] },
+      broker: { positions: [], cash: 100, buyingPower: 1000, openOrders: [] },
+    });
+    assert.equal(r.status, RECON.QUARANTINE);
+    assert.ok(r.problems.some((p) => p.code === 'ORDER_PHANTOM'));
+  });
 });
 
 describe('synthetic market is internally consistent', () => {

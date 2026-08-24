@@ -10,7 +10,10 @@
  */
 import { contentHash, stableStringify } from '../execution/order.js';
 
-export const EVIDENCE_VERSION = 'nuvo-evidence-1';
+// v2 adds the full engine/calibration/portfolio/config state required for a
+// faithful non-empty-book replay. Calling that v1 would make incompatible
+// records look interchangeable.
+export const EVIDENCE_VERSION = 'nuvo-evidence-2';
 
 /**
  * Build the package for one decision.
@@ -164,6 +167,7 @@ export function buildEvidence({
     } : null,
 
     positionContractId: positionContract?.id ?? null,
+    positionContract: positionContract ? positionContractContent(positionContract) : null,
 
     // ── Outcome, filled in later ──
     outcome: null,
@@ -183,9 +187,13 @@ export function buildEvidence({
    * source labels while the decision is identical. Judging reproduction on
    * the full-record hash would report every correct replay as a failure.
    */
-  pkg.decisionFingerprint = contentHash(decisionContent(pkg));
-  pkg.hash = contentHash(pkg);
-  return pkg;
+  // Detach evidence from the mutable cycle/order objects before hashing.
+  // Otherwise changing an order after the decision can also mutate the
+  // supposedly filed record through a shared array reference.
+  const snapshot = structuredClone(pkg);
+  snapshot.decisionFingerprint = contentHash(decisionContent(snapshot));
+  snapshot.hash = contentHash(snapshot);
+  return snapshot;
 }
 
 /**
@@ -213,6 +221,28 @@ export function decisionContent(pkg) {
     orderLegs: pkg.order?.legs ?? null,
     orderLimitPrice: pkg.order?.limitPrice ?? null,
     orderExpectation: pkg.order?.expectation ?? null,
+    positionContract: pkg.positionContract ?? null,
+  };
+}
+
+/** Immutable, execution-relevant position terms bound into the evidence. */
+export function positionContractContent(p) {
+  return {
+    id: p.id, createdAt: p.createdAt, state: p.state,
+    underlying: p.underlying, strategy: p.strategy, strategyId: p.strategyId,
+    modelVersion: p.modelVersion, codeVersion: p.codeVersion, thesis: p.thesis,
+    expiration: p.expiration, dte: p.dte,
+    shortStrike: p.shortStrike, longStrike: p.longStrike,
+    contracts: p.contracts, multiplier: p.multiplier,
+    entryCredit: p.entryCredit, buyingPower: p.buyingPower,
+    expectedValue: p.expectedValue, expectedLoss: p.expectedLoss,
+    cvar: p.cvar, maxLoss: p.maxLoss, economicCapital: p.economicCapital,
+    rarocAtEntry: p.rarocAtEntry, pLossAtEntry: p.pLossAtEntry,
+    probabilities: p.probabilities,
+    pTerminalBelowStrike: p.pTerminalBelowStrike,
+    pTouchStrike: p.pTouchStrike,
+    regimeAtEntry: p.regimeAtEntry, entrySpot: p.entrySpot,
+    rules: p.rules,
   };
 }
 

@@ -32,7 +32,7 @@ export function markPosition(pos, spot, vol) {
         continue;
       }
       const c = leg.contract;
-      if (!c) continue;
+      if (!c) return NaN;
       // Each leg keeps its own strike and its own vol offset from ATM, so
       // a spread's legs do not both move as if they were at the money.
       const legVol = Math.max(0.01, vol * legVolRatio(c, pos));
@@ -40,17 +40,19 @@ export function markPosition(pos, spot, vol) {
         type: c.right ?? leg.right, spot, strike: c.strike ?? leg.strike,
         vol: legVol, t: dteToT(c.dte ?? pos.dte ?? 30), rate: 0.045,
       });
-      if (!isNum(px)) continue;
+      if (!isNum(px)) return NaN;
       value += sign * qty * (c.multiplier ?? 100) * px;
     }
     return value;
   }
 
   // Single-leg / legacy shape.
-  if (!isNum(pos.strike)) {
-    // Shares.
+  if (pos.right === 'shares' || pos.type === 'EQUITY') {
     return (pos.quantity ?? 0) * spot * (pos.multiplier ?? 1);
   }
+  // An option without a strike is unpriceable, not equity. Treating an
+  // incomplete option record as shares made stress tests silently pass.
+  if (!isNum(pos.strike)) return NaN;
   const px = price({
     type: pos.right ?? 'put', spot, strike: pos.strike,
     vol: Math.max(0.01, vol), t: dteToT(pos.dte ?? 30), rate: 0.045,

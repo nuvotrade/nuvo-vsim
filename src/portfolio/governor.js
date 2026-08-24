@@ -23,8 +23,12 @@ import { stressTest, portfolioLossDistribution, ruinProbability } from './stress
  */
 export function positionGreeks(pos) {
   if (Array.isArray(pos.legs) && pos.legs.length) {
-    return structureGreeks({ legs: pos.legs, contracts: pos.contracts ?? 1 },
-      { contracts: pos.contracts ?? 1 });
+    return structureGreeks({
+      legs: pos.legs,
+      // `contracts` on an open position is the filled size. The legs retain
+      // their per-structure quantities, so scale from that original size.
+      contracts: pos.structureContracts ?? 1,
+    }, { contracts: pos.contracts ?? 1 });
   }
   const units = (pos.quantity ?? 0) * (pos.multiplier ?? 100);
   return {
@@ -227,6 +231,7 @@ export function govern({
     underlying: candidate.underlying,
     sector: sectors[candidate.underlying] ?? 'UNKNOWN',
     legs: candidate.structure.legs,
+    structureContracts: candidate.structure.contracts ?? 1,
     contracts: sizing.contracts,
     quantity: -sizing.contracts,
     multiplier: candidate.structure.multiplier,
@@ -260,7 +265,11 @@ export function govern({
 
   if (repricer) {
     stress = stressTest({ positions: bookWithCandidate, nav, repricer, limits });
-    if (!stress.passed) {
+    if (!stress.valid) {
+      blocking.push(violation(TIER.TRUTH, 'STRESS_UNMEASURABLE',
+        'One or more positions could not be repriced; stress and CVaR cannot be trusted.',
+        { errors: stress.invalid.flatMap((s) => s.errors ?? []) }));
+    } else if (!stress.passed) {
       blocking.push(violation(TIER.SURVIVAL, 'STRESS_BREACH',
         `Stress scenario ${stress.worst.scenario} loses ${(Math.abs(stress.worstPctOfNav) * 100).toFixed(1)}% of NAV.`,
         { stress: stress.worst }));
@@ -272,7 +281,10 @@ export function govern({
         paths: 2000, horizonDays: 5,
       });
       portfolioCvar = { ...loss, pctOfNav: nav > 0 ? loss.cvar95 / nav : NaN };
-      if (isNum(portfolioCvar.pctOfNav) && portfolioCvar.pctOfNav > limits.maxPortfolioCVaRPct) {
+      if (!loss.valid || !isNum(portfolioCvar.pctOfNav)) {
+        blocking.push(violation(TIER.TRUTH, 'PORTFOLIO_CVAR_UNMEASURABLE',
+          loss.error ?? 'Portfolio CVaR could not be measured from the complete book.'));
+      } else if (portfolioCvar.pctOfNav > limits.maxPortfolioCVaRPct) {
         blocking.push(violation(TIER.SURVIVAL, 'PORTFOLIO_CVAR_LIMIT',
           `Portfolio 95% CVaR is ${(portfolioCvar.pctOfNav * 100).toFixed(1)}% of NAV; limit ${(limits.maxPortfolioCVaRPct * 100).toFixed(0)}%.`,
           { cvar95: loss.cvar95, pctOfNav: portfolioCvar.pctOfNav }));

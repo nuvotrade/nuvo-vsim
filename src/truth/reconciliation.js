@@ -25,9 +25,16 @@ const key = (p) => [p.underlying, p.type ?? 'EQUITY', p.expiration ?? '', p.stri
  * Tolerances are deliberately tight: cash may drift by rounding, quantities
  * may not drift at all.
  */
-export function reconcile({ engine, broker }, { cashTolerance = 1.0, bpTolerancePct = 0.005 } = {}) {
+export function reconcile({ engine, broker }, {
+  cashTolerance = 1.0,
+  cashQuarantineTolerance = Math.max(1, cashTolerance * 5),
+  bpTolerancePct = 0.005,
+} = {}) {
   const problems = [];
-  const details = { missingInEngine: [], missingInBroker: [], quantityMismatch: [] };
+  const details = {
+    missingInEngine: [], missingInBroker: [], quantityMismatch: [],
+    missingOrdersInEngine: [], missingOrdersInBroker: [],
+  };
 
   const eMap = new Map((engine.positions ?? []).map((p) => [key(p), p]));
   const bMap = new Map((broker.positions ?? []).map((p) => [key(p), p]));
@@ -58,7 +65,8 @@ export function reconcile({ engine, broker }, { cashTolerance = 1.0, bpTolerance
     const diff = Math.abs(engine.cash - broker.cash);
     details.cashDiff = diff;
     if (diff > cashTolerance) {
-      problems.push(violation(TIER.TRUTH, 'CASH_MISMATCH',
+      const code = diff > cashQuarantineTolerance ? 'CASH_MISMATCH_FATAL' : 'CASH_MISMATCH';
+      problems.push(violation(TIER.TRUTH, code,
         `Cash differs by ${diff.toFixed(2)} (tolerance ${cashTolerance.toFixed(2)}).`,
         { engine: engine.cash, broker: broker.cash, diff }));
     }
@@ -75,14 +83,31 @@ export function reconcile({ engine, broker }, { cashTolerance = 1.0, bpTolerance
         `Buying power differs by ${(rel * 100).toFixed(2)}%.`,
         { engine: engine.buyingPower, broker: broker.buyingPower }));
     }
+  } else {
+    problems.push(violation(TIER.TRUTH, 'BP_UNVERIFIED',
+      'Buying power is not verifiable on both sides.'));
   }
 
-  // Orders the engine never issued are the most alarming case of all.
-  const eOrders = new Set((engine.openOrders ?? []).map((o) => o.brokerOrderId ?? o.id));
+  // Compare working orders in both directions. A broker-only order may be
+  // unauthorized; an engine-only order may have vanished or filled while
+  // the engine was offline. Either invalidates mutation authority.
+  const orderKey = (o) => o.brokerOrderId ?? o.clientOrderId ?? o.id;
+  const eOrders = new Set((engine.openOrders ?? []).map(orderKey));
+  const bOrders = new Set((broker.openOrders ?? []).map(orderKey));
   for (const o of broker.openOrders ?? []) {
-    if (!eOrders.has(o.brokerOrderId ?? o.id)) {
+    const id = orderKey(o);
+    if (!eOrders.has(id)) {
+      details.missingOrdersInEngine.push(id);
       problems.push(violation(TIER.TRUTH, 'ORDER_UNKNOWN',
-        `Broker reports open order ${o.brokerOrderId ?? o.id} unknown to the engine.`, { order: o }));
+        `Broker reports open order ${id} unknown to the engine.`, { order: o }));
+    }
+  }
+  for (const o of engine.openOrders ?? []) {
+    const id = orderKey(o);
+    if (!bOrders.has(id)) {
+      details.missingOrdersInBroker.push(id);
+      problems.push(violation(TIER.TRUTH, 'ORDER_PHANTOM',
+        `Engine reports working order ${id} that the broker does not.`, { order: o }));
     }
   }
 

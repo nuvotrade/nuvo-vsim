@@ -124,7 +124,13 @@ export class EvidenceStore {
   get durable() { return Boolean(this.persistence?.durable); }
 
   append(pkg) {
-    const record = { ...pkg, previousHash: this.headHash, sequence: this.records.length };
+    if (!verifyEvidence(pkg)) throw new Error('Refusing to append an invalid evidence package.');
+    if (this.byId.has(pkg.cycleId)) {
+      throw new Error(`Evidence cycle ${pkg.cycleId} is already filed.`);
+    }
+    const record = {
+      ...structuredClone(pkg), previousHash: this.headHash, sequence: this.records.length,
+    };
     record.chainHash = contentHash({ previousHash: record.previousHash, payload: record.hash, sequence: record.sequence });
     this.records.push(record);
     this.headHash = record.chainHash;

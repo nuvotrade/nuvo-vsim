@@ -8,7 +8,10 @@
  */
 import { evaluate, conditionalLoss, DEFAULT_LAMBDAS } from './ev.js';
 import { capitalProfile, opportunityAdjusted } from './capital.js';
-import { probabilitySet, marketProbability, modelProbability } from './probabilities.js';
+import {
+  probabilitySet, marketProbability, modelProbability,
+  calibrationTag, FORECAST_EVENT,
+} from './probabilities.js';
 import { DEFAULT_COSTS, costRatio } from './costs.js';
 import { TIER, violation } from '../constitution/hierarchy.js';
 import { contractLiquidity } from '../universe/filters.js';
@@ -59,7 +62,10 @@ export function underwrite({
       market: marketProbability({ spot, strike: structure.shortStrike, strikeIv: shortIv, dte }),
       model: modelProbability({ dist, strike: structure.shortStrike }),
       store: calibrationStore,
-      tag: strategyId,
+      // recordOutcome stores terminal and touch forecasts on separate
+      // scoreboards. Underwriting must read the same terminal namespace or
+      // a model can collect years of evidence and remain UNCALIBRATED.
+      tag: calibrationTag(strategyId, FORECAST_EVENT.TERMINAL_BELOW_STRIKE),
     });
   }
 

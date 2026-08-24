@@ -8,6 +8,10 @@ import { SWITCH } from '../src/constitution/killswitch.js';
 import { OUTCOME } from '../src/pipeline/cycle.js';
 import { STRUCTURE } from '../src/structures/structure.js';
 import { verifyEvidence } from '../src/evidence/package.js';
+import { replay } from '../src/evidence/replay.js';
+import { positionGreeks } from '../src/portfolio/governor.js';
+import { structureGreeks } from '../src/structures/structure.js';
+import { EvidenceStore, EvidencePersistence } from '../src/evidence/store.js';
 
 const NOW = Date.UTC(2024, 5, 3, 15, 0);
 const SYMBOLS = ['SPY', 'AAPL', 'XOM'];
@@ -23,7 +27,10 @@ const STRESSED_INDEX = {
   drawdown: -0.09, liquidityScore: 0.7, crossAssetStress: 0.4, volOfVol: 1.1,
 };
 
-function build({ ivMult = 1.30, authority = AUTHORITY.AUTO_ENTRY, nav = 250_000, seed = 'it' } = {}) {
+function build({
+  ivMult = 1.30, authority = AUTHORITY.AUTO_ENTRY, nav = 250_000,
+  seed = 'it', evidenceStore = null,
+} = {}) {
   const provider = new SyntheticProvider({
     now: NOW, seed, days: 700,
     symbols: {
@@ -38,6 +45,7 @@ function build({ ivMult = 1.30, authority = AUTHORITY.AUTO_ENTRY, nav = 250_000,
   const eng = new NuvoEngine({
     provider, broker, nav, symbols: SYMBOLS, approved: SYMBOLS,
     authorityLevel: authority, clock: () => NOW,
+    evidenceStore,
   });
   eng.registry.get('VSIM-001')
     .transition('VALIDATED', 'research gates cleared')
@@ -111,6 +119,20 @@ describe('the machine fails closed (§18)', () => {
     assert.ok(eng.killSwitches.isTripped(SWITCH.DATA_INTEGRITY));
   });
 
+  test('a durable evidence write failure removes mutation authority', async () => {
+    class FailingPersistence extends EvidencePersistence {
+      get durable() { return true; }
+      async load() { return []; }
+      async append() { throw new Error('disk unavailable'); }
+    }
+    const evidenceStore = new EvidenceStore({ persistence: new FailingPersistence() });
+    const { eng } = build({ ivMult: 1.45, evidenceStore });
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(r.outcome, OUTCOME.REFUSED);
+    assert.match(r.reason, /persisted/);
+    assert.equal(eng.killSwitches.isTripped(SWITCH.DATA_INTEGRITY), true);
+  });
+
   test('a stale option chain refuses the cycle', async () => {
     const { eng, provider } = build({ ivMult: 1.45 });
     const real = provider.optionChain.bind(provider);
@@ -153,6 +175,45 @@ describe('authority gates behaviour, not just labels', () => {
     }
   });
 
+  test('authority is re-checked at submission, not trusted from the cycle', async () => {
+    const { eng } = build({ ivMult: 1.45 });
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(r.outcome, OUTCOME.ORDER);
+    eng.authorityLevel = AUTHORITY.SHADOW;
+    const s = await eng.submit(r);
+    assert.equal(s.ok, false);
+    assert.match(s.reason, /authority/i);
+  });
+
+  test('broker drift between decision and submission quarantines capital', async () => {
+    const { eng, broker } = build({ ivMult: 1.45 });
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(r.outcome, OUTCOME.ORDER);
+    const original = broker.positions.bind(broker);
+    broker.positions = async () => {
+      const snapshot = await original();
+      return { ...snapshot, value: [...snapshot.value, {
+        underlying: 'GME', symbol: 'GME_X', type: 'OPTION', right: 'put',
+        strike: 10, expiration: '2024-07-19', quantity: -1, multiplier: 100,
+      }] };
+    };
+    const s = await eng.submit(r);
+    assert.equal(s.ok, false);
+    assert.match(s.reason, /quarantined/i);
+    assert.equal(eng.killSwitches.isTripped(SWITCH.RECONCILIATION), true);
+  });
+
+  test('an order altered after evidence was filed is never submitted', async () => {
+    const { eng } = build({ ivMult: 1.45 });
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(r.outcome, OUTCOME.ORDER);
+    r.order.legs[0].quantity += 10;
+    const s = await eng.submit(r);
+    assert.equal(s.ok, false);
+    assert.match(s.reason, /evidence/i);
+    assert.equal(eng.killSwitches.isTripped(SWITCH.DATA_INTEGRITY), true);
+  });
+
   test('demotion beats promotion when a breach is on the record', () => {
     const { eng } = build();
     eng.authorityLevel = AUTHORITY.AUTO_LIFECYCLE;
@@ -161,9 +222,36 @@ describe('authority gates behaviour, not just labels', () => {
     assert.equal(r.direction, 'DEMOTION');
     assert.ok(eng.authorityLevel < AUTHORITY.AUTO_LIFECYCLE);
   });
+
+  test('paper and shadow observations cannot earn live authority', () => {
+    const { eng } = build({ authority: AUTHORITY.SHADOW });
+    for (let i = 0; i < 80; i += 1) eng.recordOutcome({
+      position: {
+        id: `shadow-${i}`, pTerminalBelowStrike: 0.2,
+        strategyId: 'VSIM-001', evidenceMode: 'SHADOW',
+      },
+      realizedPnl: 10, finishedBelowStrike: false,
+    });
+    assert.equal(eng.authorityEvidence().liveObservations, 0);
+    const review = eng.reviewAuthority();
+    assert.equal(review.changed, false);
+    assert.equal(eng.authorityLevel, AUTHORITY.SHADOW);
+  });
 });
 
 describe('the book stays reconciled across fills', () => {
+  test('a working order reserves capital and remains reconciled', async () => {
+    const { eng, broker } = build({ ivMult: 1.35 });
+    broker.fillProbability = 0;
+    const first = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    const submitted = await eng.submit(first);
+    assert.equal(submitted.filled, false);
+    assert.ok(eng.ledger.snapshot().COMMITTED > 0);
+    const second = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.notEqual(second.outcome, OUTCOME.REFUSED);
+    assert.equal(eng.killSwitches.isTripped(SWITCH.RECONCILIATION), false);
+  });
+
   test('a filled position does not quarantine the next cycle', async () => {
     const { eng } = build({ ivMult: 1.35 });
     const first = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
@@ -191,6 +279,19 @@ describe('the book stays reconciled across fills', () => {
       assert.equal(m.strike, t.strike);
       assert.equal(m.right, t.right);
     }
+  });
+
+  test('a filled spread retains every leg and the sized portfolio Greeks', async () => {
+    const { eng } = build({ ivMult: 1.35 });
+    const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    const s = await eng.submit(r);
+    assert.equal(s.filled, true);
+    const open = eng.positions[0];
+    assert.equal(open.legs.length, r.selected.structure.legs.length);
+    const expected = structureGreeks(r.selected.structure, { contracts: r.sizing.contracts });
+    const actual = positionGreeks(open);
+    assert.ok(Math.abs(actual.delta - expected.delta) < 1e-9);
+    assert.ok(Math.abs(actual.gamma - expected.gamma) < 1e-9);
   });
 
   test('closing a position unwinds the leg mirror', async () => {
@@ -242,6 +343,15 @@ describe('portfolio limits bind end to end', () => {
 });
 
 describe('evidence is complete and tamper-evident (§19)', () => {
+  test('a duplicate cycle identity is refused without extending the chain', async () => {
+    const { eng } = build({ ivMult: 1.30 });
+    await eng.cycle({ cycleId: 'SAME', indexExtras: STRESSED_INDEX, ...FAST });
+    const duplicate = await eng.cycle({ cycleId: 'SAME', indexExtras: STRESSED_INDEX, ...FAST });
+    assert.equal(duplicate.outcome, OUTCOME.REFUSED);
+    assert.equal(duplicate.duplicateCycle, true);
+    assert.equal(eng.evidence.length, 1);
+  });
+
   test('every cycle files evidence, including refusals', async () => {
     const { eng } = build({ ivMult: 1.00 });
     await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
@@ -317,8 +427,8 @@ describe('scoreboards enforce the hierarchy (§21, §27)', () => {
     });
     assert.equal(eng.calibration.n, 1);
     const o = eng.calibration.observations[0];
-    assert.equal(o.outcome, true);
-    assert.ok(Math.abs(o.p - 0.8) < 1e-9, 'the scored forecast is P(finish at or above the strike)');
+    assert.equal(o.outcome, false);
+    assert.ok(Math.abs(o.p - 0.2) < 1e-9, 'the scored forecast is P(finish below the strike)');
     assert.match(o.tag, /\|terminal$/, 'the event must be named in the tag');
   });
 
@@ -337,8 +447,8 @@ describe('scoreboards enforce the hierarchy (§21, §27)', () => {
     assert.equal(eng.calibration.n, 2);
     const terminal = eng.calibration.observations.find((o) => o.tag.endsWith('|terminal'));
     const touch = eng.calibration.observations.find((o) => o.tag.endsWith('|touch'));
-    assert.equal(terminal.outcome, true, 'terminal forecast was correct');
-    assert.equal(touch.outcome, false, 'touch forecast was wrong');
+    assert.equal(terminal.outcome, false, 'the terminal-below event did not occur');
+    assert.equal(touch.outcome, true, 'the touch event did occur');
     assert.notEqual(terminal.p, touch.p, 'the two events have different probabilities');
   });
 
@@ -381,5 +491,20 @@ describe('determinism', () => {
     assert.equal(ra.outcome, rb.outcome);
     assert.equal(ra.evidence.hash, rb.evidence.hash,
       'an evidence package that cannot be reproduced is not evidence');
+  });
+
+  test('a non-empty calibrated book replays from captured state exactly', async () => {
+    const { eng, broker } = build({ ivMult: 1.35, seed: 'it' });
+    broker.fillProbability = 1;
+    const first = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    const fill = await eng.submit(first);
+    assert.equal(fill.filled, true, JSON.stringify(fill));
+    for (let i = 0; i < 30; i += 1) eng.calibration.record({
+      p: [0.1, 0.5, 0.9][i % 3], outcome: i % 2 === 0,
+      tag: 'VSIM-001|terminal', at: NOW - i,
+    });
+    const second = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    const rr = await replay(second.evidence);
+    assert.equal(rr.reproduced, true, rr.differences?.join('\n'));
   });
 });

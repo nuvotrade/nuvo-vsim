@@ -106,7 +106,12 @@ export class PaperBroker extends BrokerAdapter {
       }
     }
     return {
-      value: { brokerOrderId, state: rec.state, filled: true, fill: rec.fill },
+      value: {
+        brokerOrderId, state: rec.state, filled: true, fill: rec.fill,
+        // Lets the engine update its independent account mirror instead of
+        // copying a fresh broker snapshot and calling that reconciliation.
+        accountImpact: { cashDelta: credit, buyingPowerDelta: credit },
+      },
       asOf: this.now(), source: 'paper',
     };
   }

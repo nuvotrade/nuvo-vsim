@@ -17,6 +17,9 @@ import { EvidenceStore, JsonlPersistence, MemoryPersistence } from '../src/evide
 import { buildEvidence, verifyEvidence, verifyFingerprint, decisionContent } from '../src/evidence/package.js';
 import { contentHash } from '../src/execution/order.js';
 import { FORECAST_EVENT, calibrationTag } from '../src/underwriter/probabilities.js';
+import { CalibrationStore, CALIBRATION } from '../src/underwriter/probabilities.js';
+import { underwrite } from '../src/underwriter/underwrite.js';
+import { stressTest } from '../src/portfolio/stress.js';
 import { Rng } from '../src/math/random.js';
 
 const P = (k, b, a, d, g) => ({
@@ -61,6 +64,16 @@ describe('GAP: multi-leg Greeks were read from leg[0] only', () => {
     const one = structureGreeks(bps, { contracts: 1 });
     const five = structureGreeks(bps, { contracts: 5 });
     assert.ok(Math.abs(five.delta - 5 * one.delta) < 1e-9);
+  });
+
+  test('an open position scales its retained legs to the filled size', () => {
+    const bps = bullPutSpread({ underlying: 'X', shortPut, longPut });
+    const expected = structureGreeks(bps, { contracts: 5 });
+    const actual = positionGreeks({
+      legs: bps.legs, structureContracts: bps.contracts, contracts: 5,
+    });
+    assert.ok(Math.abs(actual.delta - expected.delta) < 1e-9);
+    assert.ok(Math.abs(actual.gamma - expected.gamma) < 1e-9);
   });
 });
 
@@ -130,6 +143,15 @@ describe('GAP: declared limits that were never enforced', () => {
       'the stress model must distinguish capped from uncapped tails');
   });
 
+  test('an incomplete option record makes stress invalid instead of passing as shares', () => {
+    const s = stressTest({
+      positions: [{ id: 'bad', type: 'OPTION', spot: 100, iv: 0.3, quantity: -1 }],
+      nav: 100_000, repricer: blackScholesRepricer, limits: DEFAULT_LIMITS,
+    });
+    assert.equal(s.valid, false);
+    assert.equal(s.passed, false);
+  });
+
   test('blackScholesRepricer satisfies the stress module signature', () => {
     const csp = cashSecuredPut({ underlying: 'X', put: P(95, 1.9, 2.1, -0.25, 0.03) });
     const v = blackScholesRepricer({ legs: csp.legs, contracts: 1, iv: 0.3, dte: 30 }, 90, 0.4);
@@ -169,6 +191,28 @@ describe('GAP: calibration mixed terminal and touch events', () => {
       calibrationTag('VSIM-001', FORECAST_EVENT.TOUCHED_STRIKE),
     );
     assert.match(calibrationTag('V', FORECAST_EVENT.TERMINAL_BELOW_STRIKE), /\|terminal$/);
+  });
+
+  test('underwriting reads the terminal namespace that outcomes populate', () => {
+    const store = new CalibrationStore({ minTotal: 3, minPerBin: 1 });
+    for (const [p, successes] of [[0.1, 1], [0.5, 5], [0.9, 9]]) {
+      for (let i = 0; i < 10; i += 1) store.record({
+        p, outcome: i < successes,
+        tag: calibrationTag('VSIM-001', FORECAST_EVENT.TERMINAL_BELOW_STRIKE),
+      });
+    }
+    const shortPut = P(95, 1.9, 2.1, -0.25, 0.03);
+    const structure = cashSecuredPut({ underlying: 'X', put: shortPut });
+    const { dist, diffusionDist } = buildDistribution({
+      spot: 100, vol: 0.3, dte: 30, seed: 'calibration-read', n: 2000,
+    });
+    const u = underwrite({
+      structure, dist, diffusionDist, underlyingState: { spot: 100 },
+      regime: { regime: 'FEAR', confident: true }, limits: DEFAULT_LIMITS,
+      calibrationStore: store, strategyId: 'VSIM-001',
+    });
+    assert.notEqual(u.probabilities.calibration, CALIBRATION.UNCALIBRATED);
+    assert.equal(u.probabilities.calibrationAdjusted, true);
   });
 });
 
