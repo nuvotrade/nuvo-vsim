@@ -3,8 +3,10 @@
   "version": "5.0.0",
   "private": true,
   "type": "module",
-  "description": "NUVO VSIM — an autonomous capital-allocation and options-underwriting system.",
-  "engines": { "node": ">=20" },
+  "description": "NUVO VSIM \u2014 an autonomous capital-allocation and options-underwriting system.",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
@@ -15,10 +17,12 @@
     "./portfolio": "./src/portfolio/index.js",
     "./research": "./src/research/index.js"
   },
-  "bin": { "nuvo": "./bin/nuvo.js" },
+  "bin": {
+    "nuvo": "./bin/nuvo.js"
+  },
   "scripts": {
-    "test": "node --test test/",
-    "test:watch": "node --test --watch test/",
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js",
     "cycle": "node bin/nuvo.js cycle",
     "research": "node bin/nuvo.js research",
     "scoreboard": "node bin/nuvo.js scoreboard"

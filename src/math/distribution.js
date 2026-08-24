@@ -7,7 +7,9 @@
  * supports three families and records which one produced a number.
  */
 import { Rng } from './random.js';
-import { normInv, quantile, conditionalVaR, mean, isNum, stdev } from './stats.js';
+import {
+  normInv, quantile, quantileSorted, conditionalVaR, conditionalVaRSorted, mean, isNum, stdev,
+} from './stats.js';
 
 /**
  * A terminal distribution is an object of terminal prices plus the metadata
@@ -60,18 +62,38 @@ export class TerminalDistribution {
    * one code path for CSPs, spreads, shares and covered calls alike.
    */
   payoffStats(payoff, { alpha = 0.95 } = {}) {
-    const pnl = this.samples.map(payoff);
-    const losses = pnl.filter((v) => v < 0);
+    const n = this.samples.length;
+    const pnl = new Array(n);
+    // Single pass for the moments and loss statistics.
+    let sum = 0;
+    let lossSum = 0;
+    let lossCount = 0;
+    for (let i = 0; i < n; i += 1) {
+      const v = payoff(this.samples[i]);
+      pnl[i] = v;
+      sum += v;
+      if (v < 0) { lossSum += v; lossCount += 1; }
+    }
+    const ev = sum / n;
+    let sq = 0;
+    for (let i = 0; i < n; i += 1) sq += (pnl[i] - ev) ** 2;
+
+    // ONE sort, reused for every order statistic. This function is on the
+    // hot path (thousands of candidates per cycle, three calls each);
+    // re-sorting per statistic made a cycle take eleven seconds.
+    const sorted = pnl.slice().sort((a, b) => a - b);
+
     return {
-      ev: mean(pnl),
-      sd: stdev(pnl),
-      cvar: conditionalVaR(pnl, alpha),
-      var: Math.max(0, -quantile(pnl, 1 - alpha)),
-      worst: Math.min(...pnl),
-      best: Math.max(...pnl),
-      pLoss: losses.length / pnl.length,
-      expectedLoss: losses.length ? -mean(losses) : 0,
+      ev,
+      sd: n > 1 ? Math.sqrt(sq / (n - 1)) : NaN,
+      cvar: conditionalVaRSorted(sorted, alpha),
+      var: Math.max(0, -quantileSorted(sorted, 1 - alpha)),
+      worst: sorted[0],
+      best: sorted[n - 1],
+      pLoss: lossCount / n,
+      expectedLoss: lossCount ? -(lossSum / lossCount) : 0,
       pnl,
+      sorted,
     };
   }
 }

@@ -130,15 +130,25 @@ export class StrategyRegistry {
   get all() { return [...this.strategies.values()]; }
 
   /**
-   * Terminate. Note what this does NOT offer: a repair path, a rename, or a
-   * refit. Research may propose a successor, and that successor is a new
+   * Kill a strategy.
+   *
+   * The terminal state depends on how far the strategy got, because the
+   * distinction is worth preserving in the record: an idea that failed in
+   * research was REJECTED and never risked capital, while one that failed
+   * after deployment was TERMINATED and did. Collapsing the two would make
+   * the registry read as though every dead idea had cost money.
+   *
+   * Note what this does NOT offer: a repair path, a rename, or a refit.
+   * Research may propose a successor, and that successor is a new
    * hypothesis with a new ID and its own out-of-sample burden.
    */
   terminate(id, reason, at = null) {
     const s = this.get(id);
     if (!s) throw new Error(`Unknown strategy ${id}.`);
-    s.transition(STRATEGY_STATE.TERMINATED, reason, at);
-    this.log.push({ event: 'TERMINATE', id, reason, at });
+    const deployed = ![STRATEGY_STATE.RESEARCH, STRATEGY_STATE.VALIDATED].includes(s.state);
+    const target = deployed ? STRATEGY_STATE.TERMINATED : STRATEGY_STATE.REJECTED;
+    s.transition(target, reason, at);
+    this.log.push({ event: target, id, reason, at });
     return s;
   }
 

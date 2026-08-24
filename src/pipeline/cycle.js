@@ -17,7 +17,7 @@ import { reconcile, RECON } from '../truth/reconciliation.js';
 import { buildUnderlyingState, buildMarketState } from '../market/market_state.js';
 import { buildUniverse } from '../universe/tiers.js';
 import { eventClearance } from '../universe/filters.js';
-import { enumerateCandidates, selectBest, structureComparison } from '../structures/optimizer.js';
+import { screenAndRefine, selectBest, structureComparison } from '../structures/optimizer.js';
 import { govern } from '../portfolio/governor.js';
 import { buildOrder } from '../execution/order.js';
 import { createPositionContract } from '../lifecycle/contract.js';
@@ -81,6 +81,7 @@ export async function runCycle(ctx) {
     nav, drawdownPct = 0, strategyId = 'VSIM-001',
     modelVersion = 'nuvo-model-5.0.0', codeVersion = 'nuvo-5.0.0',
     dteTargets = [14, 30, 45], baseRiskPct = 0.02, maxGovernanceAttempts = 25,
+    screenSamples = 3000, decisionSamples = 20_000, refineTop = 12,
   } = ctx;
 
   const trace = [];
@@ -236,6 +237,7 @@ export async function runCycle(ctx) {
   // ── 4-9. UNDERWRITE EVERY CANDIDATE ──────────────────────────────────
   const strategy = registry?.get(strategyId) ?? null;
   const allCandidates = [];
+  const screenLog = [];
 
   for (const sym of universe.tradeable) {
     const st = underlyings[sym];
@@ -253,9 +255,16 @@ export async function runCycle(ctx) {
     }
 
     for (const dte of dteTargets) {
-      const { dist, diffusionDist } = buildDistribution({
+      const seedBase = `${cycleId}:${sym}:${dte}`;
+      // Coarse pass to rank the field, full pass to decide. Both are
+      // seeded from the cycle, so the whole thing stays reproducible.
+      const screen = buildDistribution({
         spot: st.spot, vol: st.realized, dte, returns: st.returns,
-        seed: `${cycleId}:${sym}:${dte}`,
+        seed: seedBase, n: screenSamples,
+      });
+      const full = buildDistribution({
+        spot: st.spot, vol: st.realized, dte, returns: st.returns,
+        seed: seedBase, n: decisionSamples,
       });
       const chain = {
         ...chains[sym].value,
@@ -263,11 +272,15 @@ export async function runCycle(ctx) {
       };
       if (!chain.contracts.length) continue;
 
-      const cands = enumerateCandidates({
-        underlyingState: st, chain, dist, diffusionDist,
+      const { candidates: cands, screenedOut, screenedCount } = screenAndRefine({
+        underlyingState: st, chain,
         regime: marketState.regime, limits, calibrationStore, strategyId,
         holdings: ctx.holdings?.[sym] ?? null,
+        screenParams: { dist: screen.dist, diffusionDist: screen.diffusionDist },
+        fullParams: { dist: full.dist, diffusionDist: full.diffusionDist },
+        refineTop,
       });
+      screenLog.push({ symbol: sym, dte, screened: screenedCount, refined: cands.length, droppedByScreen: screenedOut.length });
       // Respect the strategy's own structure and regime permissions.
       const filtered = strategy
         ? cands.filter((c) =>
@@ -280,7 +293,8 @@ export async function runCycle(ctx) {
   }
 
   step('underwriting', allCandidates.length > 0, {
-    evaluated: allCandidates.length,
+    screened: screenLog.reduce((s, l) => s + l.screened, 0),
+    refined: allCandidates.length,
     admissible: allCandidates.filter((c) => c.admissible).length,
   });
 

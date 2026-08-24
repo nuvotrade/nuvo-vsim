@@ -8,7 +8,7 @@
  * for accepting risks that an expectation cannot see: the shape of the tail,
  * the possibility of not being able to react, and the cost of being trapped.
  */
-import { isNum, mean, quantile } from '../math/stats.js';
+import { isNum, mean, quantile, quantileSorted } from '../math/stats.js';
 import { structureCost, DEFAULT_COSTS } from './costs.js';
 import { mid } from '../structures/structure.js';
 
@@ -132,17 +132,24 @@ export function evaluate({
     - lambdas.lambdaLiquidity * liq.value;
 
   // Decompose the win/loss legs the way §3 states them, for the record.
-  const wins = stats.pnl.filter((v) => v > 0);
-  const losses = stats.pnl.filter((v) => v <= 0);
+  // Counted in one pass over the already-sorted array.
+  let winCount = 0;
+  let winSum = 0;
+  let lossCount = 0;
+  let lossSum = 0;
+  for (const v of stats.sorted) {
+    if (v > 0) { winCount += 1; winSum += v; } else { lossCount += 1; lossSum += v; }
+  }
+  const nTotal = stats.sorted.length;
 
   return {
     kind: structure.kind,
     underlying: structure.underlying,
 
-    pWin: wins.length / stats.pnl.length,
-    pLoss: losses.length / stats.pnl.length,
-    avgWin: wins.length ? mean(wins) : 0,
-    avgLoss: losses.length ? -mean(losses) : 0,
+    pWin: winCount / nTotal,
+    pLoss: lossCount / nTotal,
+    avgWin: winCount ? winSum / winCount : 0,
+    avgLoss: lossCount ? -(lossSum / lossCount) : 0,
 
     evGross,
     costs: cost,
@@ -171,9 +178,9 @@ export function evaluate({
       model: dist.model,
       n: dist.n,
       seed: dist.seed,
-      p05: quantile(stats.pnl, 0.05),
-      p50: quantile(stats.pnl, 0.50),
-      p95: quantile(stats.pnl, 0.95),
+      p05: quantileSorted(stats.sorted, 0.05),
+      p50: quantileSorted(stats.sorted, 0.50),
+      p95: quantileSorted(stats.sorted, 0.95),
     },
   };
 }

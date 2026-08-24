@@ -44,6 +44,31 @@ export function kurtosis(xs) {
   return g2 - (3 * (n - 1) ** 2) / ((n - 2) * (n - 3)); // excess kurtosis
 }
 
+/**
+ * Quantile from an ALREADY-SORTED ascending array.
+ * Split out because the hot path evaluates thousands of candidates and
+ * re-sorting the same array for each order statistic dominated the cost.
+ */
+export function quantileSorted(s, q) {
+  if (!s.length || !isNum(q)) return NaN;
+  if (q <= 0) return s[0];
+  if (q >= 1) return s[s.length - 1];
+  const pos = (s.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return s[lo];
+  return s[lo] + (pos - lo) * (s[hi] - s[lo]);
+}
+
+/** Conditional VaR from an ALREADY-SORTED ascending array of P&L. */
+export function conditionalVaRSorted(s, alpha = 0.95) {
+  if (!s.length) return NaN;
+  const k = Math.max(1, Math.floor(s.length * (1 - alpha)));
+  let sum = 0;
+  for (let i = 0; i < k; i += 1) sum += s[i];
+  return Math.max(0, -(sum / k));
+}
+
 /** Linear-interpolated quantile (type 7, matching NumPy/R defaults). */
 export function quantile(xs, q) {
   if (!xs.length) return NaN;

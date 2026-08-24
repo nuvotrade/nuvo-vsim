@@ -47,7 +47,12 @@ export const ACTION = Object.freeze({
 export function evHold({
   position, structure, dist, diffusionDist, currentMarkDebit, costs, lambdas,
 }) {
-  const shift = currentMarkDebit - position.entryCredit;
+  // The shift is taken against the STRUCTURE's own credit, never against
+  // position.entryCredit. They are normally the same number, but reading it
+  // from the position would make anchor-freedom a coincidence that a
+  // restated entry price could break. Taking it from the structure makes
+  // the cancellation algebraic: whatever was actually paid cannot enter here.
+  const shift = currentMarkDebit - structure.credit;
   const forwardStructure = {
     ...structure,
     payoff: (S) => structure.payoff(S) + shift,
@@ -156,11 +161,14 @@ export function decide({
   const close = evClose({ currentMarkDebit, exitCost, freedCapital: position.buyingPower });
   const roll = evRoll({ closeResult: close, newCandidate: rollCandidate });
 
-  const options = [hold, close, roll].filter((o) => isNum(o.nev));
+  const allOptions = [hold, close, roll];
   // Rank on NEV, not raw EV: the whole point is that the risk taken to earn
-  // the remaining premium is part of the comparison.
-  options.sort((a, b) => b.nev - a.nev);
-  const best = options[0];
+  // the remaining premium is part of the comparison. Options that cannot be
+  // scored are excluded from RANKING but kept in the record — an evidence
+  // package that silently omits the rejected roll cannot show why it lost.
+  const rankable = allOptions.filter((o) => isNum(o.nev));
+  rankable.sort((a, b) => b.nev - a.nev);
+  const best = rankable[0];
 
   const forced = reasons.length > 0;
   let action = best.action;
@@ -180,7 +188,7 @@ export function decide({
     sigma,
     dteRemaining,
     breached,
-    comparison: options.map((o) => ({
+    comparison: allOptions.map((o) => ({
       action: o.action, forwardEv: o.forwardEv, nev: o.nev, cvar: o.cvar,
       rejected: o.rejected ?? false, rejectReason: o.reason ?? null,
     })),

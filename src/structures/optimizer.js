@@ -47,6 +47,7 @@ export function enumerateCandidates({
   deltaBand = [0.05, 0.45],
   maxSpreadWidth = 6,
   holdings = null,
+  only = null,
 }) {
   const candidates = [];
   const spot = underlyingState.spot;
@@ -58,6 +59,8 @@ export function enumerateCandidates({
 
   const score = (structure) => {
     if (!structure) return null;
+    // In the refinement pass, only the shortlisted structures are re-scored.
+    if (only && !only.has(candidateKey({ underlying: structure.underlying, structure }))) return null;
     return underwrite({
       structure, dist, diffusionDist, underlyingState, regime, limits,
       calibrationStore, strategyId,
@@ -113,6 +116,62 @@ export function enumerateCandidates({
 
   return candidates;
 }
+
+/**
+ * Two-pass evaluation: screen the whole chain cheaply, decide precisely.
+ *
+ * Scoring every strike-and-structure combination at full Monte Carlo
+ * resolution is both slow and wasteful — most candidates are nowhere near
+ * the bar and a coarse estimate is enough to establish that. So the full
+ * field is scored against a small sample to RANK it, and only the survivors
+ * are re-scored at full resolution to DECIDE.
+ *
+ * The screen is deliberately generous (it keeps `refineTop` candidates, not
+ * one) so that sampling noise in the coarse pass cannot silently discard a
+ * candidate that would have won. Rejections from the screen are still
+ * returned, because the evidence package records the whole field (§19).
+ */
+export function screenAndRefine({
+  screenParams, fullParams, refineTop = 20, ...common
+}) {
+  const screened = enumerateCandidates({ ...common, ...screenParams });
+  if (!screened.length) return { candidates: [], screened: [] };
+
+  // Rank the coarse pass by NEV. Admissibility is decided in the refined
+  // pass only — a candidate must not be rejected on a noisy estimate.
+  const ordered = screened.slice().sort((a, b) => b.evaluation.nev - a.evaluation.nev);
+  const shortlist = ordered.slice(0, refineTop);
+  const shortlistKeys = new Set(shortlist.map(candidateKey));
+
+  const refined = enumerateCandidates({
+    ...common,
+    ...fullParams,
+    only: shortlistKeys,
+  });
+
+  return {
+    candidates: refined,
+    // Everything the screen saw and dropped, kept for the record.
+    screenedOut: ordered.slice(refineTop).map((c) => ({
+      underlying: c.underlying,
+      kind: c.structure.kind,
+      shortStrike: c.structure.shortStrike,
+      longStrike: c.structure.longStrike ?? null,
+      dte: c.dte,
+      screenNev: c.evaluation.nev,
+      reason: 'Ranked below the refinement shortlist on the coarse screen.',
+    })),
+    screenedCount: screened.length,
+  };
+}
+
+export const candidateKey = (c) => [
+  c.underlying ?? c.structure?.underlying,
+  c.structure?.kind ?? c.kind,
+  c.structure?.shortStrike ?? c.shortStrike ?? '',
+  c.structure?.longStrike ?? c.longStrike ?? '',
+  c.structure?.expiration ?? c.expiration ?? '',
+].join('|');
 
 /**
  * Choose the best candidate — or NO TRADE.
