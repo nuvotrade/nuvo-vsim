@@ -83,7 +83,7 @@ export function buildDistribution({
   if (Array.isArray(returns) && returns.length >= minBootstrapReturns) {
     members.push({
       dist: bootstrapTerminal({
-        spot, returns, horizonDays: dte, blockSize: 5, n, seed: `${seed}:bs`,
+        spot, returns, horizonDays: dte, drift, blockSize: 5, n, seed: `${seed}:bs`,
       }),
       weight: 1.25,
     });

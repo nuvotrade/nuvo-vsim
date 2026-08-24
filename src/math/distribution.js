@@ -165,25 +165,42 @@ export function jumpDiffusionTerminal({
  * and clustering is precisely what turns one bad day into a drawdown.
  */
 export function bootstrapTerminal({
-  spot, returns, horizonDays, blockSize = 5, n = 20000, seed = 'bootstrap',
+  spot, returns, horizonDays, drift = 0, blockSize = 5, n = 20000, seed = 'bootstrap',
 }) {
   if (!returns.length) throw new RangeError('bootstrapTerminal requires a return series');
   const rng = new Rng(seed);
+  const tradingSessions = Math.max(1, Math.round(horizonDays * 252 / 365));
+  const sampleLogMean = mean(returns);
+  const shocks = returns.map((value) => value - sampleLogMean);
+  const dailyVariance = shocks.length > 1
+    ? shocks.reduce((sum, value) => sum + value * value, 0) / (shocks.length - 1)
+    : 0;
+  // `drift` has the same arithmetic-return meaning as the parametric members.
+  // Centering removes the historical sample period's direction; the variance
+  // correction converts the explicit arithmetic drift to a log-return mean.
+  const targetDailyLogMean = drift / 252 - dailyVariance / 2;
   const samples = new Array(n);
   for (let i = 0; i < n; i += 1) {
     let cum = 0;
     let d = 0;
-    while (d < horizonDays) {
-      const start = rng.int(returns.length);
-      const take = Math.min(blockSize, horizonDays - d);
-      for (let j = 0; j < take; j += 1) cum += returns[(start + j) % returns.length];
+    while (d < tradingSessions) {
+      const start = rng.int(shocks.length);
+      const take = Math.min(blockSize, tradingSessions - d);
+      for (let j = 0; j < take; j += 1) {
+        cum += shocks[(start + j) % shocks.length] + targetDailyLogMean;
+      }
       d += take;
     }
     samples[i] = spot * Math.exp(cum);
   }
   return new TerminalDistribution({
     samples, spot, t: horizonDays / 365, model: 'block-bootstrap',
-    params: { blockSize, horizonDays, sourceLength: returns.length }, seed,
+    params: {
+      blockSize, horizonDays, tradingSessions, sourceLength: returns.length,
+      drift, sampleLogMean, sampleAnnualizedLogReturn: sampleLogMean * 252,
+      targetDailyLogMean,
+    },
+    seed,
   });
 }
 

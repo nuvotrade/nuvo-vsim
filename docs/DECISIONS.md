@@ -55,10 +55,16 @@ Demanding, but reachable — the intended calibration.
 The forward ensemble defaults to zero annual drift. The earlier uniform
 `+5%` assumption lowered modeled downside probability for every underlying
 and regime, mechanically manufacturing part of the apparent short-put edge.
+The empirical block bootstrap was a second path for hidden drift because it
+resampled raw historical returns, including the direction of the selected
+lookback period. It now resamples centered historical shocks and adds only
+the cycle's explicit drift.
 A positive unconditional equity premium may be defensible over long periods,
 but applying it inside a 7–45 DTE underwriting horizon without a validated,
 regime-specific estimator is not. The drift used by each cycle is captured
-in its distribution evidence. Any future nonzero drift must be explicit and
+in its distribution evidence. The bootstrap also converts calendar DTE to
+the corresponding number of trading sessions instead of treating 30 calendar
+days as 30 market sessions. Any future nonzero drift must be explicit and
 independently calibrated; it may not be a hidden default.
 
 ---

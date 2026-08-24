@@ -9,6 +9,7 @@ import {
 } from '../src/math/black_scholes.js';
 import {
   lognormalTerminal, jumpDiffusionTerminal, studentTTerminal, ensembleTerminal, modelSpread,
+  bootstrapTerminal,
 } from '../src/math/distribution.js';
 
 describe('determinism', () => {
@@ -145,6 +146,28 @@ describe('forward distributions', () => {
     const agree = ensembleTerminal([{ dist: ln }, { dist: lognormalTerminal({ spot, vol, t, n: 30_000, seed: 'b' }) }]);
     const disagree = ensembleTerminal([{ dist: ln }, { dist: jd }]);
     assert.ok(modelSpread(disagree, 85) > modelSpread(agree, 85));
+  });
+
+  test('bootstrap removes the sample period drift unless explicitly requested', () => {
+    const trending = Array(252).fill(0.0005);
+    const neutral = bootstrapTerminal({
+      spot, returns: trending, horizonDays: 30, n: 1000, seed: 'centered',
+    });
+    const bullish = bootstrapTerminal({
+      spot, returns: trending, horizonDays: 30, drift: 0.05, n: 1000, seed: 'centered',
+    });
+    assert.ok(Math.abs(neutral.params.sampleAnnualizedLogReturn - 0.126) < 1e-12);
+    assert.equal(neutral.params.drift, 0);
+    assert.ok(neutral.samples.every((sample) => Math.abs(sample - spot) < 1e-12));
+    assert.ok(bullish.samples[0] > neutral.samples[0]);
+  });
+
+  test('bootstrap converts calendar DTE to trading sessions', () => {
+    const dist = bootstrapTerminal({
+      spot, returns: Array(252).fill(0), horizonDays: 30, n: 10, seed: 'calendar',
+    });
+    assert.equal(dist.params.tradingSessions, 21);
+    assert.equal(dist.t, 30 / 365);
   });
 
   test('payoff stats are internally consistent', () => {
