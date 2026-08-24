@@ -489,11 +489,23 @@ export function liveDashboardScript() {
     const baseline = status.baseline || {};
     const cycle = status.latestCycle || {};
     const market = status.marketCheck;
-    const marked = positions.reduce((sum, position) => sum + Math.abs(Number(position.marketValue) || 0), 0);
+    const completeMarks = positions.every(position => present(position.marketValue));
+    const marked = completeMarks ? positions.reduce((sum, position) => sum + Number(position.marketValue), 0) : null;
     const cards = qa('#overview .metric-card');
     if (cards[0]) { text(q('.metric-label', cards[0]), 'Net asset value'); text(q('.metric-value', cards[0]), money(account.nav)); text(q('.metric-foot', cards[0]), 'Schwab read-only · ' + when(custody.observedAt)); }
-    if (cards[1]) { text(q('.metric-label', cards[1]), 'Buying power'); text(q('.metric-value', cards[1]), money(account.buyingPower)); const bar = q('.bar', cards[1]); if (bar) bar.remove(); text(q('.metric-foot', cards[1]), 'Broker-reported available buying power'); }
-    if (cards[2]) { text(q('.metric-label', cards[2]), 'Marked positions'); text(q('.metric-value', cards[2]), money(marked)); text(q('.metric-foot', cards[2]), positions.length + ' synchronized position' + (positions.length === 1 ? '' : 's')); }
+    if (cards[1]) {
+      text(q('.metric-label', cards[1]), 'Signed cash balance');
+      text(q('.metric-value', cards[1]), money(account.cash));
+      const bar = q('.bar', cards[1]); if (bar) bar.remove();
+      text(q('.metric-foot', cards[1]), present(account.cash) && Number(account.cash) < 0 ? 'Margin borrowing · negative cash' : 'Uninvested cash · excludes buying power');
+    }
+    if (cards[2]) {
+      text(q('.metric-label', cards[2]), 'Net marked positions');
+      text(q('.metric-value', cards[2]), completeMarks ? money(marked) : 'UNAVAILABLE');
+      text(q('.metric-foot', cards[2]), completeMarks && present(account.cash) && present(account.nav)
+        ? (money(marked) + ' + ' + money(account.cash) + ' cash = ' + money(account.nav) + ' NAV')
+        : 'Incomplete position marks · no partial total shown');
+    }
     if (cards[3]) { text(q('.metric-label', cards[3]), 'Reconciliation baseline'); text(q('.metric-value', cards[3]), baseline.status || 'REQUIRED'); text(q('.metric-foot', cards[3]), baseline.status === 'CAPTURED' ? (baseline.positionCount + ' positions · ' + baseline.openOrderCount + ' open orders') : 'Required before a cycle may proceed'); }
     text(q('#overview .snapshot strong'), when(custody.observedAt));
 

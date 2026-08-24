@@ -29,6 +29,11 @@ describe('protected live dashboard', () => {
       assert.match(source, new RegExp(path.replaceAll('/', '\\/'), 'u'));
     }
     assert.doesNotMatch(source, /submitOrder|replaceOrder|cancelOrder/u);
+    assert.match(source, /Signed cash balance/u);
+    assert.match(source, /account\.cash/u);
+    assert.doesNotMatch(source, /text\(q\('\.metric-value', cards\[1\]\), money\(account\.buyingPower\)\)/u);
+    assert.match(source, /positions\.every\(position => present\(position\.marketValue\)\)/u);
+    assert.doesNotMatch(source, /Math\.abs\(Number\(position\.marketValue\)/u);
   });
 });
 
