@@ -13,6 +13,24 @@ import { probItm, dteToT } from '../math/black_scholes.js';
 import { modelSpread } from '../math/distribution.js';
 import { isNum, clamp, brierScore, mean, stdev } from '../math/stats.js';
 
+/**
+ * The events NUVO forecasts, kept strictly apart.
+ *
+ * `p_model` is a TERMINAL probability — P(S_T < K) at expiry. Whether the
+ * strike was ever touched during the position's life is a different event
+ * with a different (always larger) probability. Scoring a terminal forecast
+ * against a touch outcome makes NUVO look systematically overconfident when
+ * it is merely being graded on the wrong question, and that mis-scored
+ * calibration is exactly what the authority ladder promotes on.
+ */
+export const FORECAST_EVENT = Object.freeze({
+  TERMINAL_BELOW_STRIKE: 'terminal',
+  TOUCHED_STRIKE: 'touch',
+});
+
+/** Calibration tags are namespaced by event so the two can never mix. */
+export const calibrationTag = (strategyId, event) => `${strategyId ?? 'UNTAGGED'}|${event}`;
+
 export const CALIBRATION = Object.freeze({
   UNCALIBRATED: 'UNCALIBRATED',
   PROVISIONAL: 'PROVISIONAL',

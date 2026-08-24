@@ -27,10 +27,13 @@ import { can, CAPITAL_AUTHORITY_FRACTION } from '../constitution/authority.js';
 import { SWITCH } from '../constitution/killswitch.js';
 import {
   lognormalTerminal, jumpDiffusionTerminal, studentTTerminal, ensembleTerminal,
+  bootstrapTerminal,
 } from '../math/distribution.js';
 import { dteToT } from '../math/black_scholes.js';
 import { isNum } from '../math/stats.js';
 import { STRUCTURE } from '../structures/structure.js';
+import { blackScholesRepricer } from '../portfolio/repricer.js';
+import { Rng } from '../math/random.js';
 
 export const OUTCOME = Object.freeze({
   ORDER: 'ORDER',
@@ -46,7 +49,10 @@ export const OUTCOME = Object.freeze({
  * input to sizing (§15). The seed is derived from the cycle so the whole
  * simulation is replayable from the evidence package.
  */
-export function buildDistribution({ spot, vol, dte, returns, seed, drift = 0.05, n = 20000 }) {
+export function buildDistribution({
+  spot, vol, dte, returns = null, seed, drift = 0.05, n = 20000,
+  minBootstrapReturns = 120,
+}) {
   const t = dteToT(dte);
   const members = [
     { dist: lognormalTerminal({ spot, vol, t, drift, n, seed: `${seed}:ln` }), weight: 1.0 },
@@ -62,8 +68,24 @@ export function buildDistribution({ spot, vol, dte, returns, seed, drift = 0.05,
     },
     { dist: studentTTerminal({ spot, vol, t, drift, nu: 5, n, seed: `${seed}:st` }), weight: 1.0 },
   ];
+
+  // The empirical member. Every other member imposes a shape on the
+  // returns; this one asks what this underlying has actually done, in
+  // blocks that preserve its own volatility clustering. Omitting it while
+  // the history sits unused in the call signature made the ensemble
+  // narrower than it claimed to be.
+  if (Array.isArray(returns) && returns.length >= minBootstrapReturns) {
+    members.push({
+      dist: bootstrapTerminal({
+        spot, returns, horizonDays: dte, blockSize: 5, n, seed: `${seed}:bs`,
+      }),
+      weight: 1.25,
+    });
+  }
+
   return {
     dist: ensembleTerminal(members, { seed }),
+    bootstrapIncluded: Array.isArray(returns) && returns.length >= minBootstrapReturns,
     // Pure-diffusion counterfactual, used to isolate gap risk.
     diffusionDist: lognormalTerminal({ spot, vol, t, drift, n, seed: `${seed}:ln` }),
   };
@@ -83,10 +105,15 @@ export async function runCycle(ctx) {
     modelVersion = 'nuvo-model-5.0.0', codeVersion = 'nuvo-5.0.0',
     dteTargets = [14, 30, 45], baseRiskPct = 0.02, maxGovernanceAttempts = 25,
     screenSamples = 3000, decisionSamples = 20_000, refineTop = 12,
+    commitmentsThisCycle = 0, closedTradePnl = null, externalizeRaw = false,
   } = ctx;
 
   const trace = [];
   const step = (name, ok, detail) => { trace.push({ name, ok, detail }); return ok; };
+  // Populated once the provider calls return; a refusal before that point
+  // legitimately has nothing raw to record, and says so.
+  let capturedRaw = null;
+  const screenedOutAll = [];
 
   const refuse = (violations, extra = {}) => {
     const tier = governingTier(violations);
@@ -101,6 +128,7 @@ export async function runCycle(ctx) {
       evidence: buildEvidence({
         cycleId, now, decision: OUTCOME.REFUSED, candidates: [],
         strategyId, modelVersion, codeVersion, limits, authorityLevel,
+        rawInputs: capturedRaw, externalizeRaw,
         ...extra,
       }),
     };
@@ -110,6 +138,15 @@ export async function runCycle(ctx) {
   if (!can(authorityLevel, 'rank')) {
     return refuse([violation(TIER.TRUTH, 'AUTHORITY_RESEARCH_ONLY',
       `Authority ${authorityLevel} may not evaluate live opportunities.`)]);
+  }
+
+  // ── 0a. Per-cycle commitment cap (§16) ───────────────────────────────
+  // Declared in the constitution and previously never checked. It exists to
+  // stop a single cycle from rebuilding the whole book in one pass.
+  if (isNum(commitmentsThisCycle) && commitmentsThisCycle >= limits.maxNewCommitmentsPerCycle) {
+    return refuse([violation(TIER.SURVIVAL, 'COMMITMENT_CAP',
+      `${commitmentsThisCycle} commitments already made this cycle; limit is ${limits.maxNewCommitmentsPerCycle}.`,
+      { commitmentsThisCycle, limit: limits.maxNewCommitmentsPerCycle })]);
   }
 
   // ── 0b. Kill switches ────────────────────────────────────────────────
@@ -149,6 +186,39 @@ export async function runCycle(ctx) {
     eventCalendar: events[symbols[0]],
   };
 
+  /**
+   * Everything the decision will be computed from, captured verbatim.
+   * This is what makes a replay possible; summaries cannot reproduce a
+   * decision, they can only describe one.
+   */
+  const rawInputs = {
+    capturedAt: now,
+    cycleId,
+    account: account.value ?? null,
+    accountAsOf: account.asOf ?? null,
+    brokerPositions: brokerPositions.value ?? null,
+    brokerOpenOrders: brokerOrders.value ?? null,
+    indexState: { ...(indexState.value ?? {}), ...(ctx.indexExtras ?? {}) },
+    indexAsOf: indexState.asOf ?? null,
+    symbols: Object.fromEntries(symbols.map((sym) => [sym, {
+      quote: quotes[sym]?.value ?? null,
+      quoteAsOf: quotes[sym]?.asOf ?? null,
+      chain: chains[sym]?.value ?? null,
+      chainAsOf: chains[sym]?.asOf ?? null,
+      history: histories[sym]?.value ?? null,
+      historyAsOf: histories[sym]?.asOf ?? null,
+      events: events[sym]?.value ?? null,
+    }])),
+    engineState: {
+      positions: reconcilePositions ?? [],
+      nav, drawdownPct, authorityLevel, strategyId,
+      limitsVersion: limits.version,
+      seeds: { governor: `${cycleId}:governor`, distributions: `${cycleId}:<symbol>:<dte>` },
+      sampling: { screenSamples, decisionSamples, refineTop },
+    },
+  };
+
+  capturedRaw = rawInputs;
   const truthReport = verify(snapshot, { limits, now });
   if (!truthReport.tradeable) {
     killSwitches?.trip(SWITCH.DATA_INTEGRITY, 'Truth contract not satisfied.',
@@ -222,6 +292,7 @@ export async function runCycle(ctx) {
       cycleId, now, reason: `Regime determined from only ${(marketState.regime.coverage * 100).toFixed(0)}% of its inputs; `
         + 'insufficient basis for new exposure.',
       trace, marketState, truthReport, strategyId, modelVersion, codeVersion, limits, authorityLevel,
+      rawInputs: capturedRaw, externalizeRaw,
     });
   }
 
@@ -236,6 +307,7 @@ export async function runCycle(ctx) {
     return noTradeResult({
       cycleId, now, reason: 'No underlying cleared the universe requirements.',
       trace, marketState, truthReport, universe, strategyId, modelVersion, codeVersion, limits, authorityLevel,
+      rawInputs: capturedRaw, externalizeRaw,
     });
   }
 
@@ -243,6 +315,7 @@ export async function runCycle(ctx) {
   const strategy = registry?.get(strategyId) ?? null;
   const allCandidates = [];
   const screenLog = [];
+  const distributionLog = [];
 
   for (const sym of universe.tradeable) {
     const st = underlyings[sym];
@@ -271,6 +344,7 @@ export async function runCycle(ctx) {
         spot: st.spot, vol: st.realized, dte, returns: st.returns,
         seed: seedBase, n: decisionSamples,
       });
+      distributionLog.push({ symbol: sym, dte, bootstrapIncluded: full.bootstrapIncluded });
       const chain = {
         ...chains[sym].value,
         contracts: chains[sym].value.contracts.filter((c) => c.dte === dte),
@@ -286,6 +360,7 @@ export async function runCycle(ctx) {
         refineTop,
       });
       screenLog.push({ symbol: sym, dte, screened: screenedCount, refined: cands.length, droppedByScreen: screenedOut.length });
+      screenedOutAll.push(...screenedOut);
       // Respect the strategy's own structure and regime permissions.
       const filtered = strategy
         ? cands.filter((c) =>
@@ -301,6 +376,7 @@ export async function runCycle(ctx) {
     screened: screenLog.reduce((s, l) => s + l.screened, 0),
     refined: allCandidates.length,
     admissible: allCandidates.filter((c) => c.admissible).length,
+    bootstrapIncluded: distributionLog.every((d) => d.bootstrapIncluded),
   });
 
   const selection = selectBest(allCandidates, { limits });
@@ -311,6 +387,7 @@ export async function runCycle(ctx) {
       cycleId, now, reason: selection.structure.reason,
       trace, marketState, truthReport, universe, candidates: allCandidates,
       comparison, strategyId, modelVersion, codeVersion, limits, authorityLevel,
+      rawInputs: capturedRaw, externalizeRaw, screenedOut: screenedOutAll, distributions: distributionLog,
     });
   }
   step('ranking', true, {
@@ -342,6 +419,13 @@ export async function runCycle(ctx) {
       candidate, positions, nav, ledger, limits,
       regime: marketState.regime, returnsBySymbol, sectors, authorityLevel,
       drawdownPct, baseRiskPct,
+      // Without these the stress, portfolio-CVaR and ruin limits cannot be
+      // evaluated, and the Governor now refuses rather than passing silently.
+      repricer: blackScholesRepricer,
+      rng: new Rng(`${cycleId}:governor`),
+      spot: underlyings[candidate.underlying]?.spot ?? null,
+      beta: underlyings[candidate.underlying]?.quote?.beta ?? 1,
+      closedTradePnl,
     });
     governanceAttempts.push({
       underlying: candidate.underlying,
@@ -374,6 +458,7 @@ export async function runCycle(ctx) {
       comparison, governance: null, selected: selection.selected,
       governanceAttempts,
       strategyId, modelVersion, codeVersion, limits, authorityLevel,
+      rawInputs: capturedRaw, externalizeRaw, screenedOut: screenedOutAll, distributions: distributionLog,
     });
   }
 
@@ -402,6 +487,7 @@ export async function runCycle(ctx) {
       trace, marketState, truthReport, universe, candidates: allCandidates,
       comparison, governance, selected,
       strategyId, modelVersion, codeVersion, limits, authorityLevel,
+      rawInputs: capturedRaw, externalizeRaw, screenedOut: screenedOutAll, distributions: distributionLog,
     });
   }
 
@@ -412,6 +498,9 @@ export async function runCycle(ctx) {
     selected, governance, sizing: governance.sizing,
     order: built.order, positionContract, strategyId, modelVersion, codeVersion,
     limits, authorityLevel,
+    rawInputs: capturedRaw, externalizeRaw,
+    screenedOut: screenedOutAll,
+    distributions: distributionLog,
   });
 
   return {
@@ -439,7 +528,8 @@ export async function runCycle(ctx) {
 function noTradeResult({
   cycleId, now, reason, trace, marketState, truthReport, universe,
   candidates = [], comparison = null, governance = null, selected = null,
-  governanceAttempts = null,
+  governanceAttempts = null, rawInputs = null, externalizeRaw = false,
+  screenedOut = [], distributions = null,
   strategyId, modelVersion, codeVersion, limits, authorityLevel,
 }) {
   return {
@@ -459,6 +549,7 @@ function noTradeResult({
       cycleId, now, decision: STRUCTURE.NO_TRADE, truthReport, marketState,
       universe, candidates, selected, governance,
       strategyId, modelVersion, codeVersion, limits, authorityLevel,
+      rawInputs, externalizeRaw, screenedOut, distributions,
     }),
     note: 'Idle capital is undesirable. Deploying capital into negative expectancy is worse.',
   };

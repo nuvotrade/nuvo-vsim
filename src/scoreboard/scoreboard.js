@@ -58,8 +58,13 @@ export function economicScoreboard({ trades, nav, startingNav, days }) {
 }
 
 /** ── CALIBRATION ─────────────────────────────────────────────────────── */
-export function calibrationScoreboard({ store, tag }) {
-  const filter = tag ? (o) => o.tag === tag : () => true;
+export function calibrationScoreboard({ store, tag, tagSuffix }) {
+  // `tagSuffix` selects one forecast EVENT across all strategies; `tag`
+  // selects one exact series. Neither defaults to "everything", because
+  // averaging a terminal board with a touch board describes nothing.
+  const filter = tag
+    ? (o) => o.tag === tag
+    : (tagSuffix ? (o) => String(o.tag ?? '').endsWith(tagSuffix) : () => true);
   const n = store.observations.filter(filter).length;
   const slope = store.slope(filter);
   return {

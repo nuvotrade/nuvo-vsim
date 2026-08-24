@@ -162,6 +162,48 @@ export function coveredCall({ underlying, call, shares = 100, costBasis, aggress
 }
 
 /**
+ * Aggregate Greeks across ALL legs of a structure, correctly signed.
+ *
+ * A spread's risk is not its short leg's risk. Reading Greeks from leg[0]
+ * ignores the long leg that exists precisely to offset it — for a bull put
+ * spread at 25-delta short and 10-delta long, the true position delta is
+ * about 40% smaller than the short leg alone implies. Sizing against the
+ * inflated number consumes portfolio delta budget that is not being used,
+ * and reporting it tells the operator the book is more directional than
+ * it is.
+ *
+ * Returns POSITION-level Greeks: already multiplied by quantity, contract
+ * multiplier and direction, so they can be summed across a book directly.
+ */
+export function structureGreeks(structure, { contracts = null } = {}) {
+  const g = { delta: 0, gamma: 0, vega: 0, theta: 0 };
+  if (!structure?.legs?.length) return g;
+  // Scale if the caller sized the structure differently from how it was built.
+  const scale = isNum(contracts) && structure.contracts > 0
+    ? contracts / structure.contracts
+    : 1;
+
+  for (const leg of structure.legs) {
+    const c = leg.contract;
+    const sign = leg.action === 'SELL' ? -1 : 1;
+    const qty = (leg.quantity ?? 0) * scale;
+
+    if (leg.right === 'shares') {
+      // Shares are pure delta-one.
+      g.delta += sign * qty;
+      continue;
+    }
+    if (!c) continue;
+    const units = qty * (c.multiplier ?? 100);
+    g.delta += sign * (c.delta ?? 0) * units;
+    g.gamma += sign * (c.gamma ?? 0) * units;
+    g.vega += sign * (c.vega ?? 0) * units;
+    g.theta += sign * (c.theta ?? 0) * units;
+  }
+  return g;
+}
+
+/**
  * NO TRADE as a first-class structure (§6).
  *
  * It is scored, ranked and recorded like any other candidate. Its EV is

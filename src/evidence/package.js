@@ -20,6 +20,8 @@ export function buildEvidence({
   cycleId, now, decision, truthReport, marketState, universe, candidates,
   selected, governance, sizing, order, positionContract, strategyId,
   modelVersion, codeVersion, limits, authorityLevel,
+  rawInputs = null, screenedOut = null, distributions = null,
+  externalizeRaw = false,
 }) {
   const pkg = {
     version: EVIDENCE_VERSION,
@@ -32,6 +34,34 @@ export function buildEvidence({
     limitsVersion: limits?.version ?? null,
     authorityLevel,
     strategyId,
+
+    /**
+     * The raw observations the decision was computed from — chains,
+     * histories, quotes, account state, positions, open orders — captured
+     * verbatim rather than summarised.
+     *
+     * Without these the package documents a decision but cannot REPRODUCE
+     * one, and 19's claim that a decision is reconstructable years later
+     * is not true. `externalizeRaw` drops the payload but keeps its hash,
+     * for deployments that put the bytes in object storage keyed by that
+     * hash; the hash is computed over the payload either way, so an
+     * externalised blob can still be verified against the record.
+     */
+    inputs: rawInputs ? {
+      hash: contentHash(rawInputs),
+      captured: !externalizeRaw,
+      externalized: externalizeRaw,
+      data: externalizeRaw ? null : rawInputs,
+      note: externalizeRaw
+        ? 'Raw payload stored externally; retrieve by hash and verify before replay.'
+        : 'Raw payload embedded. Replaying it must reproduce this decision exactly.',
+    } : {
+      hash: null, captured: false, externalized: false, data: null,
+      note: 'NO RAW INPUTS CAPTURED — this decision is not replayable.',
+    },
+
+    /** Distribution provenance, so a replay builds the same forward model. */
+    distributions: distributions ?? null,
 
     // ── Raw observations, exactly as verified ──
     truth: {
@@ -85,11 +115,27 @@ export function buildEvidence({
     candidates: (candidates ?? []).map(summariseCandidate),
     rejectedCount: (candidates ?? []).filter((c) => !c.admissible).length,
 
+    /**
+     * Candidates the coarse screen dropped before refinement.
+     *
+     * Omitting them made the recorded field look like the field that was
+     * considered, when it was only the shortlist. Anyone auditing whether
+     * NUVO looked at the right strikes needs to see what it discarded and
+     * on what basis.
+     */
+    screenedOut: screenedOut ?? [],
+    screenedOutCount: (screenedOut ?? []).length,
+
     selected: selected ? summariseCandidate(selected) : null,
     decision,
 
     governance: governance ? {
       approved: governance.approved,
+      stressWorstScenario: governance.stress?.worst?.scenario ?? null,
+      stressEvaluated: Boolean(governance.stress),
+      portfolioCvarPctOfNav: governance.portfolioCvar?.pctOfNav ?? null,
+      ruinProbability: governance.ruin?.probability ?? null,
+      ruinStandardError: governance.ruin?.standardError ?? null,
       cluster: governance.cluster?.id ?? null,
       clusterMembers: governance.cluster?.members ?? null,
       clusterExposure: governance.clusterExposure,
@@ -123,8 +169,51 @@ export function buildEvidence({
     outcome: null,
   };
 
+  /**
+   * Two hashes, because they answer two different questions.
+   *
+   *   hash                — integrity of the whole record. Any alteration
+   *                         anywhere breaks it. This is the audit guarantee.
+   *   decisionFingerprint — the DECISION content only, with provenance
+   *                         metadata excluded. This is what a replay must
+   *                         reproduce.
+   *
+   * Collapsing them makes reproducibility untestable: a faithful replay
+   * necessarily reads from a different provider, so its record differs in
+   * source labels while the decision is identical. Judging reproduction on
+   * the full-record hash would report every correct replay as a failure.
+   */
+  pkg.decisionFingerprint = contentHash(decisionContent(pkg));
   pkg.hash = contentHash(pkg);
   return pkg;
+}
+
+/**
+ * The subset of a package that constitutes the decision itself.
+ * Deliberately excludes: the raw input blob (identified by its own hash),
+ * provider/source names, and record-keeping ids.
+ */
+export function decisionContent(pkg) {
+  return {
+    decision: pkg.decision,
+    inputsHash: pkg.inputs?.hash ?? null,
+    modelVersion: pkg.modelVersion,
+    codeVersion: pkg.codeVersion,
+    limitsVersion: pkg.limitsVersion,
+    authorityLevel: pkg.authorityLevel,
+    strategyId: pkg.strategyId,
+    regime: pkg.market?.regime ?? null,
+    regimeScore: pkg.market?.regimeScore ?? null,
+    universe: pkg.universe ?? null,
+    candidates: pkg.candidates ?? [],
+    screenedOut: pkg.screenedOut ?? [],
+    selected: pkg.selected ?? null,
+    sizing: pkg.sizing ?? null,
+    governance: pkg.governance ?? null,
+    orderLegs: pkg.order?.legs ?? null,
+    orderLimitPrice: pkg.order?.limitPrice ?? null,
+    orderExpectation: pkg.order?.expectation ?? null,
+  };
 }
 
 function summariseCandidate(c) {
@@ -177,6 +266,11 @@ export function sealOutcome(pkg, outcome) {
 export function verifyEvidence(pkg) {
   const { hash, ...rest } = pkg;
   return contentHash(rest) === hash;
+}
+
+/** Does this package's recorded fingerprint still match its own content? */
+export function verifyFingerprint(pkg) {
+  return contentHash(decisionContent(pkg)) === pkg.decisionFingerprint;
 }
 
 export { stableStringify };

@@ -8,22 +8,59 @@
  */
 import { TIER, violation } from '../constitution/hierarchy.js';
 import { isNum } from '../math/stats.js';
+import { structureGreeks } from '../structures/structure.js';
 import { buildClusters, clusterOf } from './clusters.js';
 import { sizePosition } from './sizing.js';
-import { stressTest } from './stress.js';
+import { stressTest, portfolioLossDistribution, ruinProbability } from './stress.js';
 
-/** Aggregate the book's Greeks, beta-weighted where a beta is known. */
+/**
+ * Position-level Greeks for one holding.
+ *
+ * Prefers the leg set when present, because a position IS its legs. The
+ * flat single-leg shape is still honoured for simple holdings, but a
+ * multi-leg structure that arrives without legs returns zeros rather than
+ * silently reporting one leg as the whole position.
+ */
+export function positionGreeks(pos) {
+  if (Array.isArray(pos.legs) && pos.legs.length) {
+    return structureGreeks({ legs: pos.legs, contracts: pos.contracts ?? 1 },
+      { contracts: pos.contracts ?? 1 });
+  }
+  const units = (pos.quantity ?? 0) * (pos.multiplier ?? 100);
+  return {
+    delta: (pos.delta ?? 0) * units,
+    gamma: (pos.gamma ?? 0) * units,
+    vega: (pos.vega ?? 0) * units,
+    theta: (pos.theta ?? 0) * units,
+  };
+}
+
+/**
+ * Aggregate the book's Greeks, beta-weighted where a beta is known.
+ *
+ * Beta-weighted delta is a DOLLAR figure: position delta x spot x beta.
+ * A position without a spot price therefore contributes nothing to it,
+ * which would quietly understate the book's directional exposure — so a
+ * missing spot is counted and surfaced rather than absorbed.
+ */
 export function portfolioGreeks(positions, { nav }) {
-  const agg = { delta: 0, gamma: 0, vega: 0, theta: 0, betaWeightedDelta: 0, notional: 0 };
+  const agg = {
+    delta: 0, gamma: 0, vega: 0, theta: 0, betaWeightedDelta: 0, notional: 0,
+    positionsMissingSpot: 0,
+  };
   for (const p of positions) {
-    const q = p.quantity ?? 1;
-    const mult = p.multiplier ?? 100;
-    agg.delta += (p.delta ?? 0) * q * mult;
-    agg.gamma += (p.gamma ?? 0) * q * mult;
-    agg.vega += (p.vega ?? 0) * q * mult;
-    agg.theta += (p.theta ?? 0) * q * mult;
-    agg.betaWeightedDelta += (p.delta ?? 0) * q * mult * (p.beta ?? 1) * (p.spot ?? 1);
-    agg.notional += Math.abs((p.shortStrike ?? p.spot ?? 0) * q * mult);
+    const g = positionGreeks(p);
+    agg.delta += g.delta;
+    agg.gamma += g.gamma;
+    agg.vega += g.vega;
+    agg.theta += g.theta;
+    if (isNum(p.spot) && p.spot > 0) {
+      agg.betaWeightedDelta += g.delta * (p.beta ?? 1) * p.spot;
+    } else {
+      agg.positionsMissingSpot += 1;
+    }
+    const notionalRef = isNum(p.shortStrike) ? p.shortStrike : (p.spot ?? 0);
+    agg.notional += Math.abs(notionalRef * (p.contracts ?? Math.abs(p.quantity ?? 0)) * (p.multiplier ?? 100));
   }
   return {
     ...agg,
@@ -107,6 +144,17 @@ export function checkLimits({ positions, nav, limits, clustering, drawdownPct = 
     violations.push(violation(TIER.SURVIVAL, 'VEGA_LIMIT',
       `Net vega is ${(greeks.vegaPctNav * 100).toFixed(2)}% of NAV per vol point.`, { vega: greeks.vegaPctNav }));
   }
+  if (isNum(greeks.gammaPctNav) && Math.abs(greeks.gammaPctNav) > limits.maxNetGammaPctNav) {
+    violations.push(violation(TIER.SURVIVAL, 'GAMMA_LIMIT',
+      `Net gamma is ${(greeks.gammaPctNav * 100).toFixed(3)}% of NAV.`, { gamma: greeks.gammaPctNav }));
+  }
+  // A position whose spot is unknown contributes nothing to beta-weighted
+  // delta, so an unmeasurable book must not read as a flat one.
+  if (greeks.positionsMissingSpot > 0) {
+    violations.push(violation(TIER.TRUTH, 'EXPOSURE_UNMEASURABLE',
+      `${greeks.positionsMissingSpot} position(s) lack a spot price; directional exposure is understated.`,
+      { count: greeks.positionsMissingSpot }));
+  }
   if (drawdownPct > limits.maxDrawdownPct) {
     violations.push(violation(TIER.SURVIVAL, 'DRAWDOWN_HALT',
       `Drawdown ${(drawdownPct * 100).toFixed(1)}% exceeds the ${(limits.maxDrawdownPct * 100).toFixed(0)}% halt.`, { drawdownPct }));
@@ -129,6 +177,7 @@ export function checkLimits({ positions, nav, limits, clustering, drawdownPct = 
 export function govern({
   candidate, positions, nav, ledger, limits, regime, returnsBySymbol,
   sectors, authorityLevel, drawdownPct = 0, repricer = null, baseRiskPct = 0.02,
+  spot = null, beta = 1, rng = null, closedTradePnl = null,
 }) {
   const clustering = buildClusters(returnsBySymbol, {
     threshold: limits.clusterCorrelationThreshold, sectors,
@@ -159,20 +208,35 @@ export function govern({
   }
 
   // Build the hypothetical position and re-check the whole book.
+  //
+  // It carries its LEGS, not a single leg's Greeks, and it carries a real
+  // spot price. Both were wrong before: leg[0] overstates a spread's delta
+  // by roughly two thirds, and a position with no spot contributes zero to
+  // beta-weighted delta, so the Governor was testing a book that looked
+  // both more directional per spread and less directional in aggregate
+  // than the one it was about to create.
+  if (!isNum(spot) || spot <= 0) {
+    return {
+      approved: false, sizing, clustering, cluster,
+      violations: [violation(TIER.TRUTH, 'SPOT_UNAVAILABLE',
+        `No verified spot price for ${candidate.underlying}; portfolio exposure cannot be measured.`)],
+    };
+  }
   const hypothetical = {
     id: 'HYPOTHETICAL',
     underlying: candidate.underlying,
     sector: sectors[candidate.underlying] ?? 'UNKNOWN',
+    legs: candidate.structure.legs,
+    contracts: sizing.contracts,
     quantity: -sizing.contracts,
     multiplier: candidate.structure.multiplier,
-    delta: candidate.structure.legs[0]?.contract?.delta ?? 0,
-    gamma: candidate.structure.legs[0]?.contract?.gamma ?? 0,
-    vega: candidate.structure.legs[0]?.contract?.vega ?? 0,
-    theta: candidate.structure.legs[0]?.contract?.theta ?? 0,
-    spot: candidate.structure.legs[0]?.contract ? undefined : undefined,
+    spot,
+    iv: candidate.structure.legs.find((l) => l.action === 'SELL')?.contract?.iv
+      ?? candidate.structure.legs[0]?.contract?.iv,
     shortStrike: candidate.structure.shortStrike,
+    longStrike: candidate.structure.longStrike ?? null,
     expiration: candidate.structure.expiration,
-    beta: 1,
+    beta: beta ?? 1,
     economicCapital: sizing.totalEconomicCapital,
     buyingPower: sizing.totalBuyingPower,
   };
@@ -184,13 +248,52 @@ export function govern({
   // Soft de-risking warnings do not block; hard limits do.
   const blocking = check.violations.filter((v) => !v.detail?.soft);
 
+  // ── Survival gates that need a repricer ─────────────────────────────
+  //
+  // These limits were declared in the constitution but never evaluated at
+  // entry, which made them documentation. A limit that cannot block a
+  // trade is not a limit.
+  const bookWithCandidate = [...positions, hypothetical];
   let stress = null;
+  let portfolioCvar = null;
+  let ruin = null;
+
   if (repricer) {
-    stress = stressTest({ positions: [...positions, hypothetical], nav, repricer, limits });
+    stress = stressTest({ positions: bookWithCandidate, nav, repricer, limits });
     if (!stress.passed) {
       blocking.push(violation(TIER.SURVIVAL, 'STRESS_BREACH',
         `Stress scenario ${stress.worst.scenario} loses ${(Math.abs(stress.worstPctOfNav) * 100).toFixed(1)}% of NAV.`,
         { stress: stress.worst }));
+    }
+
+    if (rng) {
+      const loss = portfolioLossDistribution({
+        positions: bookWithCandidate, repricer, rng: rng.fork('portfolio-cvar'),
+        paths: 2000, horizonDays: 5,
+      });
+      portfolioCvar = { ...loss, pctOfNav: nav > 0 ? loss.cvar95 / nav : NaN };
+      if (isNum(portfolioCvar.pctOfNav) && portfolioCvar.pctOfNav > limits.maxPortfolioCVaRPct) {
+        blocking.push(violation(TIER.SURVIVAL, 'PORTFOLIO_CVAR_LIMIT',
+          `Portfolio 95% CVaR is ${(portfolioCvar.pctOfNav * 100).toFixed(1)}% of NAV; limit ${(limits.maxPortfolioCVaRPct * 100).toFixed(0)}%.`,
+          { cvar95: loss.cvar95, pctOfNav: portfolioCvar.pctOfNav }));
+      }
+    }
+  } else {
+    // Silence here would read as a pass. It is not one.
+    blocking.push(violation(TIER.TRUTH, 'STRESS_NOT_EVALUATED',
+      'No repricer supplied: portfolio stress and CVaR limits could not be evaluated.'));
+  }
+
+  // Ruin probability, gated on having enough realised P&L to mean anything.
+  if (rng && Array.isArray(closedTradePnl) && closedTradePnl.length >= 30) {
+    ruin = ruinProbability({
+      perCyclePnl: closedTradePnl, nav, trials: 1000, cycles: 52,
+      rng: rng.fork('ruin'),
+    });
+    if (isNum(ruin.probability) && ruin.probability > limits.maxRuinProbability) {
+      blocking.push(violation(TIER.SURVIVAL, 'RUIN_LIMIT',
+        `Ruin probability ${(ruin.probability * 100).toFixed(2)}% (SE ${(ruin.standardError * 100).toFixed(2)}%) exceeds ${(limits.maxRuinProbability * 100).toFixed(2)}%.`,
+        ruin));
     }
   }
 
@@ -203,6 +306,8 @@ export function govern({
     clusterCorrelation,
     portfolio: check,
     stress,
+    portfolioCvar,
+    ruin,
     violations: blocking,
     warnings: check.violations.filter((v) => v.detail?.soft),
   };

@@ -198,7 +198,7 @@ describe('the book stays reconciled across fills', () => {
     const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
     await eng.submit(r);
     assert.ok(eng.brokerView().length > 0);
-    eng.recordOutcome({ position: eng.positions[0], realizedPnl: 50, breached: false });
+    eng.recordOutcome({ position: eng.positions[0], realizedPnl: 50, finishedBelowStrike: false });
     assert.equal(eng.brokerView().length, 0,
       'a stale leg would read as a phantom position on the next cycle');
   });
@@ -285,7 +285,7 @@ describe('evidence is complete and tamper-evident (§19)', () => {
 describe('scoreboards enforce the hierarchy (§21, §27)', () => {
   test('a breach fails the scoreboard regardless of profit', async () => {
     const { eng } = build();
-    eng.recordOutcome({ position: { id: 'p1', buyingPower: 1000, economicCapital: 500 }, realizedPnl: 50_000, breached: false });
+    eng.recordOutcome({ position: { id: 'p1', buyingPower: 1000, economicCapital: 500 }, realizedPnl: 50_000, finishedBelowStrike: false });
     eng.breaches.push({ code: 'UNAUTHORISED', message: 'traded above authority' });
     const sb = eng.scoreboard();
     assert.ok(sb.economic.realizedPnl > 0, 'the trade made money');
@@ -301,7 +301,7 @@ describe('scoreboards enforce the hierarchy (§21, §27)', () => {
 
   test('a drawdown past the halt trips the kill switch automatically', () => {
     const { eng } = build({ nav: 100_000 });
-    eng.recordOutcome({ position: { id: 'p1', buyingPower: 0, economicCapital: 0 }, realizedPnl: -20_000, breached: true });
+    eng.recordOutcome({ position: { id: 'p1', buyingPower: 0, economicCapital: 0 }, realizedPnl: -20_000, finishedBelowStrike: true });
     assert.ok(eng.killSwitches.isTripped(SWITCH.DRAWDOWN));
     assert.equal(eng.scoreboard().survival.withinDrawdownLimit, false);
   });
@@ -309,13 +309,66 @@ describe('scoreboards enforce the hierarchy (§21, §27)', () => {
   test('outcomes feed calibration so probabilities can be scored later', () => {
     const { eng } = build();
     eng.recordOutcome({
-      position: { id: 'p1', buyingPower: 1000, economicCapital: 500, probabilities: { pModel: 0.2 }, strategyId: 'VSIM-001' },
-      realizedPnl: 100, breached: false,
+      position: {
+        id: 'p1', buyingPower: 1000, economicCapital: 500,
+        pTerminalBelowStrike: 0.2, strategyId: 'VSIM-001',
+      },
+      realizedPnl: 100, finishedBelowStrike: false,
     });
     assert.equal(eng.calibration.n, 1);
-    assert.equal(eng.calibration.observations[0].outcome, true);
-    assert.ok(Math.abs(eng.calibration.observations[0].p - 0.8) < 1e-9,
-      'the scored forecast is P(no breach)');
+    const o = eng.calibration.observations[0];
+    assert.equal(o.outcome, true);
+    assert.ok(Math.abs(o.p - 0.8) < 1e-9, 'the scored forecast is P(finish at or above the strike)');
+    assert.match(o.tag, /\|terminal$/, 'the event must be named in the tag');
+  });
+
+  test('terminal and touch forecasts are scored as separate events', () => {
+    const { eng } = build();
+    // Finished ABOVE the strike, but traded through it mid-life. The
+    // terminal call was right and the touch call was wrong; conflating
+    // them scores a correct forecast as a miss.
+    eng.recordOutcome({
+      position: {
+        id: 'p1', buyingPower: 1000, economicCapital: 500,
+        pTerminalBelowStrike: 0.18, pTouchStrike: 0.34, strategyId: 'VSIM-001',
+      },
+      realizedPnl: 120, finishedBelowStrike: false, touchedStrike: true,
+    });
+    assert.equal(eng.calibration.n, 2);
+    const terminal = eng.calibration.observations.find((o) => o.tag.endsWith('|terminal'));
+    const touch = eng.calibration.observations.find((o) => o.tag.endsWith('|touch'));
+    assert.equal(terminal.outcome, true, 'terminal forecast was correct');
+    assert.equal(touch.outcome, false, 'touch forecast was wrong');
+    assert.notEqual(terminal.p, touch.p, 'the two events have different probabilities');
+  });
+
+  test('an ambiguous outcome is refused rather than guessed', () => {
+    const { eng } = build();
+    assert.throws(
+      () => eng.recordOutcome({ position: { id: 'p1' }, realizedPnl: 1, breached: true }),
+      /conflates terminal and touch/,
+    );
+  });
+
+  test('the touch board is not fabricated from the terminal outcome', () => {
+    const { eng } = build();
+    eng.recordOutcome({
+      position: { id: 'p1', pTerminalBelowStrike: 0.2, pTouchStrike: 0.4, strategyId: 'VSIM-001' },
+      realizedPnl: 10, finishedBelowStrike: false, // touch NOT observed
+    });
+    assert.equal(eng.calibration.n, 1, 'an unobserved path must not be invented');
+  });
+
+  test('the calibration scoreboard reads the terminal board only', () => {
+    const { eng } = build();
+    for (let i = 0; i < 4; i += 1) {
+      eng.recordOutcome({
+        position: { id: `p${i}`, pTerminalBelowStrike: 0.2, pTouchStrike: 0.4, strategyId: 'VSIM-001' },
+        realizedPnl: 1, finishedBelowStrike: false, touchedStrike: true,
+      });
+    }
+    assert.equal(eng.calibration.n, 8, 'both boards recorded');
+    assert.equal(eng.scoreboard().calibration.n, 4, 'only the terminal board is scored');
   });
 });
 

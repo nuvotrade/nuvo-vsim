@@ -7,6 +7,7 @@
  * so a retry of the same intent is recognisably the same order.
  */
 import { isNum } from '../math/stats.js';
+import { sha256 } from '../math/sha256.js';
 import { TIER, violation } from '../constitution/hierarchy.js';
 
 export const ORDER_STATE = Object.freeze({
@@ -19,22 +20,20 @@ export const ORDER_STATE = Object.freeze({
   REJECTED: 'REJECTED',
 });
 
-/** FNV-1a — small, dependency-free, and stable across runs and platforms. */
+/**
+ * Content hash over a canonical serialisation.
+ *
+ * SHA-256, not a checksum. Evidence records and order identities both rely
+ * on this, and a 64-bit non-cryptographic hash offers no resistance to a
+ * deliberately substituted record — which is the only threat an audit trail
+ * exists to address.
+ */
 export function contentHash(obj) {
-  const str = stableStringify(obj);
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i += 1) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  // Second pass over the reversed string widens the hash to 64 bits.
-  let g = 0xcbf29ce4;
-  for (let i = str.length - 1; i >= 0; i -= 1) {
-    g ^= str.charCodeAt(i);
-    g = Math.imul(g, 0x01000193) >>> 0;
-  }
-  return (h.toString(16).padStart(8, '0') + g.toString(16).padStart(8, '0'));
+  return sha256(stableStringify(obj));
 }
+
+/** Short form for human-facing identifiers. Full digest is kept for evidence. */
+export const shortHash = (obj) => contentHash(obj).slice(0, 16);
 
 /** Key order matters for hashing, so keys are sorted deterministically. */
 export function stableStringify(v) {
@@ -117,7 +116,7 @@ export function buildOrder({
   return {
     ok: true,
     order: {
-      clientOrderId: `NUVO-${contentHash(intent)}`,
+      clientOrderId: `NUVO-${shortHash(intent)}`,
       state: ORDER_STATE.DRAFT,
       createdAt: now,
       intent,

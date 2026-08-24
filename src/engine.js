@@ -8,7 +8,9 @@ import { DEFAULT_LIMITS } from './constitution/limits.js';
 import { KillSwitchBoard, SWITCH } from './constitution/killswitch.js';
 import { AUTHORITY, evaluatePromotion, evaluateDemotion } from './constitution/authority.js';
 import { CapitalLedger } from './portfolio/capital_states.js';
-import { CalibrationStore } from './underwriter/probabilities.js';
+import {
+  CalibrationStore, calibrationTag, FORECAST_EVENT,
+} from './underwriter/probabilities.js';
 import { StrategyRegistry } from './registry/strategy_registry.js';
 import { registerCatalogue } from './registry/strategies/vsim_strategies.js';
 import { EvidenceStore } from './evidence/store.js';
@@ -109,6 +111,7 @@ export class NuvoEngine {
       calibrationStore: this.calibration, authorityLevel: this.authorityLevel,
       positions: this.positions,
       reconcilePositions: this.brokerView(),
+      closedTradePnl: this.closedTrades.map((t) => t.realizedPnl).filter(Number.isFinite),
       symbols: this.symbols, approved: this.approved,
       nav: this.nav, drawdownPct: this.drawdownPct, strategyId,
       modelVersion: this.modelVersion, codeVersion: this.codeVersion,
@@ -174,7 +177,20 @@ export class NuvoEngine {
    * whether the probability NUVO quoted came true. That second part is
    * what eventually earns authority (§17, §21).
    */
-  recordOutcome({ position, realizedPnl, breached, strategyId }) {
+  recordOutcome({
+    position, realizedPnl, strategyId,
+    finishedBelowStrike, touchedStrike,
+  }) {
+    // The two events are demanded separately and neither is inferred from
+    // the other. A position can finish above its strike having been deep
+    // through it for a week; grading the terminal forecast on that path
+    // would score a correct call as a miss.
+    if (finishedBelowStrike === undefined) {
+      throw new Error(
+        'recordOutcome requires finishedBelowStrike (the terminal event p_model predicted). '
+        + 'Passing an ambiguous "breached" flag conflates terminal and touch probabilities.',
+      );
+    }
     this.nav += realizedPnl;
     this.equityCurve.push(this.nav);
     this.closedTrades.push({
@@ -182,12 +198,28 @@ export class NuvoEngine {
       capitalEmployed: position.buyingPower,
       economicCapital: position.economicCapital,
     });
-    if (position.probabilities && Number.isFinite(position.probabilities.pModel)) {
-      // The forecast being scored is P(no breach) — the event NUVO priced.
+    const tagFor = (event) => calibrationTag(strategyId ?? position.strategyId, event);
+
+    // Terminal forecast: P(S_T >= K), scored against where it actually finished.
+    const pTerminal = position.pTerminalBelowStrike ?? position.probabilities?.pModel;
+    if (Number.isFinite(pTerminal)) {
       this.calibration.record({
-        p: 1 - position.probabilities.pModel,
-        outcome: !breached,
-        tag: strategyId ?? position.strategyId,
+        p: 1 - pTerminal,
+        outcome: !finishedBelowStrike,
+        tag: tagFor(FORECAST_EVENT.TERMINAL_BELOW_STRIKE),
+        at: this.clock(),
+      });
+    }
+
+    // Path forecast: P(never touched K). Only recorded when the caller
+    // actually observed the path — inferring it from the terminal outcome
+    // would fabricate the very data this separation exists to protect.
+    const pTouch = position.pTouchStrike;
+    if (Number.isFinite(pTouch) && touchedStrike !== undefined) {
+      this.calibration.record({
+        p: 1 - pTouch,
+        outcome: !touchedStrike,
+        tag: tagFor(FORECAST_EVENT.TOUCHED_STRIKE),
         at: this.clock(),
       });
     }
@@ -218,7 +250,12 @@ export class NuvoEngine {
       economic: {
         trades: this.closedTrades, nav: this.nav, startingNav: this.startingNav, days,
       },
-      calibration: { store: this.calibration },
+      // Scored on the terminal board only. Mixing in touch forecasts would
+      // blend two different questions into one slope.
+      calibration: {
+        store: this.calibration,
+        tagSuffix: `|${FORECAST_EVENT.TERMINAL_BELOW_STRIKE}`,
+      },
       execution: { fills: this.fills },
       constitutional: {
         cycles: this.cycles, breaches: this.breaches, killSwitchBoard: this.killSwitches,

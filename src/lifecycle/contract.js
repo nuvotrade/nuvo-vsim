@@ -8,6 +8,7 @@
  * those criteria is immutable.
  */
 import { isNum } from '../math/stats.js';
+import { contentHash } from '../execution/order.js';
 
 export const POSITION_STATE = Object.freeze({
   PENDING: 'PENDING',
@@ -17,8 +18,6 @@ export const POSITION_STATE = Object.freeze({
   ASSIGNED: 'ASSIGNED',
   EXPIRED: 'EXPIRED',
 });
-
-let seq = 0;
 
 /**
  * Build the complete lifecycle object. Throws on missing fields rather
@@ -40,8 +39,23 @@ export function createPositionContract({
   const scale = contracts / Math.max(1, structure.contracts);
   const entryCredit = structure.credit * scale;
 
+  // Content-derived, not a counter. A sequence number depends on how many
+  // positions the PROCESS happened to create first, so the same decision
+  // replayed in a fresh process produced a different id — which meant an
+  // otherwise byte-identical reconstruction did not match.
+  const identity = {
+    underlying,
+    kind: structure.kind,
+    shortStrike: structure.shortStrike ?? null,
+    longStrike: structure.longStrike ?? null,
+    expiration: structure.expiration ?? null,
+    contracts,
+    strategyId,
+    openedAt: now,
+  };
+
   const contract = {
-    id: id ?? `POS-${String(++seq).padStart(6, '0')}-${underlying}`,
+    id: id ?? `POS-${contentHash(identity).slice(0, 12)}-${underlying}`,
     createdAt: now,
     state: POSITION_STATE.PENDING,
 
@@ -72,6 +86,14 @@ export function createPositionContract({
     rarocAtEntry: candidate.capital.raroc,
     pLossAtEntry: candidate.evaluation.pLoss,
     probabilities: candidate.probabilities,
+    /**
+     * Two distinct forecasts, recorded separately so each is scored against
+     * the event it actually predicted.
+     *   pTerminalBelowStrike — P(S_T < K) at expiry
+     *   pTouchStrike         — P(S touches K at any point before expiry)
+     */
+    pTerminalBelowStrike: candidate.probabilities?.pModel ?? null,
+    pTouchStrike: candidate.pTouch ?? null,
     regimeAtEntry: regime.regime,
     entrySpot: candidate.structure.legs[0]?.contract
       ? candidate.underlyingSpot ?? null
