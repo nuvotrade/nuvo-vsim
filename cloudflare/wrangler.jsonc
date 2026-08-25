@@ -56,6 +56,7 @@
     "PUBLIC_ORIGIN": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev",
     "SCHWAB_CALLBACK_URL": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev/api/integrations/schwab/callback",
     "ACCESS_TEAM_DOMAIN": "yulgutierrez",
-    "ACCESS_AUD": "9ff9966020d5438ee91a675d8ab2edc27860f1778c85c5f7f6503fd3ef00b679"
+    "ACCESS_AUD": "9ff9966020d5438ee91a675d8ab2edc27860f1778c85c5f7f6503fd3ef00b679",
+    "MCP_ACCESS_AUD": "dc81ee7c6b88272159b7c985deaea3ecd8712b0a21f518cddbb585d6e1950b35"
   }
 }

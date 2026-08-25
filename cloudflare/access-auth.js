@@ -16,6 +16,11 @@ function audienceMatches(audience, required) {
   return (Array.isArray(audience) ? audience : [audience]).includes(required);
 }
 
+export function requiredAccessAudience(payload, env, { allowServiceToken = false } = {}) {
+  const isServiceToken = allowServiceToken && Boolean(String(payload?.common_name ?? ''));
+  return isServiceToken ? env.MCP_ACCESS_AUD : env.ACCESS_AUD;
+}
+
 async function certificates(teamDomain) {
   if (!cachedCertificates) {
     cachedCertificates = fetch(`https://${teamDomain}.cloudflareaccess.com/cdn-cgi/access/certs`)
@@ -51,7 +56,9 @@ export async function authenticateAccess(request, env, { allowServiceToken = fal
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (!Number.isFinite(payload.exp) || payload.exp <= nowSeconds) throw new Error('ACCESS_TOKEN_EXPIRED');
   if (Number.isFinite(payload.nbf) && payload.nbf > nowSeconds + 30) throw new Error('ACCESS_TOKEN_NOT_YET_VALID');
-  if (!audienceMatches(payload.aud, env.ACCESS_AUD)) throw new Error('ACCESS_TOKEN_AUDIENCE_INVALID');
+  const requiredAudience = requiredAccessAudience(payload, env, { allowServiceToken });
+  if (!requiredAudience) throw new Error('ACCESS_TOKEN_AUDIENCE_NOT_CONFIGURED');
+  if (!audienceMatches(payload.aud, requiredAudience)) throw new Error('ACCESS_TOKEN_AUDIENCE_INVALID');
   if (payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}.cloudflareaccess.com`) {
     throw new Error('ACCESS_TOKEN_ISSUER_INVALID');
   }
