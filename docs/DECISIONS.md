@@ -390,8 +390,8 @@ right that they gate production use:
   no completed historical implementation of VSIM-001, and the demo command
   generates synthetic gate results. 270 tests prove code behaviour, not
   expectancy. This is Phase 2 and cannot be closed by writing code.
-- **No live mutation adapter.** Massive live chains and a Schwab read-only
-  custody adapter are deployed in the private shadow runtime. Order submit,
+- **No live mutation adapter.** Schwab live market/options data and a Schwab
+  read-only custody adapter are deployed in the private shadow runtime. Order submit,
   replace and cancel remain deliberately absent until the shadow evidence,
   execution outbox and canary authority gates are satisfied.
 - **Lifecycle is a library, not a closed loop.** Scheduling, persistent

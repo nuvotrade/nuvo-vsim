@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "nuvo-vsim-v5-shadow",
   "main": "entry.js",
-  "compatibility_date": "2026-08-24",
+  "compatibility_date": "2026-08-25",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "observability": {
@@ -51,6 +51,7 @@
     "NUVO_DTE_TARGETS": "14,30,45",
     "NUVO_MAX_CHAIN_AGE_MS": "120000",
     "NUVO_MAX_QUOTE_AGE_MS": "60000",
+    "NUVO_MARKET_SOURCE": "SCHWAB_MARKET_DATA",
     "NUVO_UNDERLYING_SOURCE": "SCHWAB_MARKET_DATA",
     "NUVO_SCHWAB_VIX_SYMBOL": "$VIX",
     "NUVO_SCREEN_SAMPLES": "1500",

@@ -9,7 +9,7 @@
  * classify better and explain nothing; when a regime call blocks a trade,
  * NUVO has to be able to say which input caused it.
  */
-import { isNum, clamp } from '../math/stats.js';
+import { isNum, clamp, stdev } from '../math/stats.js';
 
 export const REGIME = Object.freeze({
   CALM: 'CALM',
@@ -249,9 +249,15 @@ export function gapFrequency(bars, { sigmas = 1.5, window = 60 } = {}) {
     const prev = w[i - 1];
     const cur = w[i];
     if (!isNum(prev.c) || !isNum(cur.o) || prev.c <= 0) continue;
+    const trailingReturns = [];
+    for (let j = Math.max(1, i - 20); j < i; j += 1) {
+      if (isNum(w[j - 1].c) && isNum(w[j].c) && w[j - 1].c > 0 && w[j].c > 0) {
+        trailingReturns.push(Math.log(w[j].c / w[j - 1].c));
+      }
+    }
     const dailyVol = isNum(cur.annualisedVar)
       ? Math.sqrt(cur.annualisedVar / 252)
-      : Math.abs(Math.log(prev.c / (w[Math.max(0, i - 2)].c || prev.c)));
+      : trailingReturns.length >= 10 ? stdev(trailingReturns) : NaN;
     if (!isNum(dailyVol) || dailyVol <= 0) continue;
     if (Math.abs(Math.log(cur.o / prev.c)) > sigmas * dailyVol) gaps += 1;
     n += 1;

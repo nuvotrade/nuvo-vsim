@@ -9,7 +9,7 @@ import {
 import { stressTest, ruinProbability, STRESS_SCENARIOS } from '../src/portfolio/stress.js';
 import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
 import { AUTHORITY } from '../src/constitution/authority.js';
-import { classify, REGIME } from '../src/market/regime.js';
+import { classify, gapFrequency, REGIME } from '../src/market/regime.js';
 import { Rng } from '../src/math/random.js';
 
 describe('capital states', () => {
@@ -227,6 +227,22 @@ describe('regime engine', () => {
     const r = classify({ vix: 17 });
     assert.equal(r.confident, false);
     assert.ok(r.coverage < 0.5);
+  });
+
+  test('overnight gaps use trailing volatility instead of one quiet prior return', () => {
+    let previousClose = 100;
+    const bars = Array.from({ length: 90 }, (_, index) => {
+      const overnight = index === 75 ? 0.03 : 0.002;
+      const open = previousClose * Math.exp(overnight);
+      const closeReturn = 0.007 * Math.sin(index * 1.7);
+      const close = open * Math.exp(closeReturn);
+      const bar = { o: open, c: close };
+      previousClose = close;
+      return bar;
+    });
+    const measured = gapFrequency(bars);
+    assert.ok(measured > 0, 'the deliberately large overnight jump must be counted');
+    assert.ok(measured < 0.05, `routine 20 bp opens must not become false gaps (${measured})`);
   });
 
   test('an unknown regime forbids every structure', async () => {

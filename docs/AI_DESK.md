@@ -73,7 +73,7 @@ the Worker. The Worker sees only the Access-verified JWT client identity.
 4. Verify `/mcp` is still Access-protected.
 5. Confirm tool discovery contains only the contracted names.
 6. Run an after-hours refusal and replay it to `MATCH`.
-7. During RTH, verify Massive freshness, Schwab reconciliation, candidate
+7. During RTH, verify Schwab Market Data freshness, Schwab custody reconciliation, candidate
    labels, and evidence sealing in shadow.
 8. Issue MASTER CHIEF a shadow Access token only after the above pass.
 

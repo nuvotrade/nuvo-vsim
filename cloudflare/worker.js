@@ -1,5 +1,6 @@
 import { NuvoEngine } from '../src/engine.js';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
+import { SchwabMarketProvider } from '../src/truth/providers/schwab.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { EvidenceStore } from '../src/evidence/store.js';
 import { buildEvidence, verifyEvidence, verifyFingerprint } from '../src/evidence/package.js';
@@ -178,19 +179,44 @@ async function updateOperatorControls(env, ownerId, { action, reason }) {
 function marketProvider(env, ownerId = null) {
   const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45')
     .split(',').map(Number).filter(Number.isFinite);
+  const marketSource = String(env.NUVO_MARKET_SOURCE ?? 'MASSIVE_OPTIONS').toUpperCase();
+  const maxChainAgeMs = Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000);
+  const maxQuoteAgeMs = Number(env.NUVO_MAX_QUOTE_AGE_MS ?? 60_000);
+  const fundSymbols = String(env.NUVO_FUND_SYMBOLS ?? '').split(',')
+    .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
+  if (marketSource === 'SCHWAB_MARKET_DATA') {
+    if (!ownerId) throw new Error('SCHWAB_MARKET_OWNER_REQUIRED');
+    const client = new SchwabD1Client(env);
+    const eventProvider = new MassiveProvider({
+      fetcher: (request) => env.MARKET.fetch(request),
+      dteTargets,
+      maxChainAgeMs,
+      maxQuoteAgeMs,
+      requireRealtimeUnderlying: false,
+      fundSymbols,
+    });
+    return new SchwabMarketProvider({
+      client,
+      ownerId,
+      dteTargets,
+      maxChainAgeMs,
+      maxQuoteAgeMs,
+      eventProvider,
+      vixSymbol: String(env.NUVO_SCHWAB_VIX_SYMBOL ?? '$VIX'),
+    });
+  }
   const underlyingSource = String(env.NUVO_UNDERLYING_SOURCE ?? 'MASSIVE').toUpperCase();
   const schwab = ownerId && underlyingSource === 'SCHWAB_MARKET_DATA'
     ? new SchwabD1Client(env) : null;
   return new MassiveProvider({
     fetcher: (request) => env.MARKET.fetch(request), dteTargets,
-    maxChainAgeMs: Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000),
-    maxQuoteAgeMs: Number(env.NUVO_MAX_QUOTE_AGE_MS ?? 60_000),
+    maxChainAgeMs,
+    maxQuoteAgeMs,
     underlyingQuoteFetcher: schwab
       ? (symbol) => schwab.marketQuote(ownerId, symbol) : null,
     requireRealtimeUnderlying: true,
     vixSymbol: schwab ? String(env.NUVO_SCHWAB_VIX_SYMBOL ?? '$VIX') : null,
-    fundSymbols: String(env.NUVO_FUND_SYMBOLS ?? '').split(',')
-      .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean),
+    fundSymbols,
   });
 }
 
@@ -221,7 +247,9 @@ async function verifyLiveMarket(env, ownerId) {
   const result = {
     ok: !marketState.error && rows.every((row) => row.ok),
     checkedAt: nowIso(),
-    source: 'MASSIVE_POLYGON_PRIVATE_SERVICE',
+    source: provider.name === 'schwab'
+      ? 'SCHWAB_MARKET_DATA_PRODUCTION' : 'MASSIVE_POLYGON_PRIVATE_SERVICE',
+    provider: provider.name,
     marketState: marketState.error ? { error: marketState.error } : {
       status: marketState.value.status,
       vix: marketState.value.vix,
@@ -232,13 +260,16 @@ async function verifyLiveMarket(env, ownerId) {
     },
     symbols: rows,
   };
-  await audit(env, ownerId, 'MASSIVE_LIVE_CHAIN_CHECK', result);
+  await audit(env, ownerId, 'LIVE_MARKET_COMPATIBILITY_CHECK', result);
   return result;
 }
 
 async function captureBaseline(env, ownerId) {
   const client = new SchwabD1Client(env);
   const snapshot = await client.snapshot(ownerId);
+  if (snapshot.openOrders.length > 0) {
+    throw new Error(`CUSTODY_BASELINE_OPEN_ORDERS:${snapshot.openOrders.length}`);
+  }
   const account = { cash: snapshot.cash, buyingPower: snapshot.buyingPower, nav: snapshot.nav };
   const payload = { account, positions: snapshot.positions, openOrders: snapshot.openOrders };
   const hash = contentHash(payload);
@@ -511,6 +542,20 @@ export async function runShadowCycle(env, ownerId, {
       });
     }
 
+    // Prove the complete provider contract before portfolio mapping can hide
+    // a market-data incompatibility. This is intentionally redundant with
+    // the engine Truth Contract: the preflight gives the operator a precise
+    // feed-capability result while the engine remains the final authority.
+    const marketCompatibility = await verifyLiveMarket(env, ownerId);
+    if (!marketCompatibility.ok) {
+      finalStatus = 'BLOCKED';
+      return await recordBlocked(env, ownerId, cycleId, 'TRUTH/MARKET_DATA_INCOMPATIBLE', {
+        provider: marketCompatibility.provider,
+        marketState: marketCompatibility.marketState,
+        symbols: marketCompatibility.symbols,
+      });
+    }
+
     const schwabClient = new SchwabD1Client(env);
     const currentSnapshot = await schwabClient.snapshot(ownerId);
     const broker = new SchwabReadOnlyBroker({ client: schwabClient, ownerId });
@@ -580,7 +625,8 @@ async function apiStatus(env, ownerId) {
     env.DB.prepare(`SELECT summary_json FROM cycle_summaries WHERE owner_id=? ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first(),
     env.DB.prepare('SELECT COUNT(*) AS count FROM evidence_index WHERE owner_id=?').bind(ownerId).first(),
     env.DB.prepare(`SELECT detail_json FROM operational_audit WHERE owner_id=?
-      AND event_type='MASSIVE_LIVE_CHAIN_CHECK' ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first(),
+      AND event_type IN ('LIVE_MARKET_COMPATIBILITY_CHECK','MASSIVE_LIVE_CHAIN_CHECK')
+      ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first(),
     loadOperatorControls(env, ownerId),
   ]);
   return {
@@ -728,8 +774,8 @@ async function getMarketStateTool(env, ownerId) {
     return toolEnvelope(env, {
       session: 'CLOSED', regime: null, regime_confidence: null, vix: null,
       massive: 'BLOCKED', live_contracts: 0, underlyings_checked: 0,
-      quote_age_seconds: null, freshness_limit_seconds: 60,
-    }, { code: 'MASSIVE_BLOCKED', message: error.message });
+      market_provider: 'SCHWAB', quote_age_seconds: null, freshness_limit_seconds: 60,
+    }, { code: 'MARKET_DATA_BLOCKED', message: error.message });
   }
   const latest = await cycleSummary(env, ownerId);
   const timestamps = check.symbols.flatMap((row) => [row.quoteAsOf, row.chainAsOf])
@@ -745,13 +791,14 @@ async function getMarketStateTool(env, ownerId) {
     regime_confidence: latestAge <= 60 ? latest?.regimeConfidence ?? null : null,
     vix: check.marketState?.vix ?? null,
     massive: check.ok ? 'LIVE' : 'BLOCKED',
+    market_provider: String(check.provider ?? 'unknown').toUpperCase(),
     live_contracts: check.symbols.reduce((sum, row) => sum + row.contractCount, 0),
     underlyings_checked: check.symbols.length,
     quote_age_seconds: quoteAge,
     freshness_limit_seconds: 60,
     asof: check.checkedAt,
   };
-  if (!check.ok) return toolEnvelope(env, payload, { code: 'MASSIVE_BLOCKED', message: 'Massive live market verification failed.' });
+  if (!check.ok) return toolEnvelope(env, payload, { code: 'MARKET_DATA_BLOCKED', message: 'Live market verification failed.' });
   if (session !== 'RTH') return toolEnvelope(env, payload, { code: 'TRUTH/SESSION_NOT_RTH', message: `Market session is ${session}.` });
   if (!Number.isFinite(quoteAge) || quoteAge > 60) {
     return toolEnvelope(env, payload, { code: 'TRUTH/FACT_STALE', message: `Oldest quote is ${quoteAge ?? 'unknown'} seconds old.` });
@@ -1031,8 +1078,14 @@ export function createMcpService(env, ownerId) {
 export async function executeShadowWorkflow(env, { ownerId, cycleId, source }, step) {
   const coordinator = accountCoordinator(env, ownerId);
   try {
-    const result = await step.do('run deterministic VSIM shadow cycle', async () =>
-      runShadowCycle(env, ownerId, { source, cycleIdOverride: cycleId }));
+    const result = source === 'BASELINE_REFRESH'
+      ? await step.do('capture verified read-only custody baseline', async () => ({
+        state: 'BASELINE_CAPTURED',
+        decision: 'READ_ONLY_BASELINE',
+        baseline: await captureBaseline(env, ownerId),
+      }))
+      : await step.do('run deterministic VSIM shadow cycle', async () =>
+        runShadowCycle(env, ownerId, { source, cycleIdOverride: cycleId }));
     await step.do('release account cycle lock', async () => {
       await coordinator.finish(cycleId, result.state ?? 'SHADOW_RECORDED', {
         decision: result.decision, reasonCode: result.reasonCode ?? null,
@@ -1053,12 +1106,12 @@ function dashboardHtml() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>NUVO VSIM v5 — Shadow</title><style>
   :root{color-scheme:dark;--bg:#07100e;--p:#0d1a16;--l:#22382f;--t:#e8f1ec;--m:#8ca096;--g:#60e2a8;--a:#f4ba61;--r:#f27676;font:14px Inter,system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#123328,#07100e 38%);color:var(--t)}header,main{max-width:1200px;margin:auto}header{padding:26px 24px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--l)}h1{margin:0;letter-spacing:.06em}h1 b{color:var(--g);font-size:.55em}.pill{padding:7px 10px;border:1px solid #725d34;color:var(--a);border-radius:99px;font-size:11px}main{padding:22px 24px 60px}.warning{border:1px solid #725d34;background:#2b2314;padding:12px 15px;border-radius:8px;color:#f4d6a5}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.card{background:linear-gradient(145deg,#10201b,#0a1512);border:1px solid var(--l);border-radius:10px;padding:18px}.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.13em;color:var(--m);margin:0 0 13px}.value{font-size:22px;font-weight:750}.sub{color:var(--m);font-size:11px;margin-top:7px}.wide{grid-column:1/-1}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{padding:12px;background:#08130f;border:1px solid var(--l);border-radius:7px}.metric span{display:block;color:var(--m);font-size:10px;text-transform:uppercase;letter-spacing:.1em}.metric b{display:block;font-size:19px;margin-top:5px}button,a.action{border:1px solid #315445;background:#10271f;color:var(--g);padding:9px 12px;border-radius:6px;cursor:pointer;text-decoration:none;font-weight:650;margin:5px 7px 0 0}button:disabled{opacity:.45;cursor:not-allowed}pre{white-space:pre-wrap;color:#c8d8cf;background:#07100e;padding:14px;border-radius:7px;max-height:320px;overflow:auto}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{text-align:left;border-bottom:1px solid var(--l);padding:9px 7px;font-variant-numeric:tabular-nums}th{color:var(--m);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.empty{color:var(--m);padding:12px 0}.ok{color:var(--g)}.bad{color:var(--r)}@media(max-width:760px){.grid,.metrics{grid-template-columns:1fr}.wide{grid-column:auto}.card{overflow-x:auto}}</style></head><body>
   <header><h1>NUVO VSIM <b>v5</b></h1><span class="pill">AUTHORITY 1 · SHADOW ONLY</span></header><main><div class="warning">This is the isolated v5 shadow system. It cannot submit, replace, or cancel a broker order. The existing vsim.nuvotrade.co deployment is untouched.</div><section class="grid">
-  <article class="card"><h2>Massive / Polygon</h2><div class="value" id="market">Not checked</div><div class="sub" id="marketTime">Private service binding · strict live chains</div></article>
+  <article class="card"><h2>Market data</h2><div class="value" id="market">Not checked</div><div class="sub" id="marketTime">Schwab Market Data · strict live chains</div></article>
   <article class="card"><h2>Schwab custody</h2><div class="value" id="schwab">Checking…</div><div class="sub" id="schwabTime">Read-only account, positions, and orders</div></article>
   <article class="card"><h2>Evidence</h2><div class="value" id="evidence">Checking…</div><div class="sub">D1 ordered index + R2 immutable packages</div></article>
   <article class="card wide"><h2>Live account snapshot</h2><div class="metrics"><div class="metric"><span>Account value</span><b id="nav">—</b></div><div class="metric"><span>Net cash / margin</span><b id="cash">—</b></div><div class="metric"><span>Buying power</span><b id="buyingPower">—</b></div></div><div class="sub" id="custodyTime">Refresh required</div></article>
   <article class="card wide"><h2>Open positions</h2><div id="positions" class="empty">No synchronized positions</div></article>
-  <article class="card wide"><h2>Operator controls</h2><a class="action" href="/api/integrations/schwab/connect">Connect Schwab read-only</a><button id="custodyRefresh">Refresh account</button><button id="marketCheck">Verify Massive live chains</button><button id="baseline">Capture reconciliation baseline</button><button id="cycle">Run opportunity scan</button><a class="action" href="https://nuvo-vsim-v5-preview.pages.dev/" target="_blank" rel="noreferrer">Open full design preview</a><div class="sub">The scan may rank opportunities, but this runtime has no broker mutation routes.</div></article>
+  <article class="card wide"><h2>Operator controls</h2><a class="action" href="/api/integrations/schwab/connect">Connect Schwab read-only</a><button id="custodyRefresh">Refresh account</button><button id="marketCheck">Verify Schwab live chains</button><button id="baseline">Capture reconciliation baseline</button><button id="cycle">Run opportunity scan</button><a class="action" href="https://nuvo-vsim-v5-preview.pages.dev/" target="_blank" rel="noreferrer">Open full design preview</a><div class="sub">The scan may rank opportunities, but this runtime has no broker mutation routes.</div></article>
   <article class="card wide"><h2>Opportunities</h2><div id="opportunities" class="empty">Run a verified shadow scan to populate ranked opportunities.</div></article>
   <article class="card wide"><h2>Latest cycle</h2><div class="value" id="outcome">No cycle yet</div><div class="sub" id="reason"></div><pre id="details">Loading protected status…</pre></article>
   </section></main><script>
@@ -1068,7 +1121,7 @@ function dashboardHtml() {
   async function refresh(){try{const s=await call('/api/status');const mc=s.marketCheck;el('market').textContent=mc?(mc.ok?'VERIFIED LIVE':'BLOCKED'):'NOT CHECKED';el('market').className='value '+(mc?.ok?'ok':mc?'bad':'');el('marketTime').textContent=mc?.checkedAt||'Private service binding · strict live chains';el('schwab').textContent=s.schwab.status;el('schwab').className='value '+(s.schwab.status==='CONNECTED'?'ok':'bad');el('schwabTime').textContent=s.schwab.lastSuccessfulSyncAt||'Read-only connection required';el('evidence').textContent=s.evidence.records+' records';const c=s.custody;el('nav').textContent=money(c.account?.nav);el('cash').textContent=money(c.account?.cash);el('buyingPower').textContent=money(c.account?.buyingPower);el('custodyTime').textContent=c.observedAt?('Schwab as of '+c.observedAt+' · '+c.openOrders.length+' open orders'):'Refresh required';table('positions',[{key:'symbol',label:'Symbol'},{key:'type',label:'Type'},{key:'quantity',label:'Quantity',format:num},{key:'marketValue',label:'Market value',format:money}],c.positions||[]);const cycle=s.latestCycle;table('opportunities',[{key:'underlying',label:'Symbol'},{key:'structure',label:'Structure'},{key:'shortStrike',label:'Short strike',format:num},{key:'longStrike',label:'Long strike',format:num},{key:'expiration',label:'Expiration'},{key:'nev',label:'NEV',format:money},{key:'raroc',label:'RAROC',format:v=>present(v)?(Number(v)*100).toFixed(2)+'%':'—'},{key:'admissible',label:'Status',format:v=>v?'ELIGIBLE':'DECLINED'}],cycle?.opportunities||[]);el('outcome').textContent=cycle?.outcome||'No cycle yet';el('reason').textContent=cycle?.reason||'';el('details').textContent=JSON.stringify({baseline:s.baseline,marketCheck:s.marketCheck,latestCycle:cycle},null,2)}catch(e){el('details').textContent=e.message}}
   async function action(button,message,fn){button.disabled=true;el('details').textContent=message;try{await fn();await refresh()}catch(e){el('details').textContent=e.message}finally{button.disabled=false}}
   el('custodyRefresh').onclick=()=>action(el('custodyRefresh'),'Refreshing Schwab read-only snapshot…',()=>call('/api/operator/custody/refresh',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:'REFRESH_READ_ONLY_CUSTODY'})}));
-  el('marketCheck').onclick=()=>action(el('marketCheck'),'Verifying Massive quotes, events, and live option chains…',()=>call('/api/operator/market/check',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}));
+  el('marketCheck').onclick=()=>action(el('marketCheck'),'Verifying Schwab quotes, events, and live option chains…',()=>call('/api/operator/market/check',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}));
   el('baseline').onclick=async()=>{if(!confirm('Capture the current read-only Schwab state as the reconciliation baseline?'))return;await action(el('baseline'),'Capturing reconciliation baseline…',()=>call('/api/operator/baseline',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirm:'CAPTURE_READ_ONLY_BASELINE'})}))};
   el('cycle').onclick=()=>action(el('cycle'),'Running deterministic live-chain opportunity scan…',()=>call('/api/cycle',{method:'POST',headers:{'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}'}));refresh();
   </script></body></html>`;
@@ -1139,7 +1192,7 @@ export function liveDashboardScript() {
     text(q('.safety-title'), '◇  LIVE SHADOW');
     text(q('.safety-banner p'), 'Loading protected account, market, and evidence state. Broker mutation remains disabled.');
     text(q('footer span:first-child'), 'NUVO VSIM v5 · Protected live shadow');
-    text(q('footer span:nth-child(2)'), 'Schwab read-only · Massive live market data · no broker mutation');
+    text(q('footer span:nth-child(2)'), 'Schwab read-only custody and market data · no broker mutation');
   }
 
   function renderRows(tbody, rows, cells) {
@@ -1190,12 +1243,12 @@ export function liveDashboardScript() {
       text(q('.score-ring span', environment), confidence === null ? '—' : String(confidence));
       text(q('.score-ring small', environment), confidence === null ? '' : '/ 100');
       text(q('.regime-score strong', environment), cycle.regime ? 'Live model classification' : 'Awaiting an admissible live cycle');
-      text(q('.regime-score p', environment), market ? (market.ok ? 'Massive quotes and option chains passed freshness checks.' : 'Market data is fail-closed: ' + (market.marketState && (market.marketState.error || market.marketState.status) || 'freshness check failed') + '.') : 'Run the live market verification before opportunity analysis.');
+      text(q('.regime-score p', environment), market ? (market.ok ? 'Schwab quotes and option chains passed freshness checks.' : 'Market data is fail-closed: ' + (market.marketState && (market.marketState.error || market.marketState.status) || 'freshness check failed') + '.') : 'Run the live market verification before opportunity analysis.');
       const signals = qa('.signal-grid > div', environment);
       const contractCount = market && market.symbols ? market.symbols.reduce((sum, row) => sum + Number(row.contractCount || 0), 0) : 0;
       const values = [
         ['Market session', session, market && market.marketState && market.marketState.asOf ? when(market.marketState.asOf) : 'Not checked'],
-        ['Massive', market ? (market.ok ? 'VERIFIED' : 'BLOCKED') : 'NOT CHECKED', market ? when(market.checkedAt) : 'Strict freshness'],
+        ['Schwab market', market ? (market.ok ? 'VERIFIED' : 'BLOCKED') : 'NOT CHECKED', market ? when(market.checkedAt) : 'Strict freshness'],
         ['Live contracts', market ? number(contractCount) : '—', market && market.symbols ? market.symbols.length + ' underlyings checked' : 'Not checked'],
         ['Schwab', status.schwab && status.schwab.status || 'UNKNOWN', when(status.schwab && status.schwab.lastSuccessfulSyncAt)],
       ];
@@ -1225,7 +1278,7 @@ export function liveDashboardScript() {
       item => number(item.dte), item => money(item.nev), item => percent(item.raroc),
       item => money(item.economicCapital), item => item.admissible ? 'ELIGIBLE' : (item.rejection || 'DECLINED'),
     ]);
-    text(q('#overview .panel-note'), 'Live ranked shadow candidates. Values are generated from current Massive option chains; no order can be submitted.');
+    text(q('#overview .panel-note'), 'Live ranked shadow candidates. Values are generated from current Schwab option chains; no order can be submitted.');
 
     const positionPanel = q('#overview .positions-empty');
     if (positionPanel) {
@@ -1295,7 +1348,7 @@ export function liveDashboardScript() {
 
   function renderSystem(status) {
     text(q('#system .readiness-banner strong'), 'Operational live shadow system');
-    text(q('#system .readiness-banner p'), 'Schwab custody is read-only, Massive market data is fail-closed, and D1/R2 evidence is active. Live-order mutation remains constitutionally and technically unavailable.');
+    text(q('#system .readiness-banner p'), 'Schwab custody and market data are read-only and fail-closed, and D1/R2 evidence is active. Live-order mutation remains constitutionally and technically unavailable.');
     text(q('#system .readiness-number'), 'SHADOW');
     const connectors = qa('#system .connector');
     const market = status.marketCheck;
@@ -1305,7 +1358,8 @@ export function liveDashboardScript() {
       { status: status.evidence.records + ' records', note: 'Ordered D1 index with protected immutable R2 packages.', values: ['Decision metadata in D1','Raw packages in R2','Append-only hash chain','Raw packages not browser-exposed'] },
       { status: status.schedule || 'Every 15 minutes', note: 'Single-flight cycles use distributed D1 leases and deterministic IDs.', values: ['Market-session gate','Distributed idempotency','Single-flight lease','Fail-closed refusal evidence'] },
     ];
-    connectors.forEach((card, index) => { const state = states[index]; if (!state) return; text(q('.connector-status', card), state.status); text(q('.connector-note', card), state.note); qa('li b', card).forEach((node, valueIndex) => text(node, state.values[valueIndex] || 'Active')); });
+    const connectorNames = ['Schwab Market Data', 'Schwab Custody', 'Evidence', 'Shadow Scheduler'];
+    connectors.forEach((card, index) => { const state = states[index]; if (!state) return; const heading = q('h3', card); if (heading) text(heading, connectorNames[index]); text(q('.connector-status', card), state.status); text(q('.connector-note', card), state.note); qa('li b', card).forEach((node, valueIndex) => text(node, state.values[valueIndex] || 'Active')); });
     const ladderPanel = q('#system .authority-ladder');
     text(q('h3', ladderPanel), 'Authority changes require the Principal');
     const ladder = qa('#system .ladder > div');
@@ -1337,7 +1391,7 @@ export function liveDashboardScript() {
     renderOverview(currentStatus); renderOpportunities(currentStatus); renderSystem(currentStatus); await renderEvidence(currentStatus);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
-    text(q('.safety-banner p'), 'Live Schwab custody, Massive market data, and D1/R2 evidence are connected. Broker order mutation is disabled.');
+    text(q('.safety-banner p'), 'Live Schwab custody, Schwab market data, and D1/R2 evidence are connected. Broker order mutation is disabled.');
     text(q('footer span:nth-child(3)'), 'Worker ' + String(currentStatus.version || '').slice(0, 12));
   }
 

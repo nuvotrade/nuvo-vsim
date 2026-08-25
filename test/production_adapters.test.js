@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
+import { SchwabMarketProvider } from '../src/truth/providers/schwab.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
@@ -365,6 +366,128 @@ describe('Massive production provider', () => {
   });
 });
 
+function schwabMarketClient({ stale = false, incomplete = false } = {}) {
+  const option = (right, dte, strike) => ({
+    putCall: right.toUpperCase(),
+    symbol: `SPY  2609${String(dte).padStart(2, '0')}${right === 'put' ? 'P' : 'C'}${String(strike * 1000).padStart(8, '0')}`,
+    strikePrice: strike,
+    expirationDate: NOW + dte * 86_400_000,
+    daysToExpiration: dte,
+    bid: 2.1,
+    ask: 2.2,
+    volatility: 24,
+    delta: incomplete ? null : right === 'put' ? -0.24 : 0.25,
+    gamma: 0.01,
+    theta: -0.05,
+    vega: 0.12,
+    openInterest: 5000,
+    totalVolume: 600,
+    multiplier: 100,
+    quoteTimeInLong: NOW - (stale ? 300_000 : 1000),
+  });
+  const expirationMap = (right) => Object.fromEntries([14, 30].map((dte) => [
+    `${new Date(NOW + dte * 86_400_000).toISOString().slice(0, 10)}:${dte}`,
+    { [right === 'put' ? 510 : 540]: [option(right, dte, right === 'put' ? 510 : 540)] },
+  ]));
+  return {
+    async marketQuote(ownerId, symbol) {
+      return {
+        value: {
+          symbol,
+          last: symbol === '$VIX' ? 15.8 : 527,
+          bid: symbol === '$VIX' ? null : 526.99,
+          ask: symbol === '$VIX' ? null : 527.01,
+          freshness: 'REAL_TIME',
+        },
+        asOf: NOW - 250,
+        source: 'SCHWAB_MARKET_DATA_REALTIME',
+      };
+    },
+    async marketHistory() {
+      return {
+        empty: false,
+        candles: Array.from({ length: 300 }, (_, index) => ({
+          datetime: NOW - (299 - index) * 86_400_000,
+          open: 470 + index * 0.1,
+          high: 472 + index * 0.1,
+          low: 468 + index * 0.1,
+          close: 471 + index * 0.1,
+          volume: 50_000_000 + index,
+        })),
+      };
+    },
+    async marketOptionChain() {
+      return {
+        isDelayed: false,
+        isChainTruncated: false,
+        underlyingPrice: 527,
+        putExpDateMap: expirationMap('put'),
+        callExpDateMap: expirationMap('call'),
+      };
+    },
+    async marketHours() {
+      return {
+        option: {
+          OPTION: {
+            marketType: 'OPTION',
+            isOpen: true,
+            sessionHours: {
+              regularMarket: [{
+                start: new Date(NOW - 3_600_000).toISOString(),
+                end: new Date(NOW + 3_600_000).toISOString(),
+              }],
+            },
+          },
+        },
+      };
+    },
+  };
+}
+
+describe('Schwab-only production market provider', () => {
+  test('normalizes real-time Schwab quotes, history, option chains, and market state', async () => {
+    const eventProvider = { async events() { return { value: [], asOf: NOW, source: 'FUND_EVENT_CLEARANCE' }; } };
+    const provider = new SchwabMarketProvider({
+      client: schwabMarketClient(), ownerId: 'owner', now: () => NOW,
+      dteTargets: [14, 30], eventProvider,
+    });
+    const [quote, history, chain, events, state] = await Promise.all([
+      provider.quote('SPY'), provider.history('SPY', { lookback: 120 }),
+      provider.optionChain('SPY', { expirations: [14, 30] }), provider.events('SPY'),
+      provider.marketState(),
+    ]);
+    assert.equal(quote.value.last, 527);
+    assert.equal(history.value.length, 120);
+    assert.equal(chain.value.contracts.length, 4);
+    assert.ok(chain.value.contracts.every((contract) => contract.iv === 0.24));
+    assert.ok(chain.value.contracts.every((contract) => Number.isFinite(contract.delta)));
+    assert.deepEqual(events.value, []);
+    assert.equal(state.value.status, 'OPEN');
+    assert.equal(state.value.vix, 15.8);
+    assert.equal(state.value.vix3m, null,
+      'term structure must stay unknown without an independent VIX3M quote');
+    assert.equal(state.value.vixSource, 'SCHWAB_MARKET_DATA_REALTIME');
+  });
+
+  test('refuses stale Schwab option quotes instead of ranking them', async () => {
+    const provider = new SchwabMarketProvider({
+      client: schwabMarketClient({ stale: true }), ownerId: 'owner', now: () => NOW,
+      dteTargets: [14, 30], eventProvider: { async events() { return { value: [], asOf: NOW }; } },
+    });
+    assert.equal((await provider.optionChain('SPY', { expirations: [14, 30] })).error,
+      'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE');
+  });
+
+  test('refuses a Schwab chain with missing underwriting Greeks', async () => {
+    const provider = new SchwabMarketProvider({
+      client: schwabMarketClient({ incomplete: true }), ownerId: 'owner', now: () => NOW,
+      dteTargets: [14, 30], eventProvider: { async events() { return { value: [], asOf: NOW }; } },
+    });
+    assert.equal((await provider.optionChain('SPY', { expirations: [14, 30] })).error,
+      'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE');
+  });
+});
+
 describe('evidence replay boundaries', () => {
   test('does not turn an unverified event calendar into a verified empty one', async () => {
     const missing = new ReplayProvider({ symbols: { SPY: { events: null, eventsAsOf: null } } });
@@ -462,6 +585,95 @@ describe('Schwab production broker boundary', () => {
     client._accessToken = async () => 'read-only-test-token';
     await assert.rejects(client.marketQuote('owner', 'SPY'),
       /SCHWAB_MARKET_DATA_NOT_REALTIME/u);
+  });
+
+  test('requests a bounded real-time Schwab option chain', async (t) => {
+    t.mock.method(globalThis, 'fetch', async (url) => {
+      const parsed = new URL(String(url));
+      assert.equal(parsed.pathname, '/marketdata/v1/chains');
+      assert.equal(parsed.searchParams.get('contractType'), 'ALL');
+      assert.equal(parsed.searchParams.get('includeUnderlyingQuote'), 'true');
+      assert.equal(parsed.searchParams.get('fromDate'), '2026-09-01');
+      assert.equal(parsed.searchParams.get('toDate'), '2026-10-15');
+      return Response.json({ isDelayed: false, isChainTruncated: false });
+    });
+    const client = new SchwabD1Client({
+      NUVO_BROKER_MODE: 'READ_ONLY',
+      NUVO_BROKER_EXECUTION_MODE: 'SHADOW_ONLY',
+      SCHWAB_CLIENT_ID: 'test', SCHWAB_CLIENT_SECRET: 'test',
+      SCHWAB_CALLBACK_URL: 'https://example.test/callback',
+      BROKER_TOKEN_ENCRYPTION_KEY: 'test',
+    });
+    client._accessToken = async () => 'read-only-test-token';
+    await client.marketOptionChain('owner', 'SPY', {
+      fromDate: '2026-09-01', toDate: '2026-10-15',
+    });
+  });
+
+  test('refuses a delayed Schwab option-chain packet', async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => Response.json({
+      isDelayed: true, isChainTruncated: false,
+    }));
+    const client = new SchwabD1Client({
+      NUVO_BROKER_MODE: 'READ_ONLY',
+      NUVO_BROKER_EXECUTION_MODE: 'SHADOW_ONLY',
+      SCHWAB_CLIENT_ID: 'test', SCHWAB_CLIENT_SECRET: 'test',
+      SCHWAB_CALLBACK_URL: 'https://example.test/callback',
+      BROKER_TOKEN_ENCRYPTION_KEY: 'test',
+    });
+    client._accessToken = async () => 'read-only-test-token';
+    await assert.rejects(client.marketOptionChain('owner', 'SPY', {
+      fromDate: '2026-09-01', toDate: '2026-10-15',
+    }), /SCHWAB_OPTION_CHAIN_NOT_REALTIME/u);
+  });
+
+  test('requests an exact held strike instead of truncating custody to the discovery window', async (t) => {
+    t.mock.method(globalThis, 'fetch', async (url) => {
+      const parsed = new URL(String(url));
+      assert.equal(parsed.searchParams.get('strike'), '7700');
+      assert.equal(parsed.searchParams.has('strikeCount'), false);
+      return Response.json({ isDelayed: false, isChainTruncated: false });
+    });
+    const client = new SchwabD1Client({
+      NUVO_BROKER_MODE: 'READ_ONLY',
+      NUVO_BROKER_EXECUTION_MODE: 'SHADOW_ONLY',
+      SCHWAB_CLIENT_ID: 'test', SCHWAB_CLIENT_SECRET: 'test',
+      SCHWAB_CALLBACK_URL: 'https://example.test/callback',
+      BROKER_TOKEN_ENCRYPTION_KEY: 'test',
+    });
+    client._accessToken = async () => 'read-only-test-token';
+    await client.marketOptionChain('owner', '$SPX', {
+      fromDate: '2026-08-25', toDate: '2026-08-26', strike: 7700,
+    });
+  });
+
+  test('normalizes exact Schwab option Greeks for custody fallback', async (t) => {
+    t.mock.method(globalThis, 'fetch', async (url) => {
+      assert.match(decodeURIComponent(String(url)), /SPXW {2}260825C07700000/u);
+      return Response.json({
+        'SPXW  260825C07700000': {
+          symbol: 'SPXW  260825C07700000',
+          realtime: true,
+          quote: {
+            bidPrice: 0.3, askPrice: 0.4, mark: 0.35, volatility: 18,
+            delta: 0.02, gamma: 0.001, theta: -0.04, vega: 0.03,
+            openInterest: 500, totalVolume: 10, quoteTime: NOW - 500,
+          },
+        },
+      });
+    });
+    const client = new SchwabD1Client({
+      NUVO_BROKER_MODE: 'READ_ONLY',
+      NUVO_BROKER_EXECUTION_MODE: 'SHADOW_ONLY',
+      SCHWAB_CLIENT_ID: 'test', SCHWAB_CLIENT_SECRET: 'test',
+      SCHWAB_CALLBACK_URL: 'https://example.test/callback',
+      BROKER_TOKEN_ENCRYPTION_KEY: 'test',
+    });
+    client._accessToken = async () => 'read-only-test-token';
+    const quote = await client.marketOptionQuote('owner', 'SPXW260825C07700000');
+    assert.equal(quote.value.iv, 0.18);
+    assert.equal(quote.value.delta, 0.02);
+    assert.equal(quote.source, 'SCHWAB_MARKET_DATA_OPTION_QUOTE_REALTIME');
   });
 
   test('exposes custody but has no mutation capability', async () => {
@@ -608,5 +820,32 @@ describe('custody risk mapping', () => {
     ] });
     assert.equal(mapped.ok, false);
     assert.match(mapped.reasons[0], /CUSTODY_POSITION_INCOMPLETE/u);
+  });
+
+  test('maps the SPXW option root to Schwab market symbol $SPX', async () => {
+    const requested = [];
+    const indexProvider = {
+      ...provider,
+      async quote(symbol) {
+        requested.push(['quote', symbol]);
+        return provider.quote(symbol);
+      },
+      async history(symbol) {
+        requested.push(['history', symbol]);
+        return provider.history(symbol);
+      },
+      async optionChain(symbol, options) {
+        requested.push(['chain', symbol, options?.strikes?.[0]]);
+        return provider.optionChain(symbol);
+      },
+    };
+    const mapped = await mapCustodyRisk({ provider: indexProvider, now: NOW, positions: [
+      { symbol: 'SPXW-C110', underlying: 'SPXW', type: 'OPTION', right: 'call', strike: 110,
+        expiration, quantity: 1, multiplier: 100, marketValue: 110 },
+    ] });
+    assert.equal(mapped.ok, true);
+    assert.equal(mapped.positions[0].underlying, '$SPX');
+    assert.ok(requested.every(([, symbol]) => symbol === '$SPX'));
+    assert.deepEqual(requested.find(([type]) => type === 'chain'), ['chain', '$SPX', 110]);
   });
 });

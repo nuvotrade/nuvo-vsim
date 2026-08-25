@@ -1,4 +1,14 @@
 const DAY_MS = 86_400_000;
+const INDEX_OPTION_MARKET_SYMBOLS = Object.freeze({
+  SPX: '$SPX',
+  SPXW: '$SPX',
+  RUT: '$RUT',
+  RUTW: '$RUT',
+  NDX: '$NDX',
+  NDXP: '$NDX',
+  VIX: '$VIX',
+  VIXW: '$VIX',
+});
 
 const finite = (value) => value !== null && value !== undefined && value !== ''
   && Number.isFinite(Number(value)) ? Number(value) : null;
@@ -23,6 +33,11 @@ function expirationDte(expiration, now) {
   return Number.isFinite(expiry) ? Math.max(0, Math.ceil((expiry - now) / DAY_MS)) : null;
 }
 
+function marketSymbol(underlying) {
+  const normalized = String(underlying ?? '').trim().toUpperCase();
+  return INDEX_OPTION_MARKET_SYMBOLS[normalized] ?? normalized;
+}
+
 /**
  * Convert reconciled broker legs into the conservative position shape used
  * by the Portfolio Governor. Unknown or undefined risk refuses the entire
@@ -39,7 +54,7 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
     };
   }
   const held = sourcePositions.filter((position) => finite(position.quantity) !== 0);
-  const underlyings = [...new Set(held.map((position) => String(position.underlying ?? '').toUpperCase()).filter(Boolean))];
+  const underlyings = [...new Set(held.map((position) => marketSymbol(position.underlying)).filter(Boolean))];
   const quoteBySymbol = new Map();
   const historyBySymbol = new Map();
   const reasons = [];
@@ -61,7 +76,7 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
   const sharesAvailable = new Map();
   for (const position of held) {
     if (position.type === 'EQUITY' && finite(position.quantity) > 0) {
-      const symbol = String(position.underlying).toUpperCase();
+      const symbol = marketSymbol(position.underlying);
       sharesAvailable.set(symbol, (sharesAvailable.get(symbol) ?? 0) + finite(position.quantity));
     }
   }
@@ -69,7 +84,7 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
   const riskPositions = [];
 
   for (const position of held) {
-    const underlying = String(position.underlying ?? '').toUpperCase();
+    const underlying = marketSymbol(position.underlying);
     const quantity = finite(position.quantity);
     const multiplier = finite(position.multiplier) ?? (position.type === 'OPTION' ? 100 : 1);
     const quote = quoteBySymbol.get(underlying);
@@ -117,19 +132,31 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
       reasons.push(`CUSTODY_OPTION_EXPIRY_INVALID:${position.symbol}`);
       continue;
     }
-    const cacheKey = `${underlying}:${dte}`;
+    const cacheKey = `${underlying}:${dte}:${position.strike}`;
     if (!chainCache.has(cacheKey)) {
-      chainCache.set(cacheKey, provider.optionChain(underlying, { expirations: [dte] }));
+      chainCache.set(cacheKey, provider.optionChain(underlying, {
+        expirations: [dte], strikes: [position.strike],
+      }));
     }
     const chain = await chainCache.get(cacheKey);
     if (chain?.error || !Array.isArray(chain?.value?.contracts)) {
       reasons.push(`CUSTODY_CHAIN_UNAVAILABLE:${position.symbol}`);
       continue;
     }
-    const contract = chain.value.contracts.find((candidate) =>
+    let contract = chain.value.contracts.find((candidate) =>
       candidate.right === position.right
       && candidate.expiration === position.expiration
       && Math.abs(candidate.strike - position.strike) < 1e-6);
+    if ((!contract || ![contract.iv, contract.delta, contract.gamma, contract.vega, contract.theta]
+      .every((value) => finite(value) != null)) && typeof provider.optionQuote === 'function') {
+      const exact = await provider.optionQuote(position.symbol);
+      if (!exact?.error) contract = {
+        ...exact.value,
+        right: position.right,
+        strike: position.strike,
+        expiration: position.expiration,
+      };
+    }
     if (!contract || ![contract.iv, contract.delta, contract.gamma, contract.vega, contract.theta]
       .every((value) => finite(value) != null)) {
       reasons.push(`CUSTODY_GREEKS_UNAVAILABLE:${position.symbol}`);

@@ -37,7 +37,7 @@ export function createVsimMcpServer(service) {
     {}, () => service.getAccountTruth());
 
   register(server, 'get_market_state',
-    'Return verified market session, regime, VIX, Massive availability, contract coverage, and quote freshness. Non-RTH or stale data is a veto.',
+    'Return verified market session, regime, VIX, authoritative provider, contract coverage, and quote freshness. Non-RTH or stale data is a veto.',
     {}, () => service.getMarketState());
 
   register(server, 'run_shadow_cycle',
