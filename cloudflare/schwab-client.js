@@ -347,7 +347,8 @@ export class SchwabD1Client {
     if (!ticker) throw new Error('SCHWAB_MARKET_SYMBOL_REQUIRED');
     const token = await this._accessToken(ownerId);
     const packet = await this._marketRead(`/quotes?symbols=${encodeURIComponent(ticker)}&fields=quote,reference`, token);
-    const record = packet?.[ticker];
+    const record = packet?.[ticker]
+      ?? Object.values(packet ?? {}).find((candidate) => String(candidate?.symbol ?? '').toUpperCase() === ticker);
     const quote = record?.quote;
     if (!quote || record?.realtime !== true) throw new Error('SCHWAB_MARKET_DATA_NOT_REALTIME');
     const bid = finite(quote.bidPrice);

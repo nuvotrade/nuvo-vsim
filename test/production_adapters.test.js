@@ -299,6 +299,23 @@ describe('Massive production provider', () => {
     assert.equal(quote.value.markTimestampBasis, 'SCHWAB_MARKET_DATA_QUOTE');
   });
 
+  test('uses an independently timestamped Schwab VIX instead of Yahoo for regime authority', async () => {
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      fetcher: marketFetcher(),
+      vixSymbol: '$VIX',
+      underlyingQuoteFetcher: async (symbol) => ({
+        value: { symbol, last: 15.82, freshness: 'REAL_TIME' },
+        asOf: NOW - 300,
+        source: 'SCHWAB_MARKET_DATA_REALTIME',
+      }),
+    });
+    const state = await provider.marketState();
+    assert.equal(state.value.vix, 15.82);
+    assert.equal(state.value.vixSource, 'SCHWAB_MARKET_DATA_REALTIME');
+    assert.equal(state.value.vixAsOf, NOW - 300);
+  });
+
   test('retries a transient corporate-action failure without clearing it falsely', async () => {
     const base = marketFetcher();
     let actionCalls = 0;

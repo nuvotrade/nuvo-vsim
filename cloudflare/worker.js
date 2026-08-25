@@ -188,6 +188,7 @@ function marketProvider(env, ownerId = null) {
     underlyingQuoteFetcher: schwab
       ? (symbol) => schwab.marketQuote(ownerId, symbol) : null,
     requireRealtimeUnderlying: true,
+    vixSymbol: schwab ? String(env.NUVO_SCHWAB_VIX_SYMBOL ?? '$VIX') : null,
     fundSymbols: String(env.NUVO_FUND_SYMBOLS ?? '').split(',')
       .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean),
   });
@@ -225,6 +226,8 @@ async function verifyLiveMarket(env, ownerId) {
       status: marketState.value.status,
       vix: marketState.value.vix,
       vix3m: marketState.value.vix3m,
+      vixSource: marketState.value.vixSource,
+      vixAsOf: marketState.value.vixAsOf,
       asOf: marketState.asOf,
     },
     symbols: rows,

@@ -68,6 +68,7 @@ export class MassiveProvider extends DataProvider {
     fundSymbols = [],
     underlyingQuoteFetcher = null,
     requireRealtimeUnderlying = true,
+    vixSymbol = null,
   } = {}) {
     super('massive');
     if (typeof fetcher !== 'function') throw new Error('MassiveProvider requires fetcher.');
@@ -79,6 +80,7 @@ export class MassiveProvider extends DataProvider {
     this.fundSymbols = new Set(fundSymbols.map((symbol) => String(symbol).toUpperCase()));
     this.underlyingQuoteFetcher = underlyingQuoteFetcher;
     this.requireRealtimeUnderlying = requireRealtimeUnderlying;
+    this.vixSymbol = vixSymbol ? String(vixSymbol).trim().toUpperCase() : null;
     this.cache = new Map();
     this.underlyingQuotes = new Map();
   }
@@ -318,16 +320,17 @@ export class MassiveProvider extends DataProvider {
 
   async marketState() {
     try {
-      const [session, vix, indexBars] = await Promise.all([
+      const [session, vix, indexBars, liveVix] = await Promise.all([
         this._getRetry('/v1/market-status'),
         this._getRetry('/v1/vix'),
         this._getRetry('/v1/bars?ticker=SPY&tf=1d&limit=252'),
+        this.vixSymbol ? this._underlyingQuote(this.vixSymbol) : null,
       ]);
       if (session.status === 'INCOMPLETE') return { error: 'MASSIVE_MARKET_SESSION_UNVERIFIED' };
       const rawStatus = session.session ?? session.market ?? session.market_status ?? session.status;
       const status = String(rawStatus ?? '').toUpperCase();
       const normalized = normalizeMarketSession(rawStatus, this.now());
-      const vixValue = numeric(vix.vix);
+      const vixValue = liveVix?.last ?? numeric(vix.vix);
       const vix3m = numeric(vix.vix3m ?? vixValue);
       const closes = (indexBars.bars ?? []).map((bar) => numeric(bar.c)).filter(Number.isFinite);
       const peak = closes.length ? Math.max(...closes) : null;
@@ -342,7 +345,11 @@ export class MassiveProvider extends DataProvider {
         return { error: `MASSIVE_MARKET_STATE_INCOMPLETE:${missing.join(',')}` };
       }
       return {
-        value: { status: normalized, vix: vixValue, vix3m, drawdown },
+        value: {
+          status: normalized, vix: vixValue, vix3m, drawdown,
+          vixSource: liveVix?.source ?? vix.source ?? 'MASSIVE_INDEX_DATA',
+          vixAsOf: liveVix?.asOf ?? timestamp(vix.as_of, timestamp(vix.response_ts)),
+        },
         asOf,
         source: 'MASSIVE_MARKET_STATUS',
       };
