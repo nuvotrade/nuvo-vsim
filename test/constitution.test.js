@@ -63,18 +63,22 @@ describe('authority tiers', () => {
     assert.equal(CAPITAL_AUTHORITY_FRACTION[AUTHORITY.SHADOW], 0);
   });
 
-  test('promotion requires live evidence, not backtests', () => {
-    const notEnough = evaluatePromotion(AUTHORITY.SHADOW, { liveObservations: 10 });
-    assert.equal(notEnough.eligible, false);
-    const enough = evaluatePromotion(AUTHORITY.SHADOW, {
-      liveObservations: 60, brierScore: 0.19, calibrationSlope: 0.82,
+  test('shadow promotion requires an explicit Principal amendment, not an observation count', () => {
+    const evidenceAlone = evaluatePromotion(AUTHORITY.SHADOW, {
+      liveObservations: 10_000, brierScore: 0.01, calibrationSlope: 1,
     });
-    assert.equal(enough.eligible, true);
-    assert.equal(enough.target, AUTHORITY.PROPOSE);
+    assert.equal(evidenceAlone.eligible, false);
+    assert.ok(evidenceAlone.failures.some((failure) => failure.includes('Principal')));
+    const amended = evaluatePromotion(AUTHORITY.SHADOW, {
+      principalConstitutionAmendment: true,
+    });
+    assert.equal(amended.eligible, true);
+    assert.equal(amended.target, AUTHORITY.PROPOSE);
   });
 
   test('promotion is one step at a time', () => {
     const r = evaluatePromotion(AUTHORITY.SHADOW, {
+      principalConstitutionAmendment: true,
       liveObservations: 10_000, brierScore: 0.01, calibrationSlope: 1.0,
       executionEdgeRetained: 0.99, constitutionalBreaches: 0, maxDrawdownPct: 0.01, profitFactor: 9,
     });

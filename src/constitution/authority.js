@@ -38,10 +38,8 @@ export const CAPABILITIES = Object.freeze({
 export const PROMOTION_GATES = Object.freeze({
   1: { liveObservations: 0, note: 'Shadow requires only a validated hypothesis.' },
   2: {
-    liveObservations: 50,
-    maxBrierScore: 0.22,
-    minCalibrationSlope: 0.75,
-    note: 'Proposing orders requires probabilities that are demonstrably truthful.',
+    requiresPrincipalAmendment: true,
+    note: 'Propose authority opens only through an explicit Principal Constitution amendment.',
   },
   3: {
     liveObservations: 100,
@@ -117,10 +115,17 @@ export function evaluatePromotion(currentLevel, evidence) {
     liveObservations = 0, brierScore = Infinity, calibrationSlope = 0,
     executionEdgeRetained = 0, constitutionalBreaches = Infinity,
     maxDrawdownPct = Infinity, profitFactor = 0,
+    principalConstitutionAmendment = false,
   } = evidence;
 
-  check(liveObservations >= gate.liveObservations,
-    `liveObservations ${liveObservations} < ${gate.liveObservations}`);
+  if (gate.requiresPrincipalAmendment) {
+    check(principalConstitutionAmendment === true,
+      'Explicit Principal Constitution amendment is required.');
+  }
+  if (gate.liveObservations !== undefined) {
+    check(liveObservations >= gate.liveObservations,
+      `liveObservations ${liveObservations} < ${gate.liveObservations}`);
+  }
   if (gate.maxBrierScore !== undefined) {
     check(brierScore <= gate.maxBrierScore, `brierScore ${brierScore} > ${gate.maxBrierScore}`);
   }

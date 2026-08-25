@@ -17,14 +17,16 @@ The path to autonomy:
 5 AUTO_PORTFOLIO  full portfolio operation                100%
 ```
 
-Promotion needs **live** evidence. Backtests promote nothing past SHADOW.
-Thresholds are pre-registered in `src/constitution/authority.js` so they
-cannot be relaxed after a good month, and promotion moves one step at a time.
+Promotion beyond PROPOSE needs **live** evidence. Backtests promote nothing.
+Moving from SHADOW to PROPOSE requires an explicit Principal Constitution
+amendment. Remaining thresholds are pre-registered in
+`src/constitution/authority.js`, and promotion moves one step at a time.
 
 There is a deliberate ordering here worth understanding:
 
-- **Authority 2** requires probabilities that are demonstrably truthful
-  (Brier ≤ 0.22, calibration slope ≥ 0.75 over 50 live observations).
+- **Authority 2** requires an explicit Principal Constitution amendment.
+  Shadow observations remain calibration evidence, but are not an
+  observation-count gate and cannot promote the system automatically.
 - **Authority 3** additionally requires proven *execution* — 60% of modelled
   edge surviving real fills. A system whose theory is right and whose fills
   are terrible is not ready to submit orders.
@@ -50,7 +52,7 @@ what it *would* have done. `recordOutcome()` feeds the calibration store the
 forecast that was actually made — terminal `P(S_T < K)` — against the matching
 terminal outcome. Touch probability is scored on a separate board and is never
 substituted for the terminal event.
-After 50 observations with honest probabilities, Authority 2 opens.
+Authority 2 opens only after the Principal explicitly amends the Constitution.
 
 Expect the system to prefer **defined-risk structures** while uncalibrated.
 Nothing hardcodes that: the confidence multiplier shrinks the risk budget
