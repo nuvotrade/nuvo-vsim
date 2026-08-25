@@ -53,7 +53,11 @@ function marketFetcher({ staleChain = false } = {}) {
       }));
       body = { bars, response_ts: NOW };
     } else if (url.pathname === '/v1/spot') {
-      body = { spot: 526.8, last: 526.8, bid: 526.75, ask: 526.85, source: 'polygon_snapshot', as_of: new Date(NOW - 500).toISOString() };
+      body = {
+        spot: 526.8, last: 526.8, bid: 526.75, ask: 526.85,
+        source: 'polygon_snapshot', freshness: 'real-time',
+        as_of: new Date(NOW - 500).toISOString(),
+      };
     } else if (url.pathname === '/v1/chain') {
       const dte = Number(url.searchParams.get('dte'));
       const right = url.searchParams.get('type');
@@ -200,7 +204,9 @@ describe('Massive production provider', () => {
       fetcher: async (request) => {
         const url = new URL(request.url);
         if (url.pathname === '/v1/spot') {
-          return Response.json({ last: 526.8, response_ts: NOW, source: 'polygon_last' });
+          return Response.json({
+            last: 526.8, response_ts: NOW, source: 'polygon_last', freshness: 'real-time',
+          });
         }
         return base(request);
       },
@@ -241,7 +247,7 @@ describe('Massive production provider', () => {
     assert.equal(earningsCalls, 0);
   });
 
-  test('uses the fresh options-snapshot spot for an options-only scan', async () => {
+  test('never gives a delayed underlying the timestamp of a real-time option quote', async () => {
     const base = marketFetcher();
     const provider = new MassiveProvider({
       now: () => NOW,
@@ -249,7 +255,34 @@ describe('Massive production provider', () => {
         if (new URL(request.url).pathname === '/v1/spot') {
           return Response.json({
             last: 500, bid: null, ask: null,
-            as_of: new Date(NOW - 15 * 60_000).toISOString(), source: 'day_close',
+            as_of: new Date(NOW - 15 * 60_000).toISOString(),
+            source: 'day_close', freshness: 'delayed',
+          });
+        }
+        return base(request);
+      },
+    });
+    await provider.optionChain('SPY', { expirations: [30] });
+    assert.equal((await provider.quote('SPY')).error,
+      'MASSIVE_UNDERLYING_NOT_REALTIME:DELAYED');
+  });
+
+  test('aligns Massive real-time options with an independently timestamped Schwab quote', async () => {
+    const base = marketFetcher();
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      underlyingQuoteFetcher: async (symbol) => ({
+        value: {
+          symbol, last: 527.1, bid: 527.09, ask: 527.11, freshness: 'REAL_TIME',
+        },
+        asOf: NOW - 250,
+        source: 'SCHWAB_MARKET_DATA_REALTIME',
+      }),
+      fetcher: async (request) => {
+        if (new URL(request.url).pathname === '/v1/spot') {
+          return Response.json({
+            last: 500, as_of: new Date(NOW - 15 * 60_000).toISOString(),
+            source: 'day_close', freshness: 'delayed',
           });
         }
         return base(request);
@@ -257,10 +290,13 @@ describe('Massive production provider', () => {
     });
     const chain = await provider.optionChain('SPY', { expirations: [30] });
     const quote = await provider.quote('SPY');
-    assert.equal(quote.value.last, chain.value.spot);
-    assert.ok(quote.asOf >= chain.asOf);
-    assert.equal(quote.source, 'MASSIVE_POLYGON_OPTIONS_UNDERLYING_MARK');
-    assert.equal(quote.value.markTimestampBasis, 'FRESHEST_CONTRACT_IN_OPTIONS_SNAPSHOT');
+    assert.equal(chain.value.spot, 527.1);
+    assert.equal(chain.value.underlyingAsOf, NOW - 250);
+    assert.equal(chain.value.underlyingSource, 'SCHWAB_MARKET_DATA_REALTIME');
+    assert.equal(quote.value.last, 527.1);
+    assert.equal(quote.asOf, NOW - 250);
+    assert.equal(quote.source, 'SCHWAB_MARKET_DATA_REALTIME');
+    assert.equal(quote.value.markTimestampBasis, 'SCHWAB_MARKET_DATA_QUOTE');
   });
 
   test('retries a transient corporate-action failure without clearing it falsely', async () => {
@@ -367,6 +403,50 @@ describe('listed expiration selection', () => {
 });
 
 describe('Schwab production broker boundary', () => {
+  test('normalizes a real-time Schwab market quote without exposing mutation', async (t) => {
+    t.mock.method(globalThis, 'fetch', async (url) => {
+      assert.match(String(url), /\/marketdata\/v1\/quotes/u);
+      return Response.json({
+        SPY: {
+          realtime: true,
+          quote: {
+            bidPrice: 526.99, askPrice: 527.01, lastPrice: 527,
+            mark: 527, quoteTime: NOW - 100, tradeTime: NOW - 200,
+            securityStatus: 'Normal',
+          },
+        },
+      });
+    });
+    const client = new SchwabD1Client({
+      NUVO_BROKER_MODE: 'READ_ONLY',
+      NUVO_BROKER_EXECUTION_MODE: 'SHADOW_ONLY',
+      SCHWAB_CLIENT_ID: 'test', SCHWAB_CLIENT_SECRET: 'test',
+      SCHWAB_CALLBACK_URL: 'https://example.test/callback',
+      BROKER_TOKEN_ENCRYPTION_KEY: 'test',
+    });
+    client._accessToken = async () => 'read-only-test-token';
+    const quote = await client.marketQuote('owner', 'SPY');
+    assert.equal(quote.value.last, 527);
+    assert.equal(quote.value.freshness, 'REAL_TIME');
+    assert.equal(quote.source, 'SCHWAB_MARKET_DATA_REALTIME');
+  });
+
+  test('refuses a delayed Schwab market quote', async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => Response.json({
+      SPY: { realtime: false, quote: { lastPrice: 527, quoteTime: NOW - 100 } },
+    }));
+    const client = new SchwabD1Client({
+      NUVO_BROKER_MODE: 'READ_ONLY',
+      NUVO_BROKER_EXECUTION_MODE: 'SHADOW_ONLY',
+      SCHWAB_CLIENT_ID: 'test', SCHWAB_CLIENT_SECRET: 'test',
+      SCHWAB_CALLBACK_URL: 'https://example.test/callback',
+      BROKER_TOKEN_ENCRYPTION_KEY: 'test',
+    });
+    client._accessToken = async () => 'read-only-test-token';
+    await assert.rejects(client.marketQuote('owner', 'SPY'),
+      /SCHWAB_MARKET_DATA_NOT_REALTIME/u);
+  });
+
   test('exposes custody but has no mutation capability', async () => {
     let calls = 0;
     const snapshot = {

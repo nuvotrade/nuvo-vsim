@@ -175,19 +175,26 @@ async function updateOperatorControls(env, ownerId, { action, reason }) {
   return loadOperatorControls(env, ownerId);
 }
 
-function marketProvider(env) {
+function marketProvider(env, ownerId = null) {
   const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45')
     .split(',').map(Number).filter(Number.isFinite);
+  const underlyingSource = String(env.NUVO_UNDERLYING_SOURCE ?? 'MASSIVE').toUpperCase();
+  const schwab = ownerId && underlyingSource === 'SCHWAB_MARKET_DATA'
+    ? new SchwabD1Client(env) : null;
   return new MassiveProvider({
     fetcher: (request) => env.MARKET.fetch(request), dteTargets,
     maxChainAgeMs: Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000),
+    maxQuoteAgeMs: Number(env.NUVO_MAX_QUOTE_AGE_MS ?? 60_000),
+    underlyingQuoteFetcher: schwab
+      ? (symbol) => schwab.marketQuote(ownerId, symbol) : null,
+    requireRealtimeUnderlying: true,
     fundSymbols: String(env.NUVO_FUND_SYMBOLS ?? '').split(',')
       .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean),
   });
 }
 
 async function verifyLiveMarket(env, ownerId) {
-  const provider = marketProvider(env);
+  const provider = marketProvider(env, ownerId);
   const symbols = String(env.NUVO_SYMBOLS ?? 'SPY,QQQ,IWM')
     .split(',').map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
   const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45')
@@ -506,7 +513,7 @@ export async function runShadowCycle(env, ownerId, {
     const broker = new SchwabReadOnlyBroker({ client: schwabClient, ownerId });
     broker.snapshotPromise = Promise.resolve(currentSnapshot);
     const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45').split(',').map(Number).filter(Number.isFinite);
-    const provider = marketProvider(env);
+    const provider = marketProvider(env, ownerId);
     const custodyRisk = await mapCustodyRisk({ provider, positions: currentSnapshot.positions });
     if (!custodyRisk.ok) {
       finalStatus = 'BLOCKED';
@@ -779,7 +786,7 @@ export async function triggerShadowCycle(env, ownerId, { source = 'MCP' } = {}) 
       evidence_fingerprint: summary.evidence?.decisionFingerprint ?? null,
     }, { code: summary.reasonCode, message: summary.reason });
   }
-  const provider = marketProvider(env);
+  const provider = marketProvider(env, ownerId);
   const market = await provider.marketState();
   const session = normalizeSession(market.value?.status);
   if (market.error || session !== 'RTH') {

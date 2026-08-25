@@ -1,6 +1,7 @@
 const AUTH_URL = 'https://api.schwabapi.com/v1/oauth/authorize';
 const TOKEN_URL = 'https://api.schwabapi.com/v1/oauth/token';
 const TRADER_URL = 'https://api.schwabapi.com/trader/v1';
+const MARKETDATA_URL = 'https://api.schwabapi.com/marketdata/v1';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -12,6 +13,19 @@ function finite(value, fallback = null) {
 function iso(value, fallback = null) {
   const parsed = Date.parse(String(value ?? ''));
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback;
+}
+
+function epochMs(value, fallback = null) {
+  const number = finite(value);
+  if (number == null) {
+    const parsed = Date.parse(String(value ?? ''));
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  if (number > 1e17) return Math.floor(number / 1e6);
+  if (number > 1e14) return Math.floor(number / 1e3);
+  if (number > 1e11) return number;
+  if (number > 1e9) return number * 1000;
+  return fallback;
 }
 
 function toBase64(bytes) {
@@ -310,6 +324,53 @@ export class SchwabD1Client {
     });
     if (!response.ok) throw new Error(`SCHWAB_READ_${response.status}:${path.split('?')[0]}`);
     return response.json();
+  }
+
+  async _marketRead(path, token) {
+    const response = await fetch(`${MARKETDATA_URL}${path}`, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) throw new Error(`SCHWAB_MARKET_DATA_${response.status}:${path.split('?')[0]}`);
+    return response.json();
+  }
+
+  /**
+   * Read-only real-time quote used to align Massive's OPRA option snapshot
+   * with an independently timestamped underlying market. The app must be
+   * subscribed to Schwab Market Data Production; Accounts and Trading alone
+   * correctly fails with SCHWAB_MARKET_DATA_403.
+   */
+  async marketQuote(ownerId, symbol) {
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const ticker = String(symbol ?? '').trim().toUpperCase();
+    if (!ticker) throw new Error('SCHWAB_MARKET_SYMBOL_REQUIRED');
+    const token = await this._accessToken(ownerId);
+    const packet = await this._marketRead(`/quotes?symbols=${encodeURIComponent(ticker)}&fields=quote,reference`, token);
+    const record = packet?.[ticker];
+    const quote = record?.quote;
+    if (!quote || record?.realtime !== true) throw new Error('SCHWAB_MARKET_DATA_NOT_REALTIME');
+    const bid = finite(quote.bidPrice);
+    const ask = finite(quote.askPrice);
+    const lastTrade = finite(quote.lastPrice);
+    const mark = finite(quote.mark);
+    const twoSided = bid > 0 && ask >= bid;
+    const last = mark > 0 ? mark : twoSided ? (bid + ask) / 2 : lastTrade;
+    const asOf = Math.max(...[quote.quoteTime, quote.tradeTime, quote.bidTime, quote.askTime]
+      .map((value) => epochMs(value)).filter(Number.isFinite));
+    if (!(last > 0) || !Number.isFinite(asOf)) throw new Error('SCHWAB_MARKET_QUOTE_INCOMPLETE');
+    return {
+      value: {
+        symbol: ticker,
+        last,
+        bid: twoSided ? bid : null,
+        ask: twoSided ? ask : null,
+        freshness: 'REAL_TIME',
+        securityStatus: quote.securityStatus ?? null,
+      },
+      asOf,
+      source: 'SCHWAB_MARKET_DATA_REALTIME',
+    };
   }
 
   async snapshot(ownerId) {

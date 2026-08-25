@@ -20,6 +20,19 @@ function eventAt(event) {
     ?? timestamp(event.date ? `${event.date}T16:00:00Z` : null);
 }
 
+function normalizedFreshness(value) {
+  return String(value ?? '').trim().toUpperCase().replaceAll('_', '-').replaceAll(' ', '-');
+}
+
+function isRealtime(value) {
+  return ['REALTIME', 'REAL-TIME', 'LIVE'].includes(normalizedFreshness(value));
+}
+
+function isExplicitlyDelayed(value) {
+  return ['DELAYED', 'DAY-CLOSE', 'PREV-CLOSE', 'PREVIOUS-CLOSE']
+    .includes(normalizedFreshness(value));
+}
+
 function normalizeMarketSession(value, now) {
   const status = String(value ?? '').trim().toUpperCase().replaceAll('_', '-').replaceAll(' ', '-');
   if (['OPEN', 'CLOSED', 'PRE', 'POST'].includes(status)) return status;
@@ -51,7 +64,10 @@ export class MassiveProvider extends DataProvider {
     now = () => Date.now(),
     dteTargets = [14, 30, 45],
     maxChainAgeMs = 120_000,
+    maxQuoteAgeMs = 60_000,
     fundSymbols = [],
+    underlyingQuoteFetcher = null,
+    requireRealtimeUnderlying = true,
   } = {}) {
     super('massive');
     if (typeof fetcher !== 'function') throw new Error('MassiveProvider requires fetcher.');
@@ -59,9 +75,38 @@ export class MassiveProvider extends DataProvider {
     this.now = now;
     this.dteTargets = [...dteTargets];
     this.maxChainAgeMs = maxChainAgeMs;
+    this.maxQuoteAgeMs = maxQuoteAgeMs;
     this.fundSymbols = new Set(fundSymbols.map((symbol) => String(symbol).toUpperCase()));
+    this.underlyingQuoteFetcher = underlyingQuoteFetcher;
+    this.requireRealtimeUnderlying = requireRealtimeUnderlying;
     this.cache = new Map();
-    this.chainMarks = new Map();
+    this.underlyingQuotes = new Map();
+  }
+
+  async _underlyingQuote(symbol) {
+    const key = String(symbol).toUpperCase();
+    if (!this.underlyingQuoteFetcher) return null;
+    if (!this.underlyingQuotes.has(key)) {
+      this.underlyingQuotes.set(key, Promise.resolve().then(() => this.underlyingQuoteFetcher(key)));
+    }
+    const quote = await this.underlyingQuotes.get(key);
+    if (quote?.error) throw new Error(quote.error);
+    const value = quote?.value ?? quote;
+    const last = numeric(value?.last ?? value?.mark ?? value?.spot);
+    const bid = numeric(value?.bid);
+    const ask = numeric(value?.ask);
+    const asOf = timestamp(quote?.asOf ?? value?.asOf ?? value?.as_of);
+    const freshness = value?.freshness ?? value?.timeframe ?? quote?.freshness;
+    const source = String(quote?.source ?? value?.source ?? 'UNDERLYING_QUOTE');
+    const twoSided = Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask >= bid;
+    if (!(last > 0) || !Number.isFinite(asOf) || this.now() - asOf > this.maxQuoteAgeMs
+      || asOf > this.now() + 10_000 || (this.requireRealtimeUnderlying && !isRealtime(freshness))) {
+      throw new Error('UNDERLYING_QUOTE_NOT_REALTIME');
+    }
+    return {
+      last, bid: twoSided ? bid : null, ask: twoSided ? ask : null,
+      asOf, freshness, source,
+    };
   }
 
   async _get(path, { cache = true } = {}) {
@@ -134,41 +179,43 @@ export class MassiveProvider extends DataProvider {
 
   async quote(symbol) {
     try {
+      const liveUnderlying = await this._underlyingQuote(symbol);
       const [spot, history] = await Promise.all([
         this._get(`/v1/spot?ticker=${encodeURIComponent(symbol)}`),
         this.history(symbol, { lookback: 120 }),
       ]);
       if (history.error) return history;
-      const last = numeric(spot.last ?? spot.spot);
-      const bid = numeric(spot.bid);
-      const ask = numeric(spot.ask);
+      const last = liveUnderlying?.last ?? numeric(spot.last ?? spot.spot);
+      const bid = liveUnderlying?.bid ?? numeric(spot.bid);
+      const ask = liveUnderlying?.ask ?? numeric(spot.ask);
       const spotAsOf = timestamp(spot.as_of, timestamp(spot.response_ts));
-      const chainMark = this.chainMarks.get(String(symbol).toUpperCase());
-      const useChainMark = chainMark && Number.isFinite(chainMark.asOf)
-        && (!Number.isFinite(spotAsOf) || chainMark.asOf > spotAsOf);
-      const decisionLast = useChainMark ? chainMark.last : last;
-      const asOf = useChainMark ? chainMark.asOf : spotAsOf;
+      const asOf = liveUnderlying?.asOf ?? spotAsOf;
+      const freshness = liveUnderlying?.freshness ?? spot.freshness ?? spot.timeframe;
       const adv = history.value.reduce((sum, bar) => sum + numeric(bar.v, 0), 0)
         / history.value.length;
       const hasTwoSidedUnderlying = Number.isFinite(bid) && Number.isFinite(ask);
-      if (![decisionLast, asOf].every(Number.isFinite)
+      if (![last, asOf].every(Number.isFinite)
         || (hasTwoSidedUnderlying && (bid <= 0 || ask < bid))) {
         return { error: 'MASSIVE_QUOTE_INCOMPLETE' };
       }
+      if (!liveUnderlying && this.requireRealtimeUnderlying
+        && (isExplicitlyDelayed(freshness) || !isRealtime(freshness))) {
+        return { error: `MASSIVE_UNDERLYING_NOT_REALTIME:${normalizedFreshness(freshness) || 'UNVERIFIED'}` };
+      }
       return {
         value: {
-          symbol, last: decisionLast, bid: hasTwoSidedUnderlying ? bid : null,
+          symbol, last, bid: hasTwoSidedUnderlying ? bid : null,
           ask: hasTwoSidedUnderlying ? ask : null,
           underlyingMarket: hasTwoSidedUnderlying ? 'TWO_SIDED' : 'MARK_ONLY',
-          markTimestampBasis: useChainMark ? 'FRESHEST_CONTRACT_IN_OPTIONS_SNAPSHOT' : 'SPOT_RESPONSE',
+          markTimestampBasis: liveUnderlying ? 'SCHWAB_MARKET_DATA_QUOTE' : 'MASSIVE_SPOT_RESPONSE',
           volume: numeric(history.value.at(-1)?.v, 0),
           adv,
           sector: 'UNKNOWN', beta: null,
-          freshness: spot.freshness ?? null,
+          freshness: freshness ?? null,
         },
         asOf,
-        source: useChainMark ? 'MASSIVE_POLYGON_OPTIONS_UNDERLYING_MARK'
-          : `MASSIVE_${String(spot.source ?? 'POLYGON_SPOT').toUpperCase()}`,
+        source: liveUnderlying?.source
+          ?? `MASSIVE_${String(spot.source ?? 'POLYGON_SPOT').toUpperCase()}`,
       };
     } catch (error) {
       return { error: error.message };
@@ -177,11 +224,14 @@ export class MassiveProvider extends DataProvider {
 
   async optionChain(symbol, { expirations = this.dteTargets } = {}) {
     try {
-      const packets = await Promise.all(expirations.flatMap((dte) => RIGHTS.map(async (right) => {
-        const path = `/v1/chain?ticker=${encodeURIComponent(symbol)}&dte=${dte}`
-          + `&deltaTarget=0.25&type=${right}&strict=1`;
-        return { targetDte: dte, right, body: await this._get(path, { cache: false }) };
-      })));
+      const [packets, liveUnderlying] = await Promise.all([
+        Promise.all(expirations.flatMap((dte) => RIGHTS.map(async (right) => {
+          const path = `/v1/chain?ticker=${encodeURIComponent(symbol)}&dte=${dte}`
+            + `&deltaTarget=0.25&type=${right}&strict=1`;
+          return { targetDte: dte, right, body: await this._get(path, { cache: false }) };
+        }))),
+        this._underlyingQuote(symbol),
+      ]);
       const now = this.now();
       const groups = packets.map((packet) => (packet.body.contracts ?? []).map((row) => {
         const asOf = timestamp(row.quote_as_of);
@@ -212,17 +262,20 @@ export class MassiveProvider extends DataProvider {
       if (packets.length !== requested || groups.some((group) => group.length === 0)) {
         return { error: 'MASSIVE_EXECUTABLE_CHAIN_UNAVAILABLE' };
       }
-      const spot = numeric(packets.find((packet) => numeric(packet.body.spot) != null)?.body.spot);
+      const massiveSpot = numeric(packets.find((packet) => numeric(packet.body.spot) != null)?.body.spot);
+      const spot = liveUnderlying?.last ?? massiveSpot;
       if (!(spot > 0)) return { error: 'MASSIVE_CHAIN_SPOT_UNAVAILABLE' };
       const asOf = Math.min(...contracts.map((row) => row.quoteAsOf));
       // The chain-wide timestamp remains the oldest included contract so the
-      // chain audit is conservative. The packet's underlying spot accompanies
-      // the snapshot but the legacy service omits spot_as_of, so its timestamp
-      // is explicitly inferred from the freshest contract in that same packet.
-      const spotAsOf = Math.max(...contracts.map((row) => row.quoteAsOf));
-      this.chainMarks.set(String(symbol).toUpperCase(), { last: spot, asOf: spotAsOf });
+      // audit is conservative. Critically, an option quote timestamp is never
+      // reused as the underlying stock timestamp: Massive can provide
+      // real-time options alongside a 15-minute-delayed underlying asset.
       return {
-        value: { underlying: symbol, spot, contracts, asOf },
+        value: {
+          underlying: symbol, spot, contracts, asOf,
+          underlyingAsOf: liveUnderlying?.asOf ?? null,
+          underlyingSource: liveUnderlying?.source ?? 'MASSIVE_OPTIONS_SNAPSHOT_UNDERLYING',
+        },
         asOf,
         source: 'MASSIVE_POLYGON_OPTIONS_STRICT',
       };
