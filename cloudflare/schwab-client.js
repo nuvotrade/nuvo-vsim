@@ -136,6 +136,7 @@ function flattenOrders(order, accountRef, observedAt, rows = []) {
       clientOrderId: providerOrderId,
       accountRef,
       symbol: String(leg.instrument?.symbol ?? '').replaceAll(' ', '').toUpperCase(),
+      side: String(leg.instruction ?? 'UNKNOWN').toUpperCase(),
       state: String(order.status ?? 'UNKNOWN').toUpperCase(),
       quantity: finite(order.quantity ?? leg.quantity, 0),
       updatedAt: iso(order.closeTime ?? order.cancelTime ?? order.enteredTime, observedAt),

@@ -47,7 +47,9 @@ capital requires calibration. It resolves through SHADOW.
 
 At Authority 1 the engine runs full cycles, ranks opportunities, and records
 what it *would* have done. `recordOutcome()` feeds the calibration store the
-forecast that was actually made — `P(no breach)` — against what happened.
+forecast that was actually made — terminal `P(S_T < K)` — against the matching
+terminal outcome. Touch probability is scored on a separate board and is never
+substituted for the terminal event.
 After 50 observations with honest probabilities, Authority 2 opens.
 
 Expect the system to prefer **defined-risk structures** while uncalibrated.

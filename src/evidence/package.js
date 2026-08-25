@@ -145,6 +145,11 @@ export function buildEvidence({
       clusterCorrelation: governance.clusterCorrelation,
       violations: (governance.violations ?? []).map(String),
       warnings: (governance.warnings ?? []).map(String),
+      portfolioBefore: governance.portfolioBefore ? {
+        exposures: governance.portfolioBefore.exposures ?? null,
+        greeks: governance.portfolioBefore.greeks ?? null,
+        violations: (governance.portfolioBefore.violations ?? []).map(String),
+      } : null,
       portfolioGreeks: governance.portfolio?.greeks ?? null,
       stressWorst: governance.stress?.worst
         ? { scenario: governance.stress.worst.scenario, pctOfNav: governance.stress.worstPctOfNav }
@@ -260,6 +265,9 @@ function summariseCandidate(c) {
     nev: c.evaluation?.nev,
     cvar: c.evaluation?.cvar,
     gapRisk: c.evaluation?.gapRisk?.value,
+    liquidityRisk: c.evaluation?.liquidityRisk?.value,
+    nevPerDay: Number.isFinite(c.evaluation?.nev) && Number.isFinite(c.dte) && c.dte > 0
+      ? c.evaluation.nev / c.dte : null,
     raroc: c.capital?.raroc,
     roc: c.capital?.roc,
     economicCapital: c.capital?.economicCapital,

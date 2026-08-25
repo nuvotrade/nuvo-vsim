@@ -2,12 +2,18 @@ import { NuvoEngine } from '../src/engine.js';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { EvidenceStore } from '../src/evidence/store.js';
-import { buildEvidence } from '../src/evidence/package.js';
+import { buildEvidence, verifyEvidence, verifyFingerprint } from '../src/evidence/package.js';
+import { replay } from '../src/evidence/replay.js';
 import { AUTHORITY } from '../src/constitution/authority.js';
 import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
 import { contentHash, ORDER_STATE } from '../src/execution/order.js';
+import { reconcile, RECON } from '../src/truth/reconciliation.js';
 import { authenticateAccess } from './access-auth.js';
+import {
+  buildBlockedCycleContext, buildCycleContext, D1R2CycleContextStore, decisionName,
+} from './cycle-context.js';
 import { D1R2EvidencePersistence } from './evidence-persistence.js';
+import { handleVsimMcp } from './mcp-server.js';
 import { SchwabD1Client } from './schwab-client.js';
 import { mapCustodyRisk } from './custody-risk.js';
 
@@ -20,6 +26,34 @@ const JSON_HEADERS = Object.freeze({
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 const nowIso = () => new Date().toISOString();
+const authorityLevel = (env) => Number(env.NUVO_AUTHORITY_LEVEL ?? AUTHORITY.SHADOW);
+
+function epochMs(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toolEnvelope(env, payload = {}, error = null) {
+  return {
+    ok: !error,
+    cycle_id: payload.cycle_id ?? null,
+    authority_level: authorityLevel(env),
+    asof: payload.asof ?? nowIso(),
+    ...payload,
+    error: error ? {
+      code: String(error.code ?? 'FAIL_CLOSED'),
+      message: String(error.message ?? error),
+    } : null,
+  };
+}
+
+function firstReasonCode(result, fallback = null) {
+  return result?.violations?.[0]?.code
+    ?? result?.governance?.violations?.[0]?.code
+    ?? fallback;
+}
 
 function parseJson(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
@@ -30,7 +64,8 @@ function publicStatus(env) {
     ok: true,
     service: 'nuvo-vsim-v5-shadow',
     environment: env.NUVO_ENVIRONMENT ?? 'unknown',
-    authority: '1_SHADOW',
+    authority: `${authorityLevel(env)}_SHADOW`,
+    authority_level: authorityLevel(env),
     broker_mode: 'READ_ONLY',
     broker_execution_mode: 'SHADOW_ONLY',
     mutation_routes: false,
@@ -80,6 +115,66 @@ async function loadLatestCustody(env, ownerId) {
   };
 }
 
+async function loadOperatorControls(env, ownerId) {
+  const row = await env.DB.prepare(`SELECT global_pause,global_pause_reason,
+    independent_kill,independent_kill_reason,updated_at,updated_by
+    FROM operator_controls WHERE owner_id=?`).bind(ownerId).first();
+  return row ? {
+    globalPause: Boolean(row.global_pause),
+    globalPauseReason: row.global_pause_reason ?? null,
+    independentKill: Boolean(row.independent_kill),
+    independentKillReason: row.independent_kill_reason ?? null,
+    updatedAt: row.updated_at,
+    updatedBy: row.updated_by,
+  } : {
+    globalPause: false, globalPauseReason: null,
+    independentKill: false, independentKillReason: null,
+    updatedAt: null, updatedBy: null,
+  };
+}
+
+async function updateOperatorControls(env, ownerId, { action, reason }) {
+  if (!reason || String(reason).trim().length < 8) throw new Error('CONTROL_REASON_REQUIRED');
+  const current = await loadOperatorControls(env, ownerId);
+  const next = {
+    globalPause: current.globalPause,
+    globalPauseReason: current.globalPauseReason,
+    independentKill: current.independentKill,
+    independentKillReason: current.independentKillReason,
+  };
+  if (action === 'PAUSE') {
+    next.globalPause = true;
+    next.globalPauseReason = String(reason).trim();
+  } else if (action === 'RESUME') {
+    next.globalPause = false;
+    next.globalPauseReason = null;
+  } else if (action === 'KILL') {
+    next.independentKill = true;
+    next.independentKillReason = String(reason).trim();
+  } else if (action === 'CLEAR_KILL') {
+    next.independentKill = false;
+    next.independentKillReason = null;
+  } else {
+    throw new Error('CONTROL_ACTION_INVALID');
+  }
+  const at = nowIso();
+  await env.DB.prepare(`INSERT INTO operator_controls
+    (owner_id,global_pause,global_pause_reason,independent_kill,
+     independent_kill_reason,updated_at,updated_by)
+    VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id) DO UPDATE SET
+    global_pause=excluded.global_pause,
+    global_pause_reason=excluded.global_pause_reason,
+    independent_kill=excluded.independent_kill,
+    independent_kill_reason=excluded.independent_kill_reason,
+    updated_at=excluded.updated_at,updated_by=excluded.updated_by`).bind(
+    ownerId, next.globalPause ? 1 : 0, next.globalPauseReason,
+    next.independentKill ? 1 : 0, next.independentKillReason,
+    at, 'PRINCIPAL_ACCESS_SESSION',
+  ).run();
+  await audit(env, ownerId, `OPERATOR_CONTROL_${action}`, { reason: String(reason).trim() });
+  return loadOperatorControls(env, ownerId);
+}
+
 function marketProvider(env) {
   const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45')
     .split(',').map(Number).filter(Number.isFinite);
@@ -121,6 +216,8 @@ async function verifyLiveMarket(env, ownerId) {
     source: 'MASSIVE_POLYGON_PRIVATE_SERVICE',
     marketState: marketState.error ? { error: marketState.error } : {
       status: marketState.value.status,
+      vix: marketState.value.vix,
+      vix3m: marketState.value.vix3m,
       asOf: marketState.asOf,
     },
     symbols: rows,
@@ -165,7 +262,16 @@ function summaryOf(result, engine, connector) {
     nev: candidate.evaluation?.nev ?? null,
     raroc: candidate.capital?.raroc ?? null,
     cvar: candidate.evaluation?.cvar ?? null,
+    gapRisk: candidate.evaluation?.gapRisk?.value ?? null,
+    liquidityRisk: candidate.evaluation?.liquidityRisk?.value ?? null,
     economicCapital: candidate.capital?.economicCapital ?? null,
+    nevPerDay: Number.isFinite(candidate.evaluation?.nev) && Number.isFinite(candidate.dte) && candidate.dte > 0
+      ? candidate.evaluation.nev / candidate.dte : null,
+    pMarket: candidate.probabilities?.pMarket ?? null,
+    pModel: candidate.probabilities?.pModel ?? null,
+    pCal: candidate.probabilities?.calibration === 'UNCALIBRATED'
+      ? null : candidate.probabilities?.pCal ?? null,
+    pCalStatus: candidate.probabilities?.calibration === 'UNCALIBRATED' ? 'UNCALIBRATED' : 'ACTIVE',
     admissible: Boolean(candidate.admissible),
     rejection: candidate.admissible ? null : candidate.violations?.map(String)?.[0] ?? null,
   }));
@@ -173,6 +279,12 @@ function summaryOf(result, engine, connector) {
     cycleId: result.cycleId,
     at: result.evidence?.at ?? Date.now(),
     outcome: result.outcome,
+    decision: decisionName(result.outcome),
+    state: result.outcome === 'REFUSED'
+      ? (['POSITION_UNKNOWN', 'POSITION_QTY_MISMATCH', 'POSITION_PHANTOM', 'ORDER_UNKNOWN', 'ORDER_PHANTOM',
+        'CASH_MISMATCH_FATAL', 'BP_MISMATCH'].includes(firstReasonCode(result)) ? 'QUARANTINED' : 'REFUSED')
+      : 'SHADOW_RECORDED',
+    reasonCode: firstReasonCode(result, result.outcome === 'NO_TRADE' ? 'NO_TRADE' : null),
     reason: result.reason ?? result.reasons?.[0] ?? null,
     authority: '1_SHADOW',
     mutationEligible: false,
@@ -195,11 +307,44 @@ function summaryOf(result, engine, connector) {
 
 async function recordCycleSummary(env, ownerId, summary) {
   await env.DB.prepare(`INSERT INTO cycle_summaries
-    (owner_id,cycle_id,outcome,reason,regime,summary_json,created_at)
-    VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id,cycle_id) DO NOTHING`).bind(
+    (owner_id,cycle_id,outcome,reason,regime,summary_json,created_at,state,decision,
+     reason_code,evidence_fingerprint,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,cycle_id) DO UPDATE SET
+    outcome=excluded.outcome,reason=excluded.reason,regime=excluded.regime,
+    summary_json=excluded.summary_json,state=excluded.state,decision=excluded.decision,
+    reason_code=excluded.reason_code,evidence_fingerprint=excluded.evidence_fingerprint,
+    updated_at=excluded.updated_at`).bind(
     ownerId, summary.cycleId, summary.outcome, summary.reason, summary.regime,
-    JSON.stringify(summary), new Date(summary.at).toISOString(),
+    JSON.stringify(summary), new Date(summary.at).toISOString(), summary.state,
+    summary.decision, summary.reasonCode ?? null,
+    summary.evidence?.decisionFingerprint ?? null, nowIso(),
   ).run();
+}
+
+async function recordCycleStates(env, ownerId, cycleId, states) {
+  let sequence = 0;
+  for (const entry of states) {
+    await env.DB.prepare(`INSERT INTO cycle_state_events
+      (owner_id,cycle_id,sequence,state,role,detail_json,created_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id,cycle_id,sequence) DO NOTHING`).bind(
+      ownerId, cycleId, sequence, entry.state, entry.role ?? 'VSIM_ENGINE',
+      JSON.stringify(entry.detail ?? {}), entry.at ?? nowIso(),
+    ).run();
+    sequence += 1;
+  }
+}
+
+function statesForResult(result, summary) {
+  const states = [{ state: 'TRIGGERED', role: 'MASTER_CHIEF_INTERFACE' }];
+  const passed = new Set((result.trace ?? []).filter((entry) => entry.ok).map((entry) => entry.name));
+  if (passed.has('truth') && passed.has('reconciliation')) states.push({ state: 'TRUTH_VERIFIED', role: 'TRUTH_SENTINEL' });
+  if (passed.has('universe')) states.push({ state: 'UNIVERSE_SCREENED', role: 'VSIM_ENGINE' });
+  if (passed.has('underwriting')) states.push({ state: 'UNDERWRITTEN', role: 'VSIM_ENGINE' });
+  if (passed.has('ranking')) states.push({ state: 'CHALLENGED', role: 'RISK_MANAGER', detail: { source: 'stored gate results' } });
+  if ((result.trace ?? []).some((entry) => entry.name === 'governor')) states.push({ state: 'GOVERNED', role: 'PORTFOLIO_GOVERNOR' });
+  if (result.evidence) states.push({ state: 'EVIDENCE_SEALED', role: 'AUDIT_LOGGER' });
+  states.push({ state: summary.state, role: summary.state === 'SHADOW_RECORDED' ? 'AUDIT_LOGGER' : 'TRUTH_SENTINEL' });
+  return states;
 }
 
 async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
@@ -226,7 +371,9 @@ async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
   await evidenceStore.flush();
   if (evidenceStore.persistenceError) throw evidenceStore.persistenceError;
   const summary = {
-    cycleId, at: Date.now(), outcome: 'REFUSED', reason, authority: '1_SHADOW',
+    cycleId, at: Date.now(), outcome: 'REFUSED', decision: 'REFUSED',
+    state: reason.includes('RECON') || reason.includes('MISMATCH') ? 'QUARANTINED' : 'REFUSED',
+    reasonCode: reason, reason: detail.message ?? reason, authority: '1_SHADOW',
     mutationEligible: false, regime: null, regimeConfidence: null, trace: [],
     opportunities: [], selected: null,
     evidence: {
@@ -239,6 +386,17 @@ async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
     connectors: { market: 'LIVE_PRIVATE_SERVICE', schwab: 'READ_ONLY', evidence: 'D1_R2' },
   };
   await recordCycleSummary(env, ownerId, summary);
+  await recordCycleStates(env, ownerId, cycleId, [
+    { state: 'TRIGGERED', role: 'MASTER_CHIEF_INTERFACE' },
+    { state: 'EVIDENCE_SEALED', role: 'AUDIT_LOGGER' },
+    { state: summary.state, role: 'TRUTH_SENTINEL', detail: { reasonCode: reason } },
+  ]);
+  const contextStore = new D1R2CycleContextStore({ db: env.DB, bucket: env.EVIDENCE, ownerId });
+  await contextStore.put(buildBlockedCycleContext({
+    summary, detail,
+    codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
+    constitutionVersion: DEFAULT_LIMITS.version,
+  }));
   await audit(env, ownerId, 'SHADOW_CYCLE_BLOCKED', { cycleId, reason, ...detail });
   return summary;
 }
@@ -253,7 +411,15 @@ async function acquireCycleLease(env, ownerId, cycleId) {
       ownerId, cycleId, now, new Date(Date.now() + 10 * 60_000).toISOString(),
     ).run();
     return true;
-  } catch { return false; }
+  } catch {
+    // Workflow steps may be retried after their side effects committed but
+    // before Cloudflare recorded the step result. Re-entering the SAME lease
+    // is safe because the Durable Object prevents a second Workflow. A
+    // different running cycle still fails closed.
+    const existing = await env.DB.prepare(`SELECT cycle_id,status FROM cycle_leases
+      WHERE owner_id=? AND cycle_id=?`).bind(ownerId, cycleId).first().catch(() => null);
+    return existing?.cycle_id === cycleId && existing.status === 'RUNNING';
+  }
 }
 
 export function cycleIdFor({ ownerId, source, now = Date.now(), idempotencyKey = null }) {
@@ -266,8 +432,10 @@ export function cycleIdFor({ ownerId, source, now = Date.now(), idempotencyKey =
   return `CY-${ownerId.slice(0, 10)}-${Math.floor(now / (15 * 60_000))}`;
 }
 
-async function runShadowCycle(env, ownerId, { source = 'MANUAL', idempotencyKey = null } = {}) {
-  const cycleId = cycleIdFor({ ownerId, source, idempotencyKey });
+export async function runShadowCycle(env, ownerId, {
+  source = 'MANUAL', idempotencyKey = null, cycleIdOverride = null,
+} = {}) {
+  const cycleId = cycleIdOverride ?? cycleIdFor({ ownerId, source, idempotencyKey });
   if (!await acquireCycleLease(env, ownerId, cycleId)) {
     const existing = await env.DB.prepare(`SELECT summary_json FROM cycle_summaries
       WHERE owner_id=? AND cycle_id=?`).bind(ownerId, cycleId).first();
@@ -276,6 +444,51 @@ async function runShadowCycle(env, ownerId, { source = 'MANUAL', idempotencyKey 
   }
   let finalStatus = 'FAILED';
   try {
+    const existingSummary = await cycleSummary(env, ownerId, cycleId);
+    if (existingSummary) {
+      finalStatus = existingSummary.state ?? 'COMPLETE';
+      return existingSummary;
+    }
+    const filed = await env.DB.prepare(`SELECT evidence_hash,decision_fingerprint,decision,sequence
+      FROM evidence_index WHERE owner_id=? AND cycle_id=?`).bind(ownerId, cycleId).first();
+    if (filed) {
+      // The evidence write won a race with a Workflow retry, but its summary
+      // did not. Never run the economic decision twice or relabel the sealed
+      // package. Quarantine the incomplete projection for operator review.
+      const summary = {
+        cycleId,
+        at: Date.now(),
+        outcome: filed.decision,
+        decision: filed.decision === 'PROPOSAL' ? 'SHADOW_PROPOSAL'
+          : filed.decision === 'NO_TRADE' ? 'NO_TRADE' : 'REFUSED',
+        state: 'QUARANTINED',
+        reasonCode: 'EVIDENCE/PROJECTION_INCOMPLETE',
+        reason: 'Evidence sealed before its D1 summary/context projection completed; no second decision was run.',
+        authority: '1_SHADOW', mutationEligible: false,
+        regime: null, regimeConfidence: null, trace: [], opportunities: [], selected: null,
+        evidence: {
+          hash: filed.evidence_hash,
+          decisionFingerprint: filed.decision_fingerprint,
+          sequence: filed.sequence,
+          chainValid: null,
+        },
+        connectors: { market: 'UNKNOWN', schwab: 'READ_ONLY', evidence: 'D1_R2' },
+      };
+      await recordCycleSummary(env, ownerId, summary);
+      await recordCycleStates(env, ownerId, cycleId, [
+        { state: 'TRIGGERED', role: 'MASTER_CHIEF_INTERFACE' },
+        { state: 'EVIDENCE_SEALED', role: 'AUDIT_LOGGER' },
+        { state: 'QUARANTINED', role: 'AUDIT_LOGGER', detail: { reasonCode: summary.reasonCode } },
+      ]);
+      const contextStore = new D1R2CycleContextStore({ db: env.DB, bucket: env.EVIDENCE, ownerId });
+      await contextStore.put(buildBlockedCycleContext({
+        summary, detail: { massiveStatus: 'BLOCKED' },
+        codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
+        constitutionVersion: DEFAULT_LIMITS.version,
+      }));
+      finalStatus = 'QUARANTINED';
+      return summary;
+    }
     const baseline = await loadBaseline(env, ownerId);
     if (!baseline) {
       finalStatus = 'BLOCKED';
@@ -332,6 +545,11 @@ async function runShadowCycle(env, ownerId, { source = 'MANUAL', idempotencyKey 
       market: 'LIVE_PRIVATE_SERVICE', schwab: 'READ_ONLY', evidence: 'D1_R2', source,
     });
     await recordCycleSummary(env, ownerId, summary);
+    await recordCycleStates(env, ownerId, cycleId, statesForResult(result, summary));
+    const contextStore = new D1R2CycleContextStore({ db: env.DB, bucket: env.EVIDENCE, ownerId });
+    await contextStore.put(buildCycleContext({
+      result, summary, snapshotHash: currentSnapshot.snapshotHash,
+    }));
     finalStatus = result.outcome === 'REFUSED' ? 'REFUSED' : 'COMPLETE';
     return summary;
   } catch (error) {
@@ -345,7 +563,7 @@ async function runShadowCycle(env, ownerId, { source = 'MANUAL', idempotencyKey 
 
 async function apiStatus(env, ownerId) {
   const client = new SchwabD1Client(env);
-  const [connection, baseline, custody, latest, evidenceCount, marketCheck] = await Promise.all([
+  const [connection, baseline, custody, latest, evidenceCount, marketCheck, controls] = await Promise.all([
     client.status(ownerId),
     loadBaseline(env, ownerId),
     loadLatestCustody(env, ownerId),
@@ -353,6 +571,7 @@ async function apiStatus(env, ownerId) {
     env.DB.prepare('SELECT COUNT(*) AS count FROM evidence_index WHERE owner_id=?').bind(ownerId).first(),
     env.DB.prepare(`SELECT detail_json FROM operational_audit WHERE owner_id=?
       AND event_type='MASSIVE_LIVE_CHAIN_CHECK' ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first(),
+    loadOperatorControls(env, ownerId),
   ]);
   return {
     ...publicStatus(env),
@@ -372,8 +591,452 @@ async function apiStatus(env, ownerId) {
     } : { status: 'REQUIRED' },
     evidence: { records: Number(evidenceCount?.count ?? 0), storage: 'D1_INDEX_R2_IMMUTABLE_OBJECT' },
     marketCheck: marketCheck ? parseJson(marketCheck.detail_json, null) : null,
+    controls,
     latestCycle: latest ? parseJson(latest.summary_json, null) : null,
   };
+}
+
+async function cycleSummary(env, ownerId, cycleId = null) {
+  const row = cycleId
+    ? await env.DB.prepare(`SELECT summary_json FROM cycle_summaries
+      WHERE owner_id=? AND cycle_id=?`).bind(ownerId, cycleId).first()
+    : await env.DB.prepare(`SELECT summary_json FROM cycle_summaries
+      WHERE owner_id=? ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first();
+  return row ? parseJson(row.summary_json, null) : null;
+}
+
+function accountReconciliation(baseline, snapshot) {
+  if (!baseline) return { status: 'MISSING', problems: [], details: {} };
+  const report = reconcile({
+    engine: {
+      positions: baseline.positions,
+      cash: baseline.account?.cash,
+      buyingPower: baseline.account?.buyingPower,
+      openOrders: baseline.openOrders,
+    },
+    broker: {
+      positions: snapshot.positions,
+      cash: snapshot.cash,
+      buyingPower: snapshot.buyingPower,
+      openOrders: snapshot.openOrders,
+    },
+  });
+  return {
+    status: report.status === RECON.PASS ? 'CAPTURED' : 'MISMATCH',
+    problems: report.problems.map((problem) => ({
+      code: problem.code,
+      message: problem.message,
+      detail: problem.detail ?? null,
+    })),
+    details: report.details,
+  };
+}
+
+async function getAccountTruthTool(env, ownerId) {
+  const client = new SchwabD1Client(env);
+  const status = await client.status(ownerId);
+  if (status.status !== 'CONNECTED') {
+    return toolEnvelope(env, {
+      nav: null, cash: null, margin_used: null, positions: [], open_orders: [],
+      recon: { baseline: 'MISSING', positions_n: 0, open_orders_n: 0, mismatches: [] },
+      schwab: 'DISCONNECTED',
+    }, { code: 'SCHWAB_DISCONNECTED', message: status.last_error_code ?? 'Schwab is not connected.' });
+  }
+
+  let snapshot;
+  try { snapshot = await client.snapshot(ownerId); }
+  catch (error) {
+    return toolEnvelope(env, {
+      nav: null, cash: null, margin_used: null, positions: [], open_orders: [],
+      recon: { baseline: 'MISSING', positions_n: 0, open_orders_n: 0, mismatches: [] },
+      schwab: 'DISCONNECTED',
+    }, { code: 'SCHWAB_READ_FAILED', message: error.message });
+  }
+  const baseline = await loadBaseline(env, ownerId);
+  const recon = accountReconciliation(baseline, snapshot);
+  const positions = snapshot.positions.map((position) => ({
+    symbol: position.symbol,
+    qty: position.quantity,
+    mark: Number.isFinite(position.marketValue) && Number.isFinite(position.quantity)
+      && position.quantity !== 0
+      ? position.marketValue / (position.quantity * (position.multiplier || 1))
+      : null,
+    mv: position.marketValue,
+    asset_class: position.type,
+  }));
+  const openOrders = snapshot.openOrders.map((order) => ({
+    id: order.brokerOrderId ?? order.clientOrderId,
+    symbol: order.symbol,
+    side: order.side ?? 'UNKNOWN',
+    qty: order.quantity,
+    status: order.state ?? order.status ?? 'UNKNOWN',
+  }));
+  const concentration = positions.map((position) => ({
+    symbol: position.symbol,
+    pct_nav: Number.isFinite(position.mv) && snapshot.nav > 0
+      ? Math.abs(position.mv) / snapshot.nav : null,
+  }));
+  const payload = {
+    nav: snapshot.nav,
+    cash: snapshot.cash,
+    margin_used: Math.max(0, -snapshot.cash),
+    positions,
+    open_orders: openOrders,
+    recon: {
+      baseline: recon.status,
+      positions_n: positions.length,
+      open_orders_n: openOrders.length,
+      mismatches: recon.problems,
+    },
+    schwab: 'CONNECTED',
+    desk_overlay: {
+      book: 'PRINCIPAL_SCHWAB_OUTSIDE_100K_MOMENTUM_OVERLAY',
+      negative_cash: snapshot.cash < 0,
+      concentrated_names: concentration.filter((row) => row.pct_nav > 0.10),
+      action: 'REPORT_ONLY_NO_AUTO_LIQUIDATION',
+    },
+    asof: new Date(snapshot.asOf).toISOString(),
+  };
+  if (recon.status !== 'CAPTURED') {
+    return toolEnvelope(env, payload, {
+      code: recon.status === 'MISSING' ? 'RECON_BASELINE_MISSING' : 'RECON_MISMATCH',
+      message: recon.status === 'MISSING'
+        ? 'No reconciliation baseline is captured.' : 'Schwab custody differs from the captured baseline.',
+    });
+  }
+  return toolEnvelope(env, payload);
+}
+
+function normalizeSession(status) {
+  return status === 'OPEN' ? 'RTH' : ['PRE', 'POST', 'CLOSED'].includes(status) ? status : 'CLOSED';
+}
+
+async function getMarketStateTool(env, ownerId) {
+  let check;
+  try { check = await verifyLiveMarket(env, ownerId); }
+  catch (error) {
+    return toolEnvelope(env, {
+      session: 'CLOSED', regime: null, regime_confidence: null, vix: null,
+      massive: 'BLOCKED', live_contracts: 0, underlyings_checked: 0,
+      quote_age_seconds: null, freshness_limit_seconds: 60,
+    }, { code: 'MASSIVE_BLOCKED', message: error.message });
+  }
+  const latest = await cycleSummary(env, ownerId);
+  const timestamps = check.symbols.flatMap((row) => [row.quoteAsOf, row.chainAsOf])
+    .map(epochMs).filter(Number.isFinite);
+  const oldest = timestamps.length ? Math.min(...timestamps) : null;
+  const quoteAge = oldest === null ? null : Math.max(0, (Date.now() - oldest) / 1000);
+  const session = normalizeSession(check.marketState?.status);
+  const latestAge = Number.isFinite(Number(latest?.at))
+    ? Math.max(0, (Date.now() - Number(latest.at)) / 1000) : Infinity;
+  const payload = {
+    session,
+    regime: latestAge <= 60 ? latest?.regime ?? null : null,
+    regime_confidence: latestAge <= 60 ? latest?.regimeConfidence ?? null : null,
+    vix: check.marketState?.vix ?? null,
+    massive: check.ok ? 'LIVE' : 'BLOCKED',
+    live_contracts: check.symbols.reduce((sum, row) => sum + row.contractCount, 0),
+    underlyings_checked: check.symbols.length,
+    quote_age_seconds: quoteAge,
+    freshness_limit_seconds: 60,
+    asof: check.checkedAt,
+  };
+  if (!check.ok) return toolEnvelope(env, payload, { code: 'MASSIVE_BLOCKED', message: 'Massive live market verification failed.' });
+  if (session !== 'RTH') return toolEnvelope(env, payload, { code: 'TRUTH/SESSION_NOT_RTH', message: `Market session is ${session}.` });
+  if (!Number.isFinite(quoteAge) || quoteAge > 60) {
+    return toolEnvelope(env, payload, { code: 'TRUTH/FACT_STALE', message: `Oldest quote is ${quoteAge ?? 'unknown'} seconds old.` });
+  }
+  return toolEnvelope(env, payload);
+}
+
+function accountCoordinator(env, ownerId) {
+  if (!env.ACCOUNT_COORDINATOR) throw new Error('ACCOUNT_COORDINATOR_NOT_CONFIGURED');
+  return env.ACCOUNT_COORDINATOR.getByName(ownerId);
+}
+
+export async function triggerShadowCycle(env, ownerId, { source = 'MCP' } = {}) {
+  if (authorityLevel(env) < AUTHORITY.SHADOW) {
+    return toolEnvelope(env, {}, { code: 'AUTHORITY_DENIED', message: 'Authority level does not permit shadow ranking.' });
+  }
+  const controls = await loadOperatorControls(env, ownerId);
+  if (controls.globalPause || controls.independentKill) {
+    const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    const cycleId = `CY-${ownerId.slice(0, 10)}-CONTROL-${date}`;
+    const code = controls.independentKill
+      ? 'CONSTITUTION/INDEPENDENT_KILL_SWITCH' : 'CONSTITUTION/GLOBAL_PAUSE';
+    const message = controls.independentKill
+      ? controls.independentKillReason : controls.globalPauseReason;
+    const existing = await cycleSummary(env, ownerId, cycleId);
+    const summary = existing ?? await recordBlocked(env, ownerId, cycleId, code, {
+      massiveStatus: 'BLOCKED', message: message ?? code,
+    });
+    return toolEnvelope(env, {
+      cycle_id: cycleId,
+      state: summary.state,
+      decision: summary.decision,
+      reason_code: summary.reasonCode,
+      reason: summary.reason,
+      evidence_fingerprint: summary.evidence?.decisionFingerprint ?? null,
+    }, { code: summary.reasonCode, message: summary.reason });
+  }
+  const provider = marketProvider(env);
+  const market = await provider.marketState();
+  const session = normalizeSession(market.value?.status);
+  if (market.error || session !== 'RTH') {
+    const sessionParts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date());
+    const part = (type) => sessionParts.find((entry) => entry.type === type)?.value ?? '00';
+    const sessionKey = `${part('year')}${part('month')}${part('day')}`;
+    const cycleId = `CY-${ownerId.slice(0, 10)}-SESSION-${sessionKey}`;
+    const existing = await cycleSummary(env, ownerId, cycleId);
+    const summary = existing ?? await recordBlocked(env, ownerId, cycleId,
+      market.error ? 'TRUTH/MARKET_STATE_UNAVAILABLE' : 'TRUTH/SESSION_NOT_RTH', {
+        session, massiveStatus: market.error ? 'BLOCKED' : 'LIVE',
+        message: market.error ?? `Market session is ${session}; RTH is required.`,
+      });
+    return toolEnvelope(env, {
+      cycle_id: summary.cycleId, state: summary.state, decision: summary.decision,
+      reason_code: summary.reasonCode, reason: summary.reason,
+      evidence_fingerprint: summary.evidence?.decisionFingerprint ?? null,
+    }, { code: summary.reasonCode, message: summary.reason });
+  }
+
+  const cycleId = cycleIdFor({ ownerId, source: 'SCHEDULED' });
+  const completed = await cycleSummary(env, ownerId, cycleId);
+  if (completed) {
+    return toolEnvelope(env, {
+      cycle_id: cycleId, state: completed.state, decision: completed.decision,
+      reason_code: completed.reasonCode ?? null, reason: completed.reason ?? null,
+      evidence_fingerprint: completed.evidence?.decisionFingerprint ?? null,
+      reused: true,
+    });
+  }
+
+  const schwab = await new SchwabD1Client(env).status(ownerId);
+  if (schwab.status !== 'CONNECTED') {
+    const summary = await recordBlocked(env, ownerId, cycleId, 'TRUTH/SCHWAB_DISCONNECTED', {
+      session,
+      massiveStatus: 'LIVE',
+      message: schwab.last_error_code ?? 'Schwab read-only custody is disconnected.',
+    });
+    return toolEnvelope(env, {
+      cycle_id: cycleId,
+      state: summary.state,
+      decision: summary.decision,
+      reason_code: summary.reasonCode,
+      reason: summary.reason,
+      evidence_fingerprint: summary.evidence?.decisionFingerprint ?? null,
+    }, { code: summary.reasonCode, message: summary.reason });
+  }
+
+  const coordinator = accountCoordinator(env, ownerId);
+  const lock = await coordinator.acquire(cycleId);
+  if (!lock.acquired) {
+    return toolEnvelope(env, {
+      cycle_id: lock.cycle_id, state: lock.state ?? 'TRIGGERED', decision: 'REFUSED',
+      reason_code: 'LOCK_HELD', reason: 'Another cycle is already active for this account.',
+      evidence_fingerprint: null, reused: true,
+    }, { code: 'LOCK_HELD', message: 'Another cycle is already active for this account.' });
+  }
+  if (!env.SHADOW_CYCLE_WORKFLOW) {
+    await coordinator.finish(cycleId, 'REFUSED', { code: 'WORKFLOW_NOT_CONFIGURED' });
+    return toolEnvelope(env, { cycle_id: cycleId }, {
+      code: 'WORKFLOW_NOT_CONFIGURED', message: 'The Stage 2 shadow Workflow binding is missing.',
+    });
+  }
+  try {
+    await env.SHADOW_CYCLE_WORKFLOW.create({
+      id: cycleId,
+      params: { ownerId, cycleId, source },
+      retention: { successRetention: '30 days', errorRetention: '30 days' },
+    });
+  } catch (error) {
+    await coordinator.finish(cycleId, 'REFUSED', { code: 'WORKFLOW_START_FAILED', message: error.message });
+    return toolEnvelope(env, { cycle_id: cycleId }, { code: 'WORKFLOW_START_FAILED', message: error.message });
+  }
+  return toolEnvelope(env, {
+    cycle_id: cycleId, state: 'TRIGGERED', decision: 'REFUSED',
+    reason_code: null, reason: null, evidence_fingerprint: null,
+  });
+}
+
+async function getCycleTool(env, ownerId, cycleId) {
+  const summary = await cycleSummary(env, ownerId, cycleId);
+  if (!summary) return toolEnvelope(env, { cycle_id: cycleId }, { code: 'NOT_FOUND', message: 'Cycle not found.' });
+  const events = await env.DB.prepare(`SELECT sequence,state,role,detail_json,created_at
+    FROM cycle_state_events WHERE owner_id=? AND cycle_id=? ORDER BY sequence ASC`).bind(ownerId, cycleId).all();
+  return toolEnvelope(env, {
+    cycle_id: cycleId,
+    state: summary.state,
+    decision: summary.decision,
+    reason_code: summary.reasonCode ?? null,
+    reason: summary.reason ?? null,
+    evidence_fingerprint: summary.evidence?.decisionFingerprint ?? null,
+    created_at: new Date(summary.at).toISOString(),
+    states: (events.results ?? []).map((event) => ({
+      ...event, detail: parseJson(event.detail_json, {}), detail_json: undefined,
+    })),
+  });
+}
+
+async function listCyclesTool(env, ownerId, limit) {
+  const rows = await env.DB.prepare(`SELECT cycle_id,state,decision,reason_code,
+    evidence_fingerprint,created_at,updated_at FROM cycle_summaries
+    WHERE owner_id=? ORDER BY created_at DESC LIMIT ?`).bind(ownerId, limit).all();
+  return toolEnvelope(env, {
+    cycles: rows.results ?? [],
+  });
+}
+
+async function contextFor(env, ownerId, cycleId = null) {
+  const store = new D1R2CycleContextStore({ db: env.DB, bucket: env.EVIDENCE, ownerId });
+  return cycleId ? store.get(cycleId) : store.latest();
+}
+
+async function listRankedOpportunitiesTool(env, ownerId, cycleId = null) {
+  const context = await contextFor(env, ownerId, cycleId);
+  if (!context) return toolEnvelope(env, { cycle_id: cycleId, candidates: [] }, { code: 'NOT_FOUND', message: 'No sealed cycle context exists.' });
+  return toolEnvelope(env, {
+    cycle_id: context.cycle_id,
+    decision: context.decision,
+    candidates: context.candidates,
+    empty_reason: context.candidates.length ? null : context.reason ?? context.reason_code ?? 'NO_CANDIDATES',
+    asof: context.created_at,
+  });
+}
+
+async function explainCandidateTool(env, ownerId, { cycleId, candidateId: id, rank }) {
+  const context = await contextFor(env, ownerId, cycleId);
+  if (!context) return toolEnvelope(env, { cycle_id: cycleId }, { code: 'NOT_FOUND', message: 'Cycle context not found.' });
+  const candidate = id
+    ? context.candidates.find((row) => row.candidate_id === id)
+    : context.candidates.find((row) => row.rank === rank);
+  if (!candidate) return toolEnvelope(env, { cycle_id: cycleId }, { code: 'NOT_FOUND', message: 'Candidate is not in the sealed cycle package.' });
+  return toolEnvelope(env, {
+    cycle_id: cycleId,
+    candidate,
+    why_passed: candidate.pass_reasons,
+    why_alternatives_failed: context.rejections,
+    portfolio_risk: candidate.portfolio_risk,
+    asof: context.created_at,
+  });
+}
+
+async function explainRejectionTool(env, ownerId, cycleId) {
+  const context = await contextFor(env, ownerId, cycleId);
+  if (!context) return toolEnvelope(env, { cycle_id: cycleId }, { code: 'NOT_FOUND', message: 'Cycle context not found.' });
+  const timestamps = Object.values(context.quote_timestamps ?? {}).flatMap((row) => [row.quote, row.chain])
+    .map((value) => Number(value)).filter(Number.isFinite);
+  const oldest = timestamps.length ? Math.min(...timestamps) : null;
+  return toolEnvelope(env, {
+    cycle_id: cycleId,
+    reason_code: context.reason_code,
+    reason: context.reason,
+    failing_gate: context.rejections[0] ?? null,
+    quote_age_seconds: oldest == null ? null : Math.max(0, (Date.parse(context.created_at) - oldest) / 1000),
+    session: context.session,
+    recon_mismatches: context.rejections.filter((entry) => /RECON|MISMATCH|POSITION|ORDER/u.test(entry.code)),
+    asof: context.created_at,
+  });
+}
+
+async function evidencePackage(env, ownerId, { cycleId = null, fingerprint = null }) {
+  const row = cycleId
+    ? await env.DB.prepare(`SELECT object_key FROM evidence_index WHERE owner_id=? AND cycle_id=?`).bind(ownerId, cycleId).first()
+    : await env.DB.prepare(`SELECT object_key FROM evidence_index WHERE owner_id=?
+      AND decision_fingerprint LIKE ? ORDER BY created_at DESC LIMIT 1`).bind(ownerId, `${fingerprint}%`).first();
+  if (!row) return null;
+  const object = await env.EVIDENCE.get(row.object_key);
+  if (!object) throw new Error(`EVIDENCE_OBJECT_MISSING:${row.object_key}`);
+  const record = await object.json();
+  const { previousHash: _previousHash, sequence: _sequence, chainHash: _chainHash, ...pkg } = record;
+  return pkg;
+}
+
+async function replayEvidenceTool(env, ownerId, input) {
+  if (!input.cycleId && !input.fingerprint) {
+    return toolEnvelope(env, {}, { code: 'INPUT_REQUIRED', message: 'Provide cycle_id or fingerprint.' });
+  }
+  const pkg = await evidencePackage(env, ownerId, input);
+  if (!pkg) return toolEnvelope(env, { cycle_id: input.cycleId }, { code: 'NOT_FOUND', message: 'Evidence package not found.' });
+  let reproduced;
+  let differences;
+  if (pkg.inputs?.data?.operationalRefusal) {
+    reproduced = verifyEvidence(pkg) && verifyFingerprint(pkg) && pkg.decision === 'REFUSED';
+    differences = reproduced ? [] : ['Operational refusal evidence failed integrity or fingerprint verification.'];
+  } else {
+    const result = await replay(pkg);
+    reproduced = result.reproduced;
+    differences = result.differences ?? [result.reason].filter(Boolean);
+  }
+  const status = reproduced ? 'MATCH' : 'DRIFT';
+  await audit(env, ownerId, reproduced ? 'EVIDENCE_REPLAY_MATCH' : 'EVIDENCE_REPLAY_DRIFT', {
+    cycleId: pkg.cycleId, fingerprint: pkg.decisionFingerprint, differences,
+  });
+  return toolEnvelope(env, {
+    cycle_id: pkg.cycleId,
+    status,
+    fingerprint: pkg.decisionFingerprint,
+    differences,
+    quarantine_required: !reproduced,
+  }, reproduced ? null : { code: 'EVIDENCE_DRIFT', message: 'Replay differs from the sealed decision; quarantine is required.' });
+}
+
+async function listEvidenceTool(env, ownerId, limit) {
+  const rows = await env.DB.prepare(`SELECT sequence,cycle_id,decision_fingerprint,
+    decision,created_at FROM evidence_index WHERE owner_id=?
+    ORDER BY sequence DESC LIMIT ?`).bind(ownerId, limit).all();
+  return toolEnvelope(env, {
+    records: (rows.results ?? []).map((row) => ({
+      seq: row.sequence,
+      cycle_id: row.cycle_id,
+      fingerprint_prefix: String(row.decision_fingerprint ?? '').slice(0, 16),
+      created_at: row.created_at,
+      decision: row.decision,
+    })),
+    raw_packages: 'R2_PROTECTED_NOT_RETURNED',
+  });
+}
+
+export function createMcpService(env, ownerId) {
+  return Object.freeze({
+    getAccountTruth: () => getAccountTruthTool(env, ownerId),
+    getMarketState: () => getMarketStateTool(env, ownerId),
+    runShadowCycle: () => triggerShadowCycle(env, ownerId, { source: 'MCP' }),
+    getCycle: (cycleId) => getCycleTool(env, ownerId, cycleId),
+    listCycles: (limit) => listCyclesTool(env, ownerId, limit),
+    listRankedOpportunities: (cycleId) => listRankedOpportunitiesTool(env, ownerId, cycleId),
+    explainCandidate: (input) => explainCandidateTool(env, ownerId, input),
+    explainRejection: (cycleId) => explainRejectionTool(env, ownerId, cycleId),
+    replayEvidence: (input) => replayEvidenceTool(env, ownerId, input),
+    listEvidence: (limit) => listEvidenceTool(env, ownerId, limit),
+    authorityDenied: (tool, required, cycleId) => toolEnvelope(env, { cycle_id: cycleId }, {
+      code: 'AUTHORITY_DENIED',
+      message: `${tool} requires authority level ${required}; current level is ${authorityLevel(env)}.`,
+    }),
+  });
+}
+
+export async function executeShadowWorkflow(env, { ownerId, cycleId, source }, step) {
+  const coordinator = accountCoordinator(env, ownerId);
+  try {
+    const result = await step.do('run deterministic VSIM shadow cycle', async () =>
+      runShadowCycle(env, ownerId, { source, cycleIdOverride: cycleId }));
+    await step.do('release account cycle lock', async () => {
+      await coordinator.finish(cycleId, result.state ?? 'SHADOW_RECORDED', {
+        decision: result.decision, reasonCode: result.reasonCode ?? null,
+      });
+      return { released: true };
+    });
+    return result;
+  } catch (error) {
+    await step.do('fail closed and release account cycle lock', async () => {
+      await coordinator.finish(cycleId, 'REFUSED', { code: 'WORKFLOW_FAILED', message: error.message });
+      return { released: true };
+    });
+    throw error;
+  }
 }
 
 function dashboardHtml() {
@@ -576,7 +1239,7 @@ export function liveDashboardScript() {
       text(q('#overview .system-brief .status-badge'), 'LIVE SHADOW');
       text(q('#overview .readiness'), '1 / 5');
       const scoreNotes = qa('#overview .scorecard .score-rows small');
-      ['Collecting shadow outcomes','Awaiting 50 mature observations','Mutation intentionally disabled','Clean','Collecting survival evidence'].forEach((value, index) => text(scoreNotes[index], value));
+      ['Collecting shadow outcomes','Uncalibrated · non-blocking','Mutation intentionally disabled','Clean','Collecting survival evidence'].forEach((value, index) => text(scoreNotes[index], value));
     }
   }
 
@@ -633,16 +1296,29 @@ export function liveDashboardScript() {
       { status: status.schedule || 'Every 15 minutes', note: 'Single-flight cycles use distributed D1 leases and deterministic IDs.', values: ['Market-session gate','Distributed idempotency','Single-flight lease','Fail-closed refusal evidence'] },
     ];
     connectors.forEach((card, index) => { const state = states[index]; if (!state) return; text(q('.connector-status', card), state.status); text(q('.connector-note', card), state.note); qa('li b', card).forEach((node, valueIndex) => text(node, state.values[valueIndex] || 'Active')); });
-    const ladder = qa('#system .ladder > div'); if (ladder[1]) { text(q('small', ladder[1]), 'Current live shadow'); }
+    const ladderPanel = q('#system .authority-ladder');
+    text(q('h3', ladderPanel), 'Authority changes require the Principal');
+    const ladder = qa('#system .ladder > div');
+    if (ladder[1]) text(q('small', ladder[1]), 'Current live shadow');
+    if (ladder[2]) text(q('small', ladder[2]), 'Explicit Constitution amendment');
     let controls = q('#system .operator-controls');
     if (!controls) {
       controls = make('article', undefined, 'panel operator-controls');
       controls.append(make('p', 'Protected operator controls', 'kicker'), make('h3', 'Live shadow operations'));
+      controls.append(make('p', '', 'control-status connector-note'));
       const actions = make('div', undefined, 'filter-row');
-      [['refresh','Refresh status'],['custody','Refresh Schwab'],['market','Verify Massive chains'],['baseline','Capture reconciliation baseline'],['cycle','Run opportunity scan']].forEach(pair => { const button = make('button', pair[1], 'chip'); button.dataset.action = pair[0]; actions.append(button); });
-      controls.append(actions, make('p', 'These controls read custody, verify market data, capture a reconciliation baseline, or run a shadow simulation. None can submit, replace, or cancel an order.', 'connector-note'), make('pre', 'Ready.', 'operator-output'));
-      const ladderPanel = q('#system .authority-ladder'); ladderPanel.parentNode.insertBefore(controls, ladderPanel);
+      [['refresh','Refresh status'],['cycle','Run shadow cycle'],['replay','Replay latest evidence'],
+        ['pause','Global pause'],['resume','Resume cycles'],['kill','Trip kill switch'],['clearKill','Clear kill switch']]
+        .forEach(pair => { const button = make('button', pair[1], 'chip'); button.dataset.action = pair[0]; actions.append(button); });
+      const reason = make('input', undefined, 'control-reason');
+      reason.type = 'text'; reason.maxLength = 240; reason.placeholder = 'Required reason for pause / resume / kill / clear';
+      controls.append(actions, reason, make('p', 'Normal mission-control actions are limited to running a shadow cycle or replaying sealed evidence. Global pause and the independent kill switch are separate safety controls. None can submit, replace, or cancel an order.', 'connector-note'), make('pre', 'Ready.', 'operator-output'));
+      ladderPanel.parentNode.insertBefore(controls, ladderPanel);
     }
+    const safety = status.controls || {};
+    text(q('.control-status', controls), 'GLOBAL PAUSE: ' + (safety.globalPause ? 'ACTIVE' : 'CLEAR')
+      + ' · INDEPENDENT KILL: ' + (safety.independentKill ? 'TRIPPED' : 'CLEAR')
+      + (safety.updatedAt ? ' · ' + when(safety.updatedAt) : ''));
   }
 
   let currentStatus = null;
@@ -657,14 +1333,29 @@ export function liveDashboardScript() {
 
   async function operate(action, button) {
     const output = q('.operator-output');
+    const reason = (q('.control-reason') && q('.control-reason').value || '').trim();
+    const control = (controlAction, confirm) => api('/api/operator/controls', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: controlAction, reason, confirm }),
+    });
     const operations = {
       refresh: () => Promise.resolve(),
-      custody: () => api('/api/operator/custody/refresh', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'REFRESH_READ_ONLY_CUSTODY' }) }),
-      market: () => api('/api/operator/market/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
-      baseline: () => api('/api/operator/baseline', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'CAPTURE_READ_ONLY_BASELINE' }) }),
       cycle: () => api('/api/cycle', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() }, body: '{}' }),
+      replay: () => api('/api/operator/replay', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cycle_id: currentStatus && currentStatus.latestCycle && currentStatus.latestCycle.cycleId }) }),
+      pause: () => control('PAUSE', 'PAUSE_SHADOW_CYCLES'),
+      resume: () => control('RESUME', 'RESUME_SHADOW_CYCLES'),
+      kill: () => control('KILL', 'TRIP_INDEPENDENT_KILL_SWITCH'),
+      clearKill: () => control('CLEAR_KILL', 'CLEAR_INDEPENDENT_KILL_SWITCH'),
     };
-    const confirmations = { custody: 'Refresh the read-only Schwab custody snapshot?', baseline: 'Capture the current Schwab state as the reconciliation baseline?', cycle: 'Run a live-data shadow opportunity simulation? It cannot place an order.' };
+    const confirmations = {
+      cycle: 'Run a live-data shadow opportunity simulation? It cannot place an order.',
+      pause: 'Pause all shadow cycles?', resume: 'Resume shadow cycles?',
+      kill: 'Trip the independent kill switch and block every new cycle?',
+      clearKill: 'Clear the independent kill switch after verifying its cause is gone?',
+    };
+    if (['pause','resume','kill','clearKill'].includes(action) && reason.length < 8) {
+      text(output, 'REFUSED: enter a reason of at least 8 characters.'); return;
+    }
     if (confirmations[action] && !window.confirm(confirmations[action])) return;
     if (!operations[action]) return;
     if (button) button.disabled = true; text(output, 'Working…');
@@ -685,9 +1376,17 @@ export function liveDashboardScript() {
 })();`;
 }
 
-async function route(request, env) {
+async function route(request, env, ctx) {
   const url = new URL(request.url);
   if (url.pathname === '/health') return json(publicStatus(env));
+  if (url.pathname === '/mcp') {
+    let owner;
+    try { owner = await authenticateAccess(request, env, { allowServiceToken: true }); }
+    catch (error) { return json({ error: error.message }, 401); }
+    return handleVsimMcp({
+      request, env, ctx, owner, service: createMcpService(env, owner.id),
+    });
+  }
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname.startsWith('/design/'))) {
     try { await authenticateAccess(request, env); }
     catch (error) { return json({ error: error.message }, 401); }
@@ -763,11 +1462,38 @@ async function route(request, env) {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     return json(await verifyLiveMarket(env, owner.id));
   }
+  if (url.pathname === '/api/operator/controls' && request.method === 'POST') {
+    try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
+    const body = await request.json().catch(() => ({}));
+    const confirmations = {
+      PAUSE: 'PAUSE_SHADOW_CYCLES',
+      RESUME: 'RESUME_SHADOW_CYCLES',
+      KILL: 'TRIP_INDEPENDENT_KILL_SWITCH',
+      CLEAR_KILL: 'CLEAR_INDEPENDENT_KILL_SWITCH',
+    };
+    if (!confirmations[body.action] || body.confirm !== confirmations[body.action]) {
+      return json({ error: 'EXPLICIT_CONTROL_CONFIRMATION_REQUIRED' }, 400);
+    }
+    try {
+      return json({ ok: true, controls: await updateOperatorControls(env, owner.id, body) });
+    } catch (error) {
+      return json({ error: error.message }, 400);
+    }
+  }
+  if (url.pathname === '/api/operator/replay' && request.method === 'POST') {
+    try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
+    const body = await request.json().catch(() => ({}));
+    const latest = body.cycle_id ? null : await cycleSummary(env, owner.id);
+    const cycleId = body.cycle_id ?? latest?.cycleId ?? null;
+    if (!cycleId) return json({ error: 'NO_SEALED_CYCLE' }, 404);
+    const result = await replayEvidenceTool(env, owner.id, { cycleId, fingerprint: null });
+    return json(result, result.ok ? 200 : 409);
+  }
   if (url.pathname === '/api/cycle' && request.method === 'POST') {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     const idempotencyKey = request.headers.get('idempotency-key');
     if (!idempotencyKey) return json({ error: 'OPERATOR_IDEMPOTENCY_KEY_REQUIRED' }, 400);
-    return json(await runShadowCycle(env, owner.id, { source: 'OPERATOR', idempotencyKey }));
+    return json(await triggerShadowCycle(env, owner.id, { source: 'OPERATOR', idempotencyKey }));
   }
   if (url.pathname === '/api/evidence' && request.method === 'GET') {
     const rows = await env.DB.prepare(`SELECT cycle_id,sequence,evidence_hash,chain_hash,
@@ -779,8 +1505,8 @@ async function route(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
-    try { return await route(request, env); }
+  async fetch(request, env, ctx) {
+    try { return await route(request, env, ctx); }
     catch (error) {
       console.error('NUVO VSIM v5 shadow error', error);
       return json({ error: 'FAIL_CLOSED', reason: error.message }, 503);
@@ -791,7 +1517,7 @@ export default {
       const owners = await env.DB.prepare(`SELECT owner_id FROM broker_connections
         WHERE status IN ('CONNECTED','DEGRADED') ORDER BY updated_at ASC`).all();
       for (const owner of owners.results ?? []) {
-        try { await runShadowCycle(env, owner.owner_id, { source: 'SCHEDULED' }); }
+        try { await triggerShadowCycle(env, owner.owner_id, { source: 'SCHEDULED' }); }
         catch (error) { await audit(env, owner.owner_id, 'SCHEDULED_SHADOW_FAILED', { error: error.message }); }
       }
     })());

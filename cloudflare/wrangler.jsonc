@@ -1,13 +1,32 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "nuvo-vsim-v5-shadow",
-  "main": "worker.js",
-  "compatibility_date": "2026-08-20",
+  "main": "entry.js",
+  "compatibility_date": "2026-08-24",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "invocation_logs": true }
+  },
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "triggers": { "crons": ["*/15 13-21 * * 1-5"] },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ACCOUNT_COORDINATOR", "class_name": "VsimAccountCoordinator" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["VsimAccountCoordinator"] }
+  ],
+  "workflows": [
+    {
+      "binding": "SHADOW_CYCLE_WORKFLOW",
+      "name": "nuvo-vsim-stage2-shadow-cycle",
+      "class_name": "ShadowCycleWorkflow"
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -24,6 +43,7 @@
   ],
   "vars": {
     "NUVO_ENVIRONMENT": "shadow",
+    "NUVO_AUTHORITY_LEVEL": "1",
     "NUVO_BROKER_MODE": "READ_ONLY",
     "NUVO_BROKER_EXECUTION_MODE": "SHADOW_ONLY",
     "NUVO_SYMBOLS": "SPY,QQQ,IWM",

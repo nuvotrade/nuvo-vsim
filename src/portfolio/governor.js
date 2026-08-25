@@ -188,6 +188,9 @@ export function govern({
   });
   const cluster = clusterOf(clustering, candidate.underlying);
   const currentExp = exposures(positions, clustering, { nav });
+  const portfolioBefore = checkLimits({
+    positions, nav, limits, clustering, drawdownPct,
+  });
   const clusterExposure = currentExp.byCluster[cluster?.id ?? `SOLO:${candidate.underlying}`] ?? 0;
 
   // Average correlation of the candidate against what is already held.
@@ -206,7 +209,7 @@ export function govern({
 
   if (sizing.contracts === 0) {
     return {
-      approved: false, sizing, clustering, cluster,
+      approved: false, sizing, clustering, cluster, portfolioBefore,
       violations: [violation(TIER.CAPITAL_EFFICIENCY, 'SIZE_ZERO', sizing.zeroReason ?? 'Size resolved to zero.')],
     };
   }
@@ -221,7 +224,7 @@ export function govern({
   // than the one it was about to create.
   if (!isNum(spot) || spot <= 0) {
     return {
-      approved: false, sizing, clustering, cluster,
+      approved: false, sizing, clustering, cluster, portfolioBefore,
       violations: [violation(TIER.TRUTH, 'SPOT_UNAVAILABLE',
         `No verified spot price for ${candidate.underlying}; portfolio exposure cannot be measured.`)],
     };
@@ -316,6 +319,7 @@ export function govern({
     cluster,
     clusterExposure,
     clusterCorrelation,
+    portfolioBefore,
     portfolio: check,
     stress,
     portfolioCvar,

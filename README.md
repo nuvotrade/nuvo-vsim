@@ -23,7 +23,8 @@ with spectacular expectancy that violates a survival limit is rejected as
 ## Quick start
 
 ```bash
-npm test                              # 270 tests, no dependencies
+npm install                           # Cloudflare MCP/Workers adapter packages
+npm test                              # 288 deterministic and Stage 2 tests
 
 node bin/nuvo.js cycle                # one decision cycle + the dashboard
 node bin/nuvo.js simulate --cycles 12 # repeated cycles against a synthetic market
@@ -33,8 +34,9 @@ node bin/nuvo.js research             # research gates and the bootstrap
 node bin/nuvo.js evidence             # build and inspect an evidence package
 ```
 
-Zero dependencies. Plain ES modules on Node 20+, and the same modules run
-unchanged in a Cloudflare Worker.
+The deterministic engine under `src/` remains zero-dependency plain ES modules
+on Node 20+. The Cloudflare adapter adds the official MCP/Agents SDK, Zod, and
+Wrangler as deployment dependencies; it does not move calculations into AI.
 
 ---
 
@@ -84,6 +86,20 @@ Verified across a volatility-risk-premium sweep:
 
 The decision cycle that composes them is `src/pipeline/cycle.js`.
 `src/engine.js` wires the long-lived components together.
+
+### Stage 2 AI desk
+
+`cloudflare/mcp-server.js` exposes the narrow authenticated `nuvo-vsim` MCP
+surface. MASTER CHIEF may read, explain, replay, and start autonomous shadow
+cycles. The MCP server has no free-form broker order, Constitution mutation,
+gate override, or LLM calculation tool.
+
+A per-account SQLite Durable Object supplies the single-flight lock and a
+Cloudflare Workflow runs the existing deterministic cycle. D1 indexes cycle
+states and hashes; R2 stores immutable evidence and CycleContext bodies. The
+human dashboard remains read-only mission control.
+
+See `docs/AI_DESK.md` for the exact authority boundary and deployment gates.
 
 ---
 

@@ -36,7 +36,7 @@ async function sha256Hex(value) {
 }
 
 /** Validate Cloudflare Access at the Worker boundary; forwarded email headers alone are never trusted. */
-export async function authenticateAccess(request, env) {
+export async function authenticateAccess(request, env, { allowServiceToken = false } = {}) {
   if (!env.ACCESS_AUD || !env.ACCESS_TEAM_DOMAIN || !env.ACCESS_OWNER_ID) {
     throw new Error('ACCESS_NOT_CONFIGURED');
   }
@@ -52,6 +52,9 @@ export async function authenticateAccess(request, env) {
   if (!Number.isFinite(payload.exp) || payload.exp <= nowSeconds) throw new Error('ACCESS_TOKEN_EXPIRED');
   if (Number.isFinite(payload.nbf) && payload.nbf > nowSeconds + 30) throw new Error('ACCESS_TOKEN_NOT_YET_VALID');
   if (!audienceMatches(payload.aud, env.ACCESS_AUD)) throw new Error('ACCESS_TOKEN_AUDIENCE_INVALID');
+  if (payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}.cloudflareaccess.com`) {
+    throw new Error('ACCESS_TOKEN_ISSUER_INVALID');
+  }
   const certs = await certificates(env.ACCESS_TEAM_DOMAIN);
   const jwk = (certs.keys ?? []).find((candidate) => candidate.kid === header.kid);
   if (!jwk) throw new Error('ACCESS_SIGNING_KEY_UNKNOWN');
@@ -65,8 +68,27 @@ export async function authenticateAccess(request, env) {
   );
   if (!valid) throw new Error('ACCESS_TOKEN_SIGNATURE_INVALID');
   const email = String(payload.email ?? '').trim().toLowerCase();
-  if (!email || !email.includes('@')) throw new Error('ACCESS_IDENTITY_MISSING');
-  const id = await sha256Hex(email);
-  if (id !== env.ACCESS_OWNER_ID) throw new Error('ACCESS_IDENTITY_NOT_ALLOWED');
-  return Object.freeze({ id, email, subject: payload.sub ?? null });
+  if (email && email.includes('@')) {
+    const id = await sha256Hex(email);
+    if (id !== env.ACCESS_OWNER_ID) throw new Error('ACCESS_IDENTITY_NOT_ALLOWED');
+    return Object.freeze({ id, email, subject: payload.sub ?? null, serviceToken: false });
+  }
+
+  // Cloudflare Access service-token application JWTs carry the client ID in
+  // `common_name` and an empty subject. They are accepted only on explicitly
+  // machine-enabled routes and only when pinned to the configured shadow
+  // token ID. The token secret remains at the Access edge and is never read
+  // or returned by this Worker.
+  const commonName = String(payload.common_name ?? '');
+  if (!allowServiceToken || !env.MCP_SERVICE_TOKEN_ID
+    || commonName !== env.MCP_SERVICE_TOKEN_ID) {
+    throw new Error('ACCESS_IDENTITY_MISSING');
+  }
+  return Object.freeze({
+    id: env.ACCESS_OWNER_ID,
+    email: null,
+    subject: null,
+    commonName,
+    serviceToken: true,
+  });
 }

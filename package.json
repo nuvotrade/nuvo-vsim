@@ -3,7 +3,7 @@
   "version": "5.0.0",
   "private": true,
   "type": "module",
-  "description": "NUVO VSIM \u2014 an autonomous capital-allocation and options-underwriting system.",
+  "description": "NUVO VSIM — an autonomous capital-allocation and options-underwriting system.",
   "engines": {
     "node": ">=20"
   },
@@ -27,6 +27,13 @@
     "research": "node bin/nuvo.js research",
     "scoreboard": "node bin/nuvo.js scoreboard"
   },
-  "dependencies": {},
-  "devDependencies": {}
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.21.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "wrangler": "4.125.0"
+  }
 }

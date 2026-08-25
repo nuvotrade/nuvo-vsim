@@ -24,16 +24,20 @@ describe('protected live dashboard', () => {
   test('ships syntactically valid live bindings for every protected shadow surface', () => {
     const source = liveDashboardScript();
     assert.doesNotThrow(() => new Function(source));
-    for (const path of ['/api/status', '/api/evidence', '/api/operator/custody/refresh',
-      '/api/operator/market/check', '/api/operator/baseline', '/api/cycle']) {
+    for (const path of ['/api/status', '/api/evidence', '/api/operator/replay',
+      '/api/operator/controls', '/api/cycle']) {
       assert.match(source, new RegExp(path.replaceAll('/', '\\/'), 'u'));
     }
+    assert.doesNotMatch(source, /\/api\/operator\/(custody\/refresh|market\/check|baseline)/u);
     assert.doesNotMatch(source, /submitOrder|replaceOrder|cancelOrder/u);
     assert.match(source, /Signed cash balance/u);
     assert.match(source, /account\.cash/u);
     assert.doesNotMatch(source, /text\(q\('\.metric-value', cards\[1\]\), money\(account\.buyingPower\)\)/u);
     assert.match(source, /positions\.every\(position => present\(position\.marketValue\)\)/u);
     assert.doesNotMatch(source, /Math\.abs\(Number\(position\.marketValue\)/u);
+    assert.match(source, /Authority changes require the Principal/u);
+    assert.match(source, /Explicit Constitution amendment/u);
+    assert.doesNotMatch(source, /Awaiting 50 mature observations/u);
   });
 });
 
