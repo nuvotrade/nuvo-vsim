@@ -641,7 +641,7 @@ export class SchwabD1Client {
   }
 
   async ledgerStatus(ownerId) {
-    const [states, totals] = await Promise.all([
+    const [states, totals, anomalies] = await Promise.all([
       this.env.DB.prepare(`SELECT account_mask,coverage_start,coverage_end,status,
         events_ingested,last_error,updated_at FROM broker_ledger_sync_state
         WHERE owner_id=? ORDER BY account_mask`).bind(ownerId).all(),
@@ -650,9 +650,12 @@ export class SchwabD1Client {
         MIN(CASE WHEN transaction_id IS NOT NULL THEN occurred_at END) AS earliest_transaction,
         MAX(CASE WHEN transaction_id IS NOT NULL THEN occurred_at END) AS latest_transaction
         FROM broker_events WHERE owner_id=?`).bind(ownerId).first(),
+      this.env.DB.prepare(`SELECT COUNT(*) AS count FROM broker_observation_anomalies
+        WHERE owner_id=?`).bind(ownerId).first(),
     ]);
     const accounts = states.results ?? [];
     return { accounts, ...totals,
+      observation_chain_anomalies: Number(anomalies?.count ?? 0),
       complete: accounts.length > 0 && accounts.every((row) => row.status === 'COMPLETE') };
   }
 
