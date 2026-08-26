@@ -38,6 +38,7 @@
   "r2_buckets": [
     { "binding": "EVIDENCE", "bucket_name": "nuvo-vsim-v5-evidence-shadow" }
   ],
+  "ai": { "binding": "AI" },
   "services": [
     { "binding": "MARKET", "service": "master", "environment": "production" }
   ],
@@ -57,6 +58,8 @@
     "NUVO_SCREEN_SAMPLES": "1500",
     "NUVO_DECISION_SAMPLES": "8000",
     "NUVO_REFINE_TOP": "8",
+    "NUVO_AI_MODEL": "@cf/openai/gpt-oss-120b",
+    "TELEGRAM_BOT_USERNAME": "nuvovsim_bot",
     "PUBLIC_ORIGIN": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev",
     "SCHWAB_CALLBACK_URL": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev/api/integrations/schwab/callback",
     "ACCESS_TEAM_DOMAIN": "yulgutierrez",

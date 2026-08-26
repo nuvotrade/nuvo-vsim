@@ -21,6 +21,9 @@ import {
   evaluateGuardian, guardianDiscordPayload, guardianReport, GUARDIAN_MANDATE_VERSION, GUARDIAN_STATES,
   shouldNotifyGuardian,
 } from './guardian.js';
+import {
+  handleTelegramWebhook, telegramAssistantStatus,
+} from './telegram-assistant.js';
 
 const JSON_HEADERS = Object.freeze({
   'content-type': 'application/json; charset=utf-8',
@@ -1672,6 +1675,17 @@ export function liveDashboardScript() {
 async function route(request, env, ctx) {
   const url = new URL(request.url);
   if (url.pathname === '/health') return json(publicStatus(env));
+  if (url.pathname === '/api/integrations/telegram/webhook' && request.method === 'POST') {
+    if (!env.ACCESS_OWNER_ID) return json({ error: 'TELEGRAM_OWNER_NOT_CONFIGURED' }, 503);
+    return handleTelegramWebhook({
+      request,
+      env,
+      ctx,
+      ownerId: env.ACCESS_OWNER_ID,
+      service: createMcpService(env, env.ACCESS_OWNER_ID),
+      reviewGuardian: (options) => runGuardianReview(env, env.ACCESS_OWNER_ID, options),
+    });
+  }
   if (url.pathname === '/mcp') {
     let owner;
     try { owner = await authenticateAccess(request, env, { allowServiceToken: true }); }
@@ -1709,6 +1723,9 @@ async function route(request, env, ctx) {
 
   const client = new SchwabD1Client(env);
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
+  if (url.pathname === '/api/integrations/telegram/status' && request.method === 'GET') {
+    return json(await telegramAssistantStatus(env, owner.id));
+  }
   if (url.pathname === '/api/guardian' && request.method === 'GET') {
     const [review, ledger, pending] = await Promise.all([
       latestGuardianReview(env, owner.id), guardianLedgerSummary(env, owner.id, 1),
