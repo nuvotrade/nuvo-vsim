@@ -1,5 +1,6 @@
 import { DurableObject, WorkflowEntrypoint } from 'cloudflare:workers';
 import { executeShadowWorkflow } from './worker.js';
+import { SchwabD1Client } from './schwab-client.js';
 
 const LOCK_TTL_MS = 15 * 60 * 1000;
 
@@ -9,6 +10,7 @@ export class VsimAccountCoordinator extends DurableObject {
     this.ctx = ctx;
     this.env = env;
     this.sql = ctx.storage.sql;
+    this.snapshotTail = Promise.resolve();
 
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`
@@ -91,6 +93,12 @@ export class VsimAccountCoordinator extends DurableObject {
 
   async status() {
     return [...this.sql.exec('SELECT * FROM active_cycle WHERE singleton = 1')][0] ?? null;
+  }
+
+  async reconciledSnapshot(ownerId) {
+    const task = this.snapshotTail.then(() => new SchwabD1Client(this.env).snapshot(ownerId));
+    this.snapshotTail = task.catch(() => undefined);
+    return task;
   }
 
   #record(cycleId, state, detail) {

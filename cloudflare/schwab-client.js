@@ -2,6 +2,8 @@ const AUTH_URL = 'https://api.schwabapi.com/v1/oauth/authorize';
 const TOKEN_URL = 'https://api.schwabapi.com/v1/oauth/token';
 const TRADER_URL = 'https://api.schwabapi.com/trader/v1';
 const MARKETDATA_URL = 'https://api.schwabapi.com/marketdata/v1';
+const DAY_MS = 24 * 60 * 60 * 1000;
+const TRANSACTION_TYPES = 'TRADE,RECEIVE_AND_DELIVER,DIVIDEND_OR_INTEREST,ACH_RECEIPT,ACH_DISBURSEMENT,CASH_RECEIPT,CASH_DISBURSEMENT,ELECTRONIC_FUND,WIRE_OUT,WIRE_IN,JOURNAL,MEMORANDUM,MARGIN_CALL,MONEY_MARKET,SMA_ADJUSTMENT';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 import { normalizedBrokerEventKey } from './guardian.js';
@@ -199,26 +201,46 @@ function flattenOrderEvents(order, accountMask, observedAt, rows = []) {
   return rows;
 }
 
-function normalizeTransaction(transaction, accountMask, observedAt) {
-  const transferItems = transaction?.transferItems ?? [];
-  const item = transferItems.find((candidate) => {
-    const assetType = String(candidate?.instrument?.assetType ?? '').toUpperCase();
-    return assetType && !['CURRENCY', 'CASH_EQUIVALENT'].includes(assetType);
-  }) ?? transferItems[0] ?? {};
-  const instrument = item.instrument ?? {};
+function normalizeTransactionItem(transaction, item, accountMask, observedAt, transactionLegId = null) {
+  const instrument = item?.instrument ?? {};
   return {
     type: String(transaction?.type ?? 'BROKER_TRANSACTION').toUpperCase(),
     transactionId: String(transaction?.activityId ?? transaction?.transactionId ?? '').trim() || null,
+    transactionLegId,
     brokerOrderId: String(transaction?.orderId ?? '').trim() || null,
     activityId: String(transaction?.activityId ?? '').trim() || null,
     accountMask,
-    symbol: String(instrument.symbol ?? '').replaceAll(' ', '').toUpperCase() || null,
-    side: String(item.positionEffect ?? item.direction ?? transaction?.subAccount ?? 'UNKNOWN').toUpperCase(),
-    quantity: finite(item.amount ?? item.quantity), price: finite(item.price), amount: finite(transaction?.netAmount),
+    symbol: String(instrument.symbol ?? instrument.assetType ?? '').replaceAll(' ', '').toUpperCase() || null,
+    side: String(item?.positionEffect ?? item?.direction ?? transaction?.subAccount ?? 'UNKNOWN').toUpperCase(),
+    quantity: finite(item?.amount ?? item?.quantity), price: finite(item?.price), amount: finite(transaction?.netAmount),
     state: String(transaction?.status ?? 'RECORDED').toUpperCase(),
     occurredAt: iso(transaction?.time ?? transaction?.settlementDate ?? transaction?.transactionDate, observedAt),
     raw: transaction,
   };
+}
+
+export function normalizeTransactions(transaction, accountMask, observedAt) {
+  const transferItems = transaction?.transferItems ?? [];
+  const primary = transferItems.find((candidate) => {
+    const assetType = String(candidate?.instrument?.assetType ?? '').toUpperCase();
+    return assetType && !['CURRENCY', 'CASH_EQUIVALENT'].includes(assetType);
+  }) ?? transferItems[0] ?? {};
+  const ordered = [primary, ...transferItems.filter((item) => item !== primary)];
+  return ordered.map((item, index) => normalizeTransactionItem(
+    transaction, item, accountMask, observedAt, index === 0 ? null : `ITEM:${index}`,
+  ));
+}
+
+export function normalizeTransaction(transaction, accountMask, observedAt) {
+  return normalizeTransactions(transaction, accountMask, observedAt)[0];
+}
+
+export function historicalLedgerWindow(cursorBefore, floor, windowDays = 59) {
+  const endMs = Date.parse(cursorBefore);
+  const floorMs = Date.parse(floor);
+  if (!Number.isFinite(endMs) || !Number.isFinite(floorMs) || endMs <= floorMs) return null;
+  const startMs = Math.max(floorMs, endMs - Math.max(1, windowDays) * DAY_MS);
+  return { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString(), complete: startMs === floorMs };
 }
 
 function isOpenOrder(order) {
@@ -526,6 +548,114 @@ export class SchwabD1Client {
     return this._marketRead(`/markets?${query}`, token);
   }
 
+  async _persistBrokerEvents(ownerId, brokerEvents, observedAt) {
+    const events = (brokerEvents ?? []).filter((event) => event.occurredAt);
+    const eventStatements = events.map((event) => {
+      const eventKey = normalizedBrokerEventKey(event);
+      return this.env.DB.prepare(`INSERT INTO broker_events
+        (owner_id,event_key,event_type,broker_order_id,transaction_id,transaction_leg_id,
+         activity_id,account_mask,symbol,side,quantity,price,amount,state,occurred_at,
+         raw_json,first_seen_at,last_seen_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,event_key) DO UPDATE SET
+        broker_order_id=excluded.broker_order_id,transaction_id=excluded.transaction_id,
+        transaction_leg_id=excluded.transaction_leg_id,activity_id=excluded.activity_id,
+        account_mask=excluded.account_mask,symbol=excluded.symbol,side=excluded.side,
+        quantity=excluded.quantity,price=excluded.price,amount=excluded.amount,state=excluded.state,
+        occurred_at=excluded.occurred_at,raw_json=excluded.raw_json,last_seen_at=excluded.last_seen_at`).bind(
+        ownerId, eventKey, event.type ?? 'BROKER_EVENT', event.brokerOrderId ?? null,
+        event.transactionId ?? null, event.transactionLegId ?? null, event.activityId ?? null,
+        event.accountMask ?? null, event.symbol ?? null, event.side ?? null,
+        event.quantity ?? null, event.price ?? null, event.amount ?? null, event.state ?? null,
+        event.occurredAt ?? null, JSON.stringify(event.raw ?? {}), observedAt, observedAt,
+      );
+    });
+    for (let offset = 0; offset < eventStatements.length; offset += 50) {
+      const chunk = eventStatements.slice(offset, offset + 50);
+      if (typeof this.env.DB.batch === 'function') await this.env.DB.batch(chunk);
+      else for (const statement of chunk) await statement.run();
+    }
+    return events.length;
+  }
+
+  async backfillLedger(ownerId, { maxWindows = 4, windowDays = 59 } = {}) {
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const token = await this._accessToken(ownerId);
+    const directory = await this._read('/accounts/accountNumbers', token);
+    const observedAt = new Date().toISOString();
+    const historyFloor = iso(this.env.NUVO_LEDGER_HISTORY_START, '2000-01-01T00:00:00.000Z');
+    const results = [];
+    for (const number of directory) {
+      const accountRef = String(number.hashValue);
+      const accountMask = String(number.accountNumber ?? '').slice(-4).padStart(4, '•');
+      const accountKey = await digest(accountRef);
+      const state = await this.env.DB.prepare(`SELECT coverage_start,coverage_end,cursor_before,
+        status,events_ingested,last_error FROM broker_ledger_sync_state
+        WHERE owner_id=? AND account_key=?`).bind(ownerId, accountKey).first();
+      const earliest = await this.env.DB.prepare(`SELECT MIN(occurred_at) AS earliest
+        FROM broker_events WHERE owner_id=? AND account_mask=? AND transaction_id IS NOT NULL`).bind(
+        ownerId, accountMask,
+      ).first();
+      let cursorBefore = state?.cursor_before ?? earliest?.earliest ?? observedAt;
+      let ingested = Number(state?.events_ingested ?? 0);
+      let status = ['COMPLETE', 'LIMITED'].includes(state?.status) ? state.status : 'RUNNING';
+      let lastError = null;
+      let windows = 0;
+      while (status === 'RUNNING' && windows < Math.max(1, maxWindows)) {
+        const window = historicalLedgerWindow(cursorBefore, historyFloor, windowDays);
+        if (!window) { status = 'COMPLETE'; break; }
+        try {
+          const path = `/accounts/${encodeURIComponent(accountRef)}/transactions?startDate=${encodeURIComponent(window.start)}&endDate=${encodeURIComponent(window.end)}&types=${encodeURIComponent(TRANSACTION_TYPES)}`;
+          const transactions = await this._read(path, token);
+          const events = (transactions ?? []).flatMap((row) => normalizeTransactions(row, accountMask, observedAt));
+          await this._persistBrokerEvents(ownerId, events, observedAt);
+          cursorBefore = window.start;
+          status = window.complete ? 'COMPLETE' : 'RUNNING';
+          windows += 1;
+        } catch (error) {
+          lastError = String(error.message ?? error).slice(0, 240);
+          status = /SCHWAB_READ_400/u.test(lastError) ? 'LIMITED' : 'FAILED';
+          break;
+        }
+      }
+      const stored = await this.env.DB.prepare(`SELECT COUNT(*) AS count FROM broker_events
+        WHERE owner_id=? AND account_mask=? AND transaction_id IS NOT NULL`).bind(
+        ownerId, accountMask,
+      ).first();
+      ingested = Number(stored?.count ?? ingested);
+      await this.env.DB.prepare(`INSERT INTO broker_ledger_sync_state
+        (owner_id,account_key,account_mask,coverage_start,coverage_end,cursor_before,status,
+         events_ingested,last_error,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(owner_id,account_key) DO UPDATE SET
+        account_mask=excluded.account_mask,coverage_start=excluded.coverage_start,
+        coverage_end=excluded.coverage_end,cursor_before=excluded.cursor_before,
+        status=excluded.status,events_ingested=excluded.events_ingested,
+        last_error=excluded.last_error,updated_at=excluded.updated_at`).bind(
+        ownerId, accountKey, accountMask, cursorBefore, observedAt, cursorBefore, status,
+        ingested, lastError, observedAt,
+      ).run();
+      results.push({ accountMask, coverageStart: cursorBefore, coverageEnd: observedAt,
+        status, eventsIngested: ingested, windows, lastError });
+    }
+    return { asOf: observedAt, historyFloor, accounts: results,
+      complete: results.length > 0 && results.every((row) => row.status === 'COMPLETE') };
+  }
+
+  async ledgerStatus(ownerId) {
+    const [states, totals] = await Promise.all([
+      this.env.DB.prepare(`SELECT account_mask,coverage_start,coverage_end,status,
+        events_ingested,last_error,updated_at FROM broker_ledger_sync_state
+        WHERE owner_id=? ORDER BY account_mask`).bind(ownerId).all(),
+      this.env.DB.prepare(`SELECT COUNT(*) AS event_count,
+        COUNT(DISTINCT transaction_id) AS transaction_count,
+        MIN(CASE WHEN transaction_id IS NOT NULL THEN occurred_at END) AS earliest_transaction,
+        MAX(CASE WHEN transaction_id IS NOT NULL THEN occurred_at END) AS latest_transaction
+        FROM broker_events WHERE owner_id=?`).bind(ownerId).first(),
+    ]);
+    const accounts = states.results ?? [];
+    return { accounts, ...totals,
+      complete: accounts.length > 0 && accounts.every((row) => row.status === 'COMPLETE') };
+  }
+
   async snapshot(ownerId) {
     try { return await this._snapshot(ownerId); }
     catch (error) {
@@ -594,8 +724,7 @@ export class SchwabD1Client {
       const orders = await this._read(`/accounts/${encodeURIComponent(account.accountRef)}/orders?fromEnteredTime=${encodeURIComponent(orderFrom)}&toEnteredTime=${encodeURIComponent(to)}&maxResults=3000`, token);
       let transactions = [];
       try {
-        const types = 'TRADE,RECEIVE_AND_DELIVER,DIVIDEND_OR_INTEREST,ACH_RECEIPT,ACH_DISBURSEMENT,CASH_RECEIPT,CASH_DISBURSEMENT,ELECTRONIC_FUND,WIRE_OUT,WIRE_IN,JOURNAL,MEMORANDUM,MARGIN_CALL,MONEY_MARKET,SMA_ADJUSTMENT';
-        transactions = await this._read(`/accounts/${encodeURIComponent(account.accountRef)}/transactions?startDate=${encodeURIComponent(transactionFrom)}&endDate=${encodeURIComponent(to)}&types=${encodeURIComponent(types)}`, token);
+        transactions = await this._read(`/accounts/${encodeURIComponent(account.accountRef)}/transactions?startDate=${encodeURIComponent(transactionFrom)}&endDate=${encodeURIComponent(to)}&types=${encodeURIComponent(TRANSACTION_TYPES)}`, token);
       } catch (error) {
         // A complete ledger is a required truth source. Do not silently turn
         // an unavailable transaction endpoint into an empty ledger.
@@ -605,7 +734,7 @@ export class SchwabD1Client {
         orders: orders.flatMap((order) => flattenOrders(order, account.accountRef, observedAt)),
         events: [
           ...orders.flatMap((order) => flattenOrderEvents(order, account.accountMask, observedAt)),
-          ...(transactions ?? []).map((row) => normalizeTransaction(row, account.accountMask, observedAt)),
+          ...(transactions ?? []).flatMap((row) => normalizeTransactions(row, account.accountMask, observedAt)),
         ],
       };
     }));
@@ -656,41 +785,74 @@ export class SchwabD1Client {
       WHERE owner_id=? ORDER BY observed_at DESC LIMIT 1`).bind(ownerId).first();
     const previousChainHash = previousObservation?.chain_hash ?? `NUVO-GUARDIAN-GENESIS:${ownerId}`;
     const chainHash = await digest(`${previousChainHash}|${snapshotHash}|${observedAt}`);
+    const observationId = crypto.randomUUID();
     await this.env.DB.prepare(`INSERT INTO broker_observations
       (owner_id,observation_id,snapshot_hash,previous_chain_hash,chain_hash,account_json,
        positions_json,orders_json,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(
-      ownerId, crypto.randomUUID(), snapshotHash, previousChainHash, chainHash,
+      ownerId, observationId, snapshotHash, previousChainHash, chainHash,
       JSON.stringify(account), JSON.stringify(snapshot.positions), JSON.stringify(snapshot.openOrders),
       observedAt, observedAt,
     ).run();
-    const eventStatements = brokerEvents.map((event) => {
-      const eventKey = normalizedBrokerEventKey(event);
-      return this.env.DB.prepare(`INSERT INTO broker_events
-        (owner_id,event_key,event_type,broker_order_id,transaction_id,activity_id,account_mask,
-         symbol,side,quantity,price,amount,state,occurred_at,raw_json,first_seen_at,last_seen_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,event_key) DO UPDATE SET
-        broker_order_id=excluded.broker_order_id,transaction_id=excluded.transaction_id,
-        activity_id=excluded.activity_id,account_mask=excluded.account_mask,
-        symbol=excluded.symbol,side=excluded.side,quantity=excluded.quantity,
-        price=excluded.price,amount=excluded.amount,state=excluded.state,
-        occurred_at=excluded.occurred_at,raw_json=excluded.raw_json,last_seen_at=excluded.last_seen_at`).bind(
-        ownerId, eventKey, event.type ?? 'BROKER_EVENT', event.brokerOrderId ?? null,
-        event.transactionId ?? null, event.activityId ?? null, event.accountMask ?? null,
-        event.symbol ?? null, event.side ?? null, event.quantity ?? null, event.price ?? null,
-        event.amount ?? null, event.state ?? null, event.occurredAt ?? null,
-        JSON.stringify(event.raw ?? {}), observedAt, observedAt,
+    const persistedEventCount = await this._persistBrokerEvents(ownerId, brokerEvents, observedAt);
+    const markStatements = snapshot.positions.map((position) => {
+      const mark = Number.isFinite(position.marketValue) && position.quantity !== 0
+        ? position.marketValue / (position.quantity * position.multiplier) : null;
+      const signedCost = Number.isFinite(position.averagePrice)
+        ? position.quantity * position.multiplier * position.averagePrice : null;
+      const unrealizedPnl = mark == null || signedCost == null ? null : position.marketValue - signedCost;
+      return this.env.DB.prepare(`INSERT INTO broker_position_marks
+        (owner_id,observation_id,snapshot_hash,symbol,underlying,asset_class,quantity,
+         multiplier,average_price,mark,market_value,unrealized_pnl,observed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        ownerId, observationId, snapshotHash, position.symbol, position.underlying,
+        position.type, position.quantity, position.multiplier, position.averagePrice,
+        mark, position.marketValue, unrealizedPnl, observedAt,
       );
     });
-    for (let offset = 0; offset < eventStatements.length; offset += 50) {
-      const chunk = eventStatements.slice(offset, offset + 50);
-      if (typeof this.env.DB.batch === 'function') await this.env.DB.batch(chunk);
-      else for (const statement of chunk) await statement.run();
+    if (markStatements.length) {
+      if (typeof this.env.DB.batch === 'function') await this.env.DB.batch(markStatements);
+      else for (const statement of markStatements) await statement.run();
     }
+    const unrealizedValues = snapshot.positions.map((position) => Number.isFinite(position.marketValue)
+      && Number.isFinite(position.averagePrice)
+      ? position.marketValue - position.quantity * position.multiplier * position.averagePrice : null);
+    const totalUnrealizedPnl = unrealizedValues.every(Number.isFinite)
+      ? unrealizedValues.reduce((sum, value) => sum + value, 0) : null;
+    await this.env.DB.prepare(`INSERT INTO broker_account_performance
+      (owner_id,snapshot_hash,nav,cash,margin_debit,gross_position_value,unrealized_pnl,
+       position_count,open_order_count,observed_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(
+      ownerId, snapshotHash, snapshot.nav, snapshot.cash, snapshot.marginDebit,
+      snapshot.positions.reduce((sum, position) => sum + Math.abs(position.marketValue ?? 0), 0),
+      totalUnrealizedPnl, snapshot.positions.length, snapshot.openOrders.length, observedAt,
+    ).run();
+    const priorBaseline = await this.env.DB.prepare(`SELECT snapshot_hash FROM custody_baselines
+      WHERE owner_id=? AND active=1`).bind(ownerId).first();
+    await this.env.DB.prepare(`INSERT INTO custody_baselines
+      (owner_id,snapshot_hash,account_json,positions_json,orders_json,observed_at,
+       active,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,?)
+      ON CONFLICT(owner_id) DO UPDATE SET snapshot_hash=excluded.snapshot_hash,
+      account_json=excluded.account_json,positions_json=excluded.positions_json,
+      orders_json=excluded.orders_json,observed_at=excluded.observed_at,active=1,
+      updated_at=excluded.updated_at`).bind(
+      ownerId, snapshotHash, JSON.stringify(account), JSON.stringify(snapshot.positions),
+      JSON.stringify(snapshot.openOrders), observedAt, observedAt, observedAt,
+    ).run();
+    const reconciliationId = crypto.randomUUID();
+    await this.env.DB.prepare(`INSERT INTO broker_reconciliation_runs
+      (owner_id,reconciliation_id,snapshot_hash,prior_snapshot_hash,status,position_count,
+       open_order_count,event_count,detail_json,reconciled_at)
+      VALUES (?,?,?,?,'COMPLETE',?,?,?,?,?)`).bind(
+      ownerId, reconciliationId, snapshotHash, priorBaseline?.snapshot_hash ?? null,
+      snapshot.positions.length, snapshot.openOrders.length, persistedEventCount,
+      JSON.stringify({ source: 'SCHWAB_CUSTODY_AND_TRANSACTION_LEDGER',
+        accountCount: accounts.length, observationId, observationChainHash: chainHash }), observedAt,
+    ).run();
     await this.env.DB.prepare(`UPDATE broker_connections SET status='CONNECTED',
       last_successful_sync_at=?,last_error_code=NULL,updated_at=? WHERE owner_id=?`).bind(
       observedAt, observedAt, ownerId,
     ).run();
-    return { ...snapshot, snapshotHash, observationChainHash: chainHash };
+    return { ...snapshot, snapshotHash, observationChainHash: chainHash,
+      reconciliationId, reconciliationStatus: 'COMPLETE' };
   }
 
   async status(ownerId) {

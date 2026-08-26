@@ -50,6 +50,14 @@ describe('NUVO Guardian enforcement', () => {
     assert.equal(normalizedBrokerEventKey(original), normalizedBrokerEventKey(corrected));
   });
 
+  test('separate legs inside one Schwab transaction remain independently auditable', () => {
+    const common = { type: 'TRADE', transactionId: 'TX-1' };
+    assert.notEqual(
+      normalizedBrokerEventKey({ ...common, transactionLegId: null }),
+      normalizedBrokerEventKey({ ...common, transactionLegId: 'ITEM:1' }),
+    );
+  });
+
   test('distinct execution legs remain distinct broker events', () => {
     const common = { type: 'EXECUTION', brokerOrderId: 'ORDER-1', activityId: 'ACT-1', occurredAt: NOW };
     assert.notEqual(

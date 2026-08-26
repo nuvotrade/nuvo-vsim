@@ -7,7 +7,9 @@ import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
 import { cycleIdFor, liveDashboardScript, rewriteDesignHtml } from '../cloudflare/worker.js';
 import { availableContractDtes } from '../src/pipeline/cycle.js';
-import { aggregatePositions, normalizePosition, SchwabD1Client } from '../cloudflare/schwab-client.js';
+import {
+  aggregatePositions, historicalLedgerWindow, normalizePosition, normalizeTransactions, SchwabD1Client,
+} from '../cloudflare/schwab-client.js';
 import { D1R2EvidencePersistence } from '../cloudflare/evidence-persistence.js';
 
 const NOW = Date.UTC(2026, 7, 23, 18, 0, 0);
@@ -26,7 +28,7 @@ describe('protected live dashboard', () => {
     const source = liveDashboardScript();
     assert.doesNotThrow(() => new Function(source));
     for (const path of ['/api/status', '/api/evidence', '/api/operator/replay',
-      '/api/operator/controls', '/api/cycle']) {
+      '/api/operator/controls', '/api/operator/broker/backfill', '/api/cycle']) {
       assert.match(source, new RegExp(path.replaceAll('/', '\\/'), 'u'));
     }
     assert.doesNotMatch(source, /\/api\/operator\/(custody\/refresh|market\/check|baseline)/u);
@@ -711,6 +713,38 @@ describe('Schwab production broker boundary', () => {
 });
 
 describe('Schwab multi-account normalization', () => {
+  test('preserves every transfer item while keeping the original primary transaction identity', () => {
+    const observedAt = '2026-08-26T15:00:00.000Z';
+    const rows = normalizeTransactions({
+      activityId: 'TX-42', type: 'TRADE', netAmount: -12_345, time: observedAt,
+      transferItems: [
+        { instrument: { assetType: 'CURRENCY' }, amount: -12_345 },
+        { instrument: { assetType: 'EQUITY', symbol: 'SPCX' }, amount: 100, price: 123.45 },
+      ],
+    }, '1234', observedAt);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].symbol, 'SPCX');
+    assert.equal(rows[0].transactionLegId, null);
+    assert.equal(rows[1].symbol, 'CURRENCY');
+    assert.equal(rows[1].transactionLegId, 'ITEM:1');
+  });
+
+  test('walks historical ledger windows deterministically to the configured floor', () => {
+    assert.deepEqual(historicalLedgerWindow(
+      '2026-03-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 30,
+    ), {
+      start: '2026-01-30T00:00:00.000Z', end: '2026-03-01T00:00:00.000Z', complete: false,
+    });
+    assert.deepEqual(historicalLedgerWindow(
+      '2026-01-20T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 30,
+    ), {
+      start: '2026-01-01T00:00:00.000Z', end: '2026-01-20T00:00:00.000Z', complete: true,
+    });
+    assert.equal(historicalLedgerWindow(
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 30,
+    ), null);
+  });
+
   test('does not turn a missing Schwab quantity into a zero holding', () => {
     const position = normalizePosition({
       instrument: { symbol: 'SPY', assetType: 'EQUITY' },

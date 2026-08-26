@@ -245,6 +245,7 @@ export function normalizedBrokerEventKey(event) {
   if (event.transactionId) {
     return contentHash({
       provider: 'SCHWAB', type: event.type, transactionId: event.transactionId,
+      transactionLegId: event.transactionLegId ?? null,
     });
   }
   if (event.type === 'ORDER_STATE' && event.brokerOrderId) {

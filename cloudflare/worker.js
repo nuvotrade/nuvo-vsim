@@ -131,12 +131,12 @@ async function latestGuardianReview(env, ownerId) {
 
 async function guardianLedgerSummary(env, ownerId, limit = 100) {
   const [events, observations, campaigns] = await Promise.all([
-    env.DB.prepare(`SELECT event_key,event_type,broker_order_id,transaction_id,activity_id,
+    env.DB.prepare(`SELECT event_key,event_type,broker_order_id,transaction_id,transaction_leg_id,activity_id,
       account_mask,symbol,side,quantity,price,amount,state,occurred_at,first_seen_at,last_seen_at
-      FROM (SELECT event_key,event_type,broker_order_id,transaction_id,activity_id,
+      FROM (SELECT event_key,event_type,broker_order_id,transaction_id,transaction_leg_id,activity_id,
         account_mask,symbol,side,quantity,price,amount,state,occurred_at,first_seen_at,last_seen_at,
         ROW_NUMBER() OVER (PARTITION BY CASE WHEN transaction_id IS NOT NULL
-          THEN 'TX:' || transaction_id
+          THEN 'TX:' || transaction_id || ':' || COALESCE(transaction_leg_id, 'PRIMARY')
           WHEN event_type='ORDER_STATE' AND broker_order_id IS NOT NULL
             THEN 'ORDER:' || broker_order_id
           WHEN activity_id IS NOT NULL THEN 'ACT:' || activity_id || ':' ||
@@ -187,9 +187,8 @@ async function dispatchGuardianOutbox(env, ownerId) {
 
 export async function runGuardianReview(env, ownerId, { reviewType = 'EVENT', notify = true } = {}) {
   const previous = await latestGuardianReview(env, ownerId);
-  const client = new SchwabD1Client(env);
   let snapshot;
-  try { snapshot = await client.snapshot(ownerId); }
+  try { snapshot = await reconciledSnapshot(env, ownerId); }
   catch (error) {
     await audit(env, ownerId, 'GUARDIAN_BROKER_SYNC_FAILED', { error: error.message });
     throw error;
@@ -390,8 +389,7 @@ async function verifyLiveMarket(env, ownerId) {
 }
 
 async function captureBaseline(env, ownerId) {
-  const client = new SchwabD1Client(env);
-  const snapshot = await client.snapshot(ownerId);
+  const snapshot = await reconciledSnapshot(env, ownerId);
   if (snapshot.openOrders.length > 0) {
     throw new Error(`CUSTODY_BASELINE_OPEN_ORDERS:${snapshot.openOrders.length}`);
   }
@@ -655,18 +653,6 @@ export async function runShadowCycle(env, ownerId, {
       finalStatus = 'QUARANTINED';
       return summary;
     }
-    const baseline = await loadBaseline(env, ownerId);
-    if (!baseline) {
-      finalStatus = 'BLOCKED';
-      return await recordBlocked(env, ownerId, cycleId, 'CUSTODY_BASELINE_REQUIRED');
-    }
-    if (baseline.openOrders.length) {
-      finalStatus = 'BLOCKED';
-      return await recordBlocked(env, ownerId, cycleId, 'CUSTODY_OPEN_ORDER_RISK_MAPPING_REQUIRED', {
-        openOrderCount: baseline.openOrders.length,
-      });
-    }
-
     // Prove the complete provider contract before portfolio mapping can hide
     // a market-data incompatibility. This is intentionally redundant with
     // the engine Truth Contract: the preflight gives the operator a precise
@@ -682,7 +668,18 @@ export async function runShadowCycle(env, ownerId, {
     }
 
     const schwabClient = new SchwabD1Client(env);
-    const currentSnapshot = await schwabClient.snapshot(ownerId);
+    const currentSnapshot = await reconciledSnapshot(env, ownerId);
+    const baseline = await loadBaseline(env, ownerId);
+    if (!baseline || baseline.hash !== currentSnapshot.snapshotHash) {
+      finalStatus = 'BLOCKED';
+      return await recordBlocked(env, ownerId, cycleId, 'BROKER_RECONCILIATION_CHECKPOINT_FAILED');
+    }
+    if (baseline.openOrders.length) {
+      finalStatus = 'BLOCKED';
+      return await recordBlocked(env, ownerId, cycleId, 'CUSTODY_OPEN_ORDER_RISK_MAPPING_REQUIRED', {
+        openOrderCount: baseline.openOrders.length,
+      });
+    }
     const broker = new SchwabReadOnlyBroker({ client: schwabClient, ownerId });
     broker.snapshotPromise = Promise.resolve(currentSnapshot);
     const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45').split(',').map(Number).filter(Number.isFinite);
@@ -743,7 +740,8 @@ export async function runShadowCycle(env, ownerId, {
 
 async function apiStatus(env, ownerId) {
   const client = new SchwabD1Client(env);
-  const [connection, baseline, custody, latest, evidenceCount, marketCheck, controls, guardian] = await Promise.all([
+  const [connection, baseline, custody, latest, evidenceCount, marketCheck, controls, guardian,
+    ledgerStatus, reconciliation] = await Promise.all([
     client.status(ownerId),
     loadBaseline(env, ownerId),
     loadLatestCustody(env, ownerId),
@@ -754,6 +752,10 @@ async function apiStatus(env, ownerId) {
       ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first(),
     loadOperatorControls(env, ownerId),
     latestGuardianReview(env, ownerId),
+    client.ledgerStatus(ownerId),
+    env.DB.prepare(`SELECT reconciliation_id,snapshot_hash,status,position_count,
+      open_order_count,event_count,detail_json,reconciled_at FROM broker_reconciliation_runs
+      WHERE owner_id=? ORDER BY reconciled_at DESC LIMIT 1`).bind(ownerId).first(),
   ]);
   return {
     ...publicStatus(env),
@@ -768,9 +770,20 @@ async function apiStatus(env, ownerId) {
       account: custody.account, positions: custody.positions, openOrders: custody.openOrders,
     } : { status: 'SYNC_REQUIRED' },
     baseline: baseline ? {
-      status: 'CAPTURED', hash: baseline.hash, observedAt: baseline.observedAt,
+      status: 'RECONCILED_CHECKPOINT', hash: baseline.hash, observedAt: baseline.observedAt,
       positionCount: baseline.positions.length, openOrderCount: baseline.openOrders.length,
     } : { status: 'REQUIRED' },
+    reconciliation: reconciliation ? {
+      reconciliationId: reconciliation.reconciliation_id,
+      snapshotHash: reconciliation.snapshot_hash,
+      status: reconciliation.status,
+      positionCount: reconciliation.position_count,
+      openOrderCount: reconciliation.open_order_count,
+      eventCount: reconciliation.event_count,
+      detail: parseJson(reconciliation.detail_json, null),
+      reconciledAt: reconciliation.reconciled_at,
+    } : null,
+    brokerLedger: ledgerStatus,
     evidence: { records: Number(evidenceCount?.count ?? 0), storage: 'D1_INDEX_R2_IMMUTABLE_OBJECT' },
     marketCheck: marketCheck ? parseJson(marketCheck.detail_json, null) : null,
     controls,
@@ -831,7 +844,7 @@ async function getAccountTruthTool(env, ownerId) {
   }
 
   let snapshot;
-  try { snapshot = await client.snapshot(ownerId); }
+  try { snapshot = await reconciledSnapshot(env, ownerId); }
   catch (error) {
     return toolEnvelope(env, {
       nav: null, cash: null, margin_used: null, positions: [], open_orders: [],
@@ -839,8 +852,9 @@ async function getAccountTruthTool(env, ownerId) {
       schwab: 'DISCONNECTED',
     }, { code: 'SCHWAB_READ_FAILED', message: error.message });
   }
-  const [baseline, guardian, ledger] = await Promise.all([
+  const [baseline, guardian, ledger, ledgerStatus] = await Promise.all([
     loadBaseline(env, ownerId), latestGuardianReview(env, ownerId), guardianLedgerSummary(env, ownerId, 20),
+    client.ledgerStatus(ownerId),
   ]);
   const recon = accountReconciliation(baseline, snapshot);
   const positions = snapshot.positions.map((position) => ({
@@ -875,6 +889,8 @@ async function getAccountTruthTool(env, ownerId) {
     open_orders: openOrders,
     recon: {
       baseline: recon.status,
+      reconciliation_id: snapshot.reconciliationId ?? null,
+      reconciled_at: new Date(snapshot.asOf).toISOString(),
       positions_n: positions.length,
       open_orders_n: openOrders.length,
       mismatches: recon.problems,
@@ -904,7 +920,8 @@ async function getAccountTruthTool(env, ownerId) {
       evidence_fingerprint: null,
     },
     broker_ledger: {
-      coverage: 'SCHWAB_RETRIEVED_HISTORY_PLUS_CONTINUOUS_INGESTION',
+      coverage: ledgerStatus.complete ? 'COMPLETE_TO_CONFIGURED_HISTORY_FLOOR' : 'BACKFILL_IN_PROGRESS',
+      sync: ledgerStatus,
       active_campaigns: ledger.activeCampaigns,
       recent_events: ledger.events,
       latest_observation: ledger.observations[0] ?? null,
@@ -977,6 +994,11 @@ async function getMarketStateTool(env, ownerId) {
 function accountCoordinator(env, ownerId) {
   if (!env.ACCOUNT_COORDINATOR) throw new Error('ACCOUNT_COORDINATOR_NOT_CONFIGURED');
   return env.ACCOUNT_COORDINATOR.getByName(ownerId);
+}
+
+async function reconciledSnapshot(env, ownerId) {
+  if (!env.ACCOUNT_COORDINATOR) return new SchwabD1Client(env).snapshot(ownerId);
+  return accountCoordinator(env, ownerId).reconciledSnapshot(ownerId);
 }
 
 export async function triggerShadowCycle(env, ownerId, { source = 'MCP' } = {}) {
@@ -1539,7 +1561,7 @@ export function liveDashboardScript() {
       controls.append(make('p', 'Protected operator controls', 'kicker'), make('h3', 'Live shadow operations'));
       controls.append(make('p', '', 'control-status connector-note'));
       const actions = make('div', undefined, 'filter-row');
-      [['refresh','Refresh status'],['guardian','Run Guardian review'],['cycle','Run shadow cycle'],['replay','Replay latest evidence'],
+      [['refresh','Refresh status'],['ledger','Backfill Schwab ledger'],['guardian','Run Guardian review'],['cycle','Run shadow cycle'],['replay','Replay latest evidence'],
         ['pause','Global pause'],['resume','Resume cycles'],['kill','Trip kill switch'],['clearKill','Clear kill switch']]
         .forEach(pair => { const button = make('button', pair[1], 'chip'); button.dataset.action = pair[0]; actions.append(button); });
       const reason = make('input', undefined, 'control-reason');
@@ -1607,6 +1629,7 @@ export function liveDashboardScript() {
     });
     const operations = {
       refresh: () => Promise.resolve(),
+      ledger: () => api('/api/operator/broker/backfill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: 'BACKFILL_READ_ONLY_LEDGER', max_windows: 6, window_days: 59 }) }),
       guardian: () => api('/api/operator/guardian/review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
       cycle: () => api('/api/cycle', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() }, body: '{}' }),
       replay: () => api('/api/operator/replay', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cycle_id: currentStatus && currentStatus.latestCycle && currentStatus.latestCycle.cycleId }) }),
@@ -1616,6 +1639,7 @@ export function liveDashboardScript() {
       clearKill: () => control('CLEAR_KILL', 'CLEAR_INDEPENDENT_KILL_SWITCH'),
     };
     const confirmations = {
+      ledger: 'Backfill the append-only Schwab transaction ledger using read-only API history?',
       guardian: 'Refresh Schwab truth, ingest the broker ledger, and run the read-only Guardian review?',
       cycle: 'Run a live-data shadow opportunity simulation? It cannot place an order.',
       pause: 'Pause all shadow cycles?', resume: 'Resume shadow cycles?',
@@ -1698,8 +1722,10 @@ async function route(request, env, ctx) {
   }
   if (url.pathname === '/api/ledger' && request.method === 'GET') {
     const limit = Math.min(250, Math.max(1, Number(url.searchParams.get('limit') ?? 100)));
-    const ledger = await guardianLedgerSummary(env, owner.id, limit);
-    return json({ ...ledger, raw: 'PROTECTED_NOT_EXPOSED', appendOnly: true });
+    const [ledger, sync] = await Promise.all([
+      guardianLedgerSummary(env, owner.id, limit), client.ledgerStatus(owner.id),
+    ]);
+    return json({ ...ledger, sync, raw: 'PROTECTED_NOT_EXPOSED', appendOnly: true });
   }
   if (url.pathname === '/api/integrations/schwab/connect' && request.method === 'GET') {
     const destination = await client.beginOAuth(owner.id);
@@ -1734,7 +1760,7 @@ async function route(request, env, ctx) {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     const body = await request.json().catch(() => ({}));
     if (body.confirm !== 'REFRESH_READ_ONLY_CUSTODY') return json({ error: 'EXPLICIT_CUSTODY_REFRESH_REQUIRED' }, 400);
-    const snapshot = await client.snapshot(owner.id);
+    const snapshot = await reconciledSnapshot(env, owner.id);
     await audit(env, owner.id, 'CUSTODY_READ_ONLY_REFRESHED', {
       snapshotHash: snapshot.snapshotHash,
       positionCount: snapshot.positions.length,
@@ -1742,6 +1768,19 @@ async function route(request, env, ctx) {
       observedAt: new Date(snapshot.asOf).toISOString(),
     });
     return json({ ok: true, observedAt: snapshot.asOf, snapshotHash: snapshot.snapshotHash });
+  }
+  if (url.pathname === '/api/operator/broker/backfill' && request.method === 'POST') {
+    try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
+    const body = await request.json().catch(() => ({}));
+    if (body.confirm !== 'BACKFILL_READ_ONLY_LEDGER') {
+      return json({ error: 'EXPLICIT_LEDGER_BACKFILL_CONFIRMATION_REQUIRED' }, 400);
+    }
+    const result = await client.backfillLedger(owner.id, {
+      maxWindows: Math.min(12, Math.max(1, Number(body.max_windows ?? 6))),
+      windowDays: Math.min(365, Math.max(1, Number(body.window_days ?? 59))),
+    });
+    await audit(env, owner.id, 'BROKER_LEDGER_BACKFILL', result);
+    return json({ ok: true, ledger: result });
   }
   if (url.pathname === '/api/operator/market/check' && request.method === 'POST') {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
@@ -1797,7 +1836,13 @@ function easternClock(value = Date.now()) {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false,
     weekday: 'short', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(value));
   const get = (type) => parts.find((part) => part.type === type)?.value;
-  return { weekday: get('weekday'), hour: Number(get('hour')), minute: Number(get('minute')) };
+  const weekday = get('weekday');
+  const hour = Number(get('hour'));
+  const minute = Number(get('minute'));
+  const minuteOfDay = hour * 60 + minute;
+  const session = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday)
+    && minuteOfDay >= 9 * 60 + 30 && minuteOfDay < 16 * 60 ? 'RTH' : 'CLOSED';
+  return { weekday, hour, minute, session };
 }
 
 export default {
@@ -1814,6 +1859,16 @@ export default {
         WHERE status IN ('CONNECTED','DEGRADED') ORDER BY updated_at ASC`).all();
       const clock = easternClock(controller.scheduledTime);
       for (const owner of owners.results ?? []) {
+        if (clock.session === 'RTH' && clock.minute % 15 === 2) {
+          try {
+            const ledger = await new SchwabD1Client(env).backfillLedger(owner.owner_id, {
+              maxWindows: 48, windowDays: 59,
+            });
+            await audit(env, owner.owner_id, 'SCHEDULED_BROKER_LEDGER_BACKFILL', ledger);
+          } catch (error) {
+            await audit(env, owner.owner_id, 'SCHEDULED_BROKER_LEDGER_BACKFILL_FAILED', { error: error.message });
+          }
+        }
         try {
           const reviewType = clock.hour === 16 && clock.minute >= 10 && clock.minute < 15
             ? 'END_OF_DAY' : clock.minute === 0 ? 'HOURLY' : 'EVENT';
