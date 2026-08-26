@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "nuvo-vsim-v5-shadow",
   "main": "entry.js",
-  "compatibility_date": "2026-08-25",
+  "compatibility_date": "2026-08-26",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "observability": {
@@ -11,7 +11,7 @@
     "logs": { "enabled": true, "invocation_logs": true }
   },
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
-  "triggers": { "crons": ["*/15 13-21 * * 1-5"] },
+  "triggers": { "crons": ["* 13-22 * * 1-5"] },
   "durable_objects": {
     "bindings": [
       { "name": "ACCOUNT_COORDINATOR", "class_name": "VsimAccountCoordinator" }

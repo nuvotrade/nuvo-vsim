@@ -17,6 +17,9 @@ import { D1R2EvidencePersistence } from './evidence-persistence.js';
 import { handleVsimMcp } from './mcp-server.js';
 import { SchwabD1Client } from './schwab-client.js';
 import { mapCustodyRisk } from './custody-risk.js';
+import {
+  evaluateGuardian, guardianReport, GUARDIAN_MANDATE_VERSION, GUARDIAN_STATES,
+} from './guardian.js';
 
 const JSON_HEADERS = Object.freeze({
   'content-type': 'application/json; charset=utf-8',
@@ -71,7 +74,7 @@ function publicStatus(env) {
     broker_execution_mode: 'SHADOW_ONLY',
     mutation_routes: false,
     existing_vsim_untouched: true,
-    schedule: 'Every 15 minutes',
+    schedule: 'Guardian every minute · VSIM every 15 minutes',
     version: env.CF_VERSION_METADATA?.id ?? 'local',
   };
 }
@@ -114,6 +117,136 @@ async function loadLatestCustody(env, ownerId) {
     openOrders: parseJson(row.orders_json, []),
     observedAt: row.observed_at,
   };
+}
+
+async function latestGuardianReview(env, ownerId) {
+  const row = await env.DB.prepare(`SELECT review_id,review_type,account_state,mandate_version,
+    snapshot_hash,report_json,fingerprint,created_at FROM guardian_reviews
+    WHERE owner_id=? ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first();
+  return row ? { id: row.review_id, type: row.review_type, state: row.account_state,
+    mandateVersion: row.mandate_version, snapshotHash: row.snapshot_hash,
+    report: parseJson(row.report_json, null), fingerprint: row.fingerprint, createdAt: row.created_at } : null;
+}
+
+async function guardianLedgerSummary(env, ownerId, limit = 100) {
+  const [events, observations, campaigns] = await Promise.all([
+    env.DB.prepare(`SELECT event_key,event_type,broker_order_id,transaction_id,activity_id,
+      account_mask,symbol,side,quantity,price,amount,state,occurred_at,first_seen_at,last_seen_at
+      FROM (SELECT event_key,event_type,broker_order_id,transaction_id,activity_id,
+        account_mask,symbol,side,quantity,price,amount,state,occurred_at,first_seen_at,last_seen_at,
+        ROW_NUMBER() OVER (PARTITION BY CASE WHEN transaction_id IS NOT NULL
+          THEN 'TX:' || transaction_id
+          WHEN event_type='ORDER_STATE' AND broker_order_id IS NOT NULL
+            THEN 'ORDER:' || broker_order_id
+          WHEN activity_id IS NOT NULL THEN 'ACT:' || activity_id || ':' ||
+            COALESCE(symbol,'') || ':' || COALESCE(side,'') || ':' ||
+            COALESCE(CAST(quantity AS TEXT),'') || ':' || COALESCE(CAST(price AS TEXT),'') || ':' ||
+            COALESCE(occurred_at,'')
+          ELSE 'EV:' || event_key END
+          ORDER BY last_seen_at DESC) AS occurrence
+        FROM broker_events WHERE owner_id=?)
+      WHERE occurrence=1 ORDER BY COALESCE(occurred_at,first_seen_at) DESC LIMIT ?`)
+      .bind(ownerId, limit).all(),
+    env.DB.prepare(`SELECT observation_id,snapshot_hash,previous_chain_hash,chain_hash,observed_at
+      FROM broker_observations WHERE owner_id=? ORDER BY observed_at DESC LIMIT 20`).bind(ownerId).all(),
+    env.DB.prepare(`SELECT COUNT(*) AS count FROM guardian_campaign_contracts
+      WHERE owner_id=? AND status='FROZEN'`).bind(ownerId).first(),
+  ]);
+  return { events: events.results ?? [], observations: observations.results ?? [],
+    activeCampaigns: Number(campaigns?.count ?? 0) };
+}
+
+function guardianDiscordText(review) {
+  const report = review.report;
+  const lead = report.violations?.some((row) => row.severity === 'CRITICAL')
+    ? 'CRITICAL NUVO VIOLATION' : 'NUVO GUARDIAN — CONTROL REPORT';
+  return [lead, `Account authority: ${report.accountAuthority}`, `Account equity: ${report.accountEquity ?? 'UNKNOWN'}`,
+    `Cash: ${report.cash ?? 'UNKNOWN'}`, `Margin debit: ${report.marginDebit ?? 'UNKNOWN'}`,
+    `Positions: ${report.openPositions}`, `Open orders: ${report.openOrders}`,
+    `Violations: ${(report.violations ?? []).map((row) => row.code).join(', ') || 'NONE'}`,
+    `Directive: ${report.finalDirective}`, `Evidence: ${review.id}`].join('\n').slice(0, 1900);
+}
+
+async function dispatchGuardianOutbox(env, ownerId) {
+  if (!env.GUARDIAN_DISCORD_WEBHOOK_URL) return { configured: false, sent: 0 };
+  const rows = await env.DB.prepare(`SELECT outbox_id,review_id,payload_json,attempts
+    FROM guardian_discord_outbox WHERE owner_id=? AND delivery_status='PENDING'
+    ORDER BY created_at LIMIT 10`).bind(ownerId).all();
+  let sent = 0;
+  for (const row of rows.results ?? []) {
+    try {
+      const response = await fetch(env.GUARDIAN_DISCORD_WEBHOOK_URL, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: row.payload_json, signal: AbortSignal.timeout(8_000),
+      });
+      if (!response.ok) throw new Error(`DISCORD_WEBHOOK_${response.status}`);
+      await env.DB.prepare(`UPDATE guardian_discord_outbox SET delivery_status='SENT',
+        attempts=attempts+1,last_error=NULL,delivered_at=? WHERE owner_id=? AND outbox_id=?`).bind(
+        nowIso(), ownerId, row.outbox_id,
+      ).run();
+      sent += 1;
+    } catch (error) {
+      await env.DB.prepare(`UPDATE guardian_discord_outbox SET delivery_status='FAILED',
+        attempts=attempts+1,last_error=? WHERE owner_id=? AND outbox_id=?`).bind(
+        String(error.message).slice(0, 240), ownerId, row.outbox_id,
+      ).run();
+    }
+  }
+  return { configured: true, sent };
+}
+
+export async function runGuardianReview(env, ownerId, { reviewType = 'EVENT', notify = true } = {}) {
+  const previous = await latestGuardianReview(env, ownerId);
+  const client = new SchwabD1Client(env);
+  let snapshot;
+  try { snapshot = await client.snapshot(ownerId); }
+  catch (error) {
+    await audit(env, ownerId, 'GUARDIAN_BROKER_SYNC_FAILED', { error: error.message });
+    throw error;
+  }
+  const [baseline, ledger] = await Promise.all([loadBaseline(env, ownerId), guardianLedgerSummary(env, ownerId, 1)]);
+  const recon = accountReconciliation(baseline, snapshot);
+  let session = 'CLOSED';
+  try {
+    const market = await marketProvider(env, ownerId).marketState();
+    session = normalizeSession(market.value?.status);
+  } catch { session = 'CLOSED'; }
+  const assessment = evaluateGuardian({
+    snapshot, reconStatus: recon.status, campaignCount: ledger.activeCampaigns,
+    unresolvedDiscrepancies: recon.problems.length, marketSession: session, now: Date.now(),
+  });
+  const report = guardianReport({ snapshot, assessment, reconStatus: recon.status,
+    campaignCount: ledger.activeCampaigns, previousReconciliation: previous?.report?.lastSuccessfulReconciliation ?? null });
+  report.marketData = session === 'RTH' ? 'LIVE' : 'NOT_RTH';
+  report.brokerageSnapshotIdentifier = snapshot.snapshotHash;
+  report.reconciliation = recon;
+  const reviewId = crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO guardian_reviews
+    (owner_id,review_id,review_type,account_state,mandate_version,snapshot_hash,
+     report_json,fingerprint,created_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
+    ownerId, reviewId, reviewType, assessment.state, GUARDIAN_MANDATE_VERSION,
+    snapshot.snapshotHash, JSON.stringify(report), report.fingerprint, report.timestamp,
+  ).run();
+  const newEvents = await env.DB.prepare(`SELECT COUNT(*) AS count FROM broker_events
+    WHERE owner_id=? AND first_seen_at=?`).bind(ownerId, new Date(snapshot.asOf).toISOString()).first();
+  const critical = assessment.violations.some((row) => row.severity === 'CRITICAL');
+  const changed = previous?.state !== assessment.state || Number(newEvents?.count ?? 0) > 0;
+  const shouldNotify = notify && (critical || changed || reviewType === 'END_OF_DAY');
+  if (shouldNotify) {
+    const review = { id: reviewId, report };
+    await env.DB.prepare(`INSERT INTO guardian_discord_outbox
+      (owner_id,outbox_id,review_id,severity,payload_json,delivery_status,attempts,created_at)
+      VALUES (?,?,?,?,?,'PENDING',0,?)`).bind(
+      ownerId, crypto.randomUUID(), reviewId, critical ? 'CRITICAL' : 'INFO',
+      JSON.stringify({ content: guardianDiscordText(review), allowed_mentions: { parse: [] } }), report.timestamp,
+    ).run();
+  }
+  const delivery = await dispatchGuardianOutbox(env, ownerId);
+  await audit(env, ownerId, 'GUARDIAN_REVIEW_COMPLETED', {
+    reviewId, reviewType, accountState: assessment.state, violations: assessment.violations.map((row) => row.code),
+    newEvents: Number(newEvents?.count ?? 0), discordConfigured: delivery.configured, discordSent: delivery.sent,
+  });
+  return { id: reviewId, type: reviewType, state: assessment.state, report, delivery };
 }
 
 async function loadOperatorControls(env, ownerId) {
@@ -618,7 +751,7 @@ export async function runShadowCycle(env, ownerId, {
 
 async function apiStatus(env, ownerId) {
   const client = new SchwabD1Client(env);
-  const [connection, baseline, custody, latest, evidenceCount, marketCheck, controls] = await Promise.all([
+  const [connection, baseline, custody, latest, evidenceCount, marketCheck, controls, guardian] = await Promise.all([
     client.status(ownerId),
     loadBaseline(env, ownerId),
     loadLatestCustody(env, ownerId),
@@ -628,6 +761,7 @@ async function apiStatus(env, ownerId) {
       AND event_type IN ('LIVE_MARKET_COMPATIBILITY_CHECK','MASSIVE_LIVE_CHAIN_CHECK')
       ORDER BY created_at DESC LIMIT 1`).bind(ownerId).first(),
     loadOperatorControls(env, ownerId),
+    latestGuardianReview(env, ownerId),
   ]);
   return {
     ...publicStatus(env),
@@ -648,6 +782,11 @@ async function apiStatus(env, ownerId) {
     evidence: { records: Number(evidenceCount?.count ?? 0), storage: 'D1_INDEX_R2_IMMUTABLE_OBJECT' },
     marketCheck: marketCheck ? parseJson(marketCheck.detail_json, null) : null,
     controls,
+    guardian: guardian ? {
+      state: guardian.state, reviewId: guardian.id, reviewedAt: guardian.createdAt,
+      mandateVersion: guardian.mandateVersion, report: guardian.report,
+    } : { state: GUARDIAN_STATES.BLOCKED, reviewId: null, reviewedAt: null,
+      mandateVersion: GUARDIAN_MANDATE_VERSION, report: null },
     latestCycle: latest ? parseJson(latest.summary_json, null) : null,
   };
 }
@@ -708,7 +847,9 @@ async function getAccountTruthTool(env, ownerId) {
       schwab: 'DISCONNECTED',
     }, { code: 'SCHWAB_READ_FAILED', message: error.message });
   }
-  const baseline = await loadBaseline(env, ownerId);
+  const [baseline, guardian, ledger] = await Promise.all([
+    loadBaseline(env, ownerId), latestGuardianReview(env, ownerId), guardianLedgerSummary(env, ownerId, 20),
+  ]);
   const recon = accountReconciliation(baseline, snapshot);
   const positions = snapshot.positions.map((position) => ({
     symbol: position.symbol,
@@ -735,7 +876,9 @@ async function getAccountTruthTool(env, ownerId) {
   const payload = {
     nav: snapshot.nav,
     cash: snapshot.cash,
-    margin_used: Math.max(0, -snapshot.cash),
+    margin_used: snapshot.marginDebit,
+    withdrawable_cash: snapshot.withdrawableCash,
+    buying_power: snapshot.buyingPower,
     positions,
     open_orders: openOrders,
     recon: {
@@ -750,6 +893,29 @@ async function getAccountTruthTool(env, ownerId) {
       negative_cash: snapshot.cash < 0,
       concentrated_names: concentration.filter((row) => row.pct_nav > 0.10),
       action: 'REPORT_ONLY_NO_AUTO_LIQUIDATION',
+    },
+    guardian: guardian ? {
+      state: guardian.state,
+      review_id: guardian.id,
+      reviewed_at: guardian.createdAt,
+      mandate_version: guardian.mandateVersion,
+      violations: guardian.report?.violations ?? [],
+      final_directive: guardian.report?.finalDirective ?? null,
+      evidence_fingerprint: guardian.fingerprint,
+    } : {
+      state: GUARDIAN_STATES.BLOCKED,
+      review_id: null,
+      reviewed_at: null,
+      mandate_version: GUARDIAN_MANDATE_VERSION,
+      violations: [{ code: 'GUARDIAN/REVIEW_MISSING', severity: 'CRITICAL' }],
+      final_directive: 'Do not add exposure until a Guardian review is available.',
+      evidence_fingerprint: null,
+    },
+    broker_ledger: {
+      coverage: 'SCHWAB_RETRIEVED_HISTORY_PLUS_CONTINUOUS_INGESTION',
+      active_campaigns: ledger.activeCampaigns,
+      recent_events: ledger.events,
+      latest_observation: ledger.observations[0] ?? null,
     },
     asof: new Date(snapshot.asOf).toISOString(),
   };
@@ -790,7 +956,9 @@ async function getMarketStateTool(env, ownerId) {
     regime: latestAge <= 60 ? latest?.regime ?? null : null,
     regime_confidence: latestAge <= 60 ? latest?.regimeConfidence ?? null : null,
     vix: check.marketState?.vix ?? null,
-    massive: check.ok ? 'LIVE' : 'BLOCKED',
+    massive: String(check.provider ?? '').toUpperCase().includes('MASSIVE')
+      ? (check.ok ? 'LIVE' : 'BLOCKED') : 'NOT_REQUIRED',
+    market_data_status: check.ok ? 'LIVE' : 'BLOCKED',
     market_provider: String(check.provider ?? 'unknown').toUpperCase(),
     live_contracts: check.symbols.reduce((sum, row) => sum + row.contractCount, 0),
     underlyings_checked: check.symbols.length,
@@ -1371,7 +1539,7 @@ export function liveDashboardScript() {
       controls.append(make('p', 'Protected operator controls', 'kicker'), make('h3', 'Live shadow operations'));
       controls.append(make('p', '', 'control-status connector-note'));
       const actions = make('div', undefined, 'filter-row');
-      [['refresh','Refresh status'],['cycle','Run shadow cycle'],['replay','Replay latest evidence'],
+      [['refresh','Refresh status'],['guardian','Run Guardian review'],['cycle','Run shadow cycle'],['replay','Replay latest evidence'],
         ['pause','Global pause'],['resume','Resume cycles'],['kill','Trip kill switch'],['clearKill','Clear kill switch']]
         .forEach(pair => { const button = make('button', pair[1], 'chip'); button.dataset.action = pair[0]; actions.append(button); });
       const reason = make('input', undefined, 'control-reason');
@@ -1385,10 +1553,45 @@ export function liveDashboardScript() {
       + (safety.updatedAt ? ' · ' + when(safety.updatedAt) : ''));
   }
 
+  function renderGuardian(guardianPayload, ledger) {
+    const root = q('#system');
+    if (!root) return;
+    let panel = q('.guardian-panel', root);
+    if (!panel) { panel = make('article', undefined, 'panel guardian-panel'); root.append(panel); }
+    clear(panel);
+    const review = guardianPayload.review;
+    panel.append(make('p', 'Independent risk and behavioral enforcement', 'kicker'),
+      make('h3', 'NUVO Guardian · ' + (review?.state || 'BLOCKED-INCOMPLETE')),
+      make('p', review?.report?.finalDirective || 'A complete Guardian review has not been recorded.', 'connector-note'));
+    const facts = make('dl', undefined, 'package-facts');
+    [['Mandate', guardianPayload.mandateVersion], ['Last review', review?.createdAt ? when(review.createdAt) : 'Not available'],
+      ['Margin debit', money(review?.report?.marginDebit)], ['Campaign contracts', String(guardianPayload.activeCampaigns || 0)],
+      ['Discord delivery', guardianPayload.discord?.configured ? 'CONFIGURED' : 'NOT CONFIGURED'],
+      ['Ledger observations', String(ledger.observations?.length || 0)]].forEach(pair => {
+      const row = make('div'); row.append(make('dt', pair[0]), make('dd', pair[1])); facts.append(row);
+    });
+    panel.append(facts);
+    const violations = review?.report?.violations || [];
+    panel.append(make('p', violations.length ? 'Violations: ' + violations.map(row => row.code).join(' · ') : 'COMPLIANT — NO ACTION REQUIRED', 'connector-note'));
+    panel.append(make('h3', 'Broker transaction ledger'));
+    const wrap = make('div', undefined, 'table-wrap'); const table = make('table');
+    const thead = make('thead'); const hr = make('tr');
+    ['Occurred','Type','Symbol','Side','Qty','Price','Amount','State'].forEach(label => hr.append(make('th', label))); thead.append(hr);
+    const tbody = make('tbody');
+    (ledger.events || []).slice(0, 50).forEach(event => { const row = make('tr');
+      [when(event.occurred_at || event.first_seen_at), event.event_type, event.symbol || '—', event.side || '—', number(event.quantity), money(event.price), money(event.amount), event.state || '—']
+        .forEach(value => row.append(make('td', value))); tbody.append(row); });
+    if (!(ledger.events || []).length) { const row = make('tr'); const cell = make('td', 'No broker events have been ingested yet.'); cell.colSpan = 8; row.append(cell); tbody.append(row); }
+    table.append(thead, tbody); wrap.append(table); panel.append(wrap,
+      make('p', 'Append-only Schwab order, execution, cash, assignment, exercise, and transfer events. Raw broker packets remain protected.', 'connector-note'));
+  }
+
   let currentStatus = null;
   async function refresh() {
-    currentStatus = await api('/api/status');
+    const payloads = await Promise.all([api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=100')]);
+    currentStatus = payloads[0];
     renderOverview(currentStatus); renderOpportunities(currentStatus); renderSystem(currentStatus); await renderEvidence(currentStatus);
+    renderGuardian(payloads[1], payloads[2]);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
     text(q('.safety-banner p'), 'Live Schwab custody, Schwab market data, and D1/R2 evidence are connected. Broker order mutation is disabled.');
@@ -1404,6 +1607,7 @@ export function liveDashboardScript() {
     });
     const operations = {
       refresh: () => Promise.resolve(),
+      guardian: () => api('/api/operator/guardian/review', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }),
       cycle: () => api('/api/cycle', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() }, body: '{}' }),
       replay: () => api('/api/operator/replay', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cycle_id: currentStatus && currentStatus.latestCycle && currentStatus.latestCycle.cycleId }) }),
       pause: () => control('PAUSE', 'PAUSE_SHADOW_CYCLES'),
@@ -1412,6 +1616,7 @@ export function liveDashboardScript() {
       clearKill: () => control('CLEAR_KILL', 'CLEAR_INDEPENDENT_KILL_SWITCH'),
     };
     const confirmations = {
+      guardian: 'Refresh Schwab truth, ingest the broker ledger, and run the read-only Guardian review?',
       cycle: 'Run a live-data shadow opportunity simulation? It cannot place an order.',
       pause: 'Pause all shadow cycles?', resume: 'Resume shadow cycles?',
       kill: 'Trip the independent kill switch and block every new cycle?',
@@ -1480,6 +1685,22 @@ async function route(request, env, ctx) {
 
   const client = new SchwabD1Client(env);
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
+  if (url.pathname === '/api/guardian' && request.method === 'GET') {
+    const [review, ledger, pending] = await Promise.all([
+      latestGuardianReview(env, owner.id), guardianLedgerSummary(env, owner.id, 1),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM guardian_discord_outbox
+        WHERE owner_id=? AND delivery_status IN ('PENDING','FAILED')`).bind(owner.id).first(),
+    ]);
+    return json({ mandateVersion: GUARDIAN_MANDATE_VERSION, review,
+      activeCampaigns: ledger.activeCampaigns, discord: {
+        configured: Boolean(env.GUARDIAN_DISCORD_WEBHOOK_URL), pending: Number(pending?.count ?? 0),
+      } });
+  }
+  if (url.pathname === '/api/ledger' && request.method === 'GET') {
+    const limit = Math.min(250, Math.max(1, Number(url.searchParams.get('limit') ?? 100)));
+    const ledger = await guardianLedgerSummary(env, owner.id, limit);
+    return json({ ...ledger, raw: 'PROTECTED_NOT_EXPOSED', appendOnly: true });
+  }
   if (url.pathname === '/api/integrations/schwab/connect' && request.method === 'GET') {
     const destination = await client.beginOAuth(owner.id);
     const safeDestination = destination.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
@@ -1526,6 +1747,10 @@ async function route(request, env, ctx) {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     return json(await verifyLiveMarket(env, owner.id));
   }
+  if (url.pathname === '/api/operator/guardian/review' && request.method === 'POST') {
+    try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
+    return json({ ok: true, guardian: await runGuardianReview(env, owner.id, { reviewType: 'MANUAL' }) });
+  }
   if (url.pathname === '/api/operator/controls' && request.method === 'POST') {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     const body = await request.json().catch(() => ({}));
@@ -1568,6 +1793,13 @@ async function route(request, env, ctx) {
   return json({ error: 'NOT_FOUND' }, 404);
 }
 
+function easternClock(value = Date.now()) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false,
+    weekday: 'short', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(value));
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return { weekday: get('weekday'), hour: Number(get('hour')), minute: Number(get('minute')) };
+}
+
 export default {
   async fetch(request, env, ctx) {
     try { return await route(request, env, ctx); }
@@ -1576,13 +1808,23 @@ export default {
       return json({ error: 'FAIL_CLOSED', reason: error.message }, 503);
     }
   },
-  async scheduled(_controller, env, ctx) {
+  async scheduled(controller, env, ctx) {
     ctx.waitUntil((async () => {
       const owners = await env.DB.prepare(`SELECT owner_id FROM broker_connections
         WHERE status IN ('CONNECTED','DEGRADED') ORDER BY updated_at ASC`).all();
+      const clock = easternClock(controller.scheduledTime);
       for (const owner of owners.results ?? []) {
-        try { await triggerShadowCycle(env, owner.owner_id, { source: 'SCHEDULED' }); }
-        catch (error) { await audit(env, owner.owner_id, 'SCHEDULED_SHADOW_FAILED', { error: error.message }); }
+        try {
+          const reviewType = clock.hour === 16 && clock.minute >= 10 && clock.minute < 15
+            ? 'END_OF_DAY' : clock.minute === 0 ? 'HOURLY' : 'EVENT';
+          await runGuardianReview(env, owner.owner_id, { reviewType });
+        } catch (error) {
+          await audit(env, owner.owner_id, 'SCHEDULED_GUARDIAN_FAILED', { error: error.message });
+        }
+        if (clock.hour >= 9 && clock.hour <= 16 && clock.minute % 15 === 0) {
+          try { await triggerShadowCycle(env, owner.owner_id, { source: 'SCHEDULED' }); }
+          catch (error) { await audit(env, owner.owner_id, 'SCHEDULED_SHADOW_FAILED', { error: error.message }); }
+        }
       }
     })());
   },

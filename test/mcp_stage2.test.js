@@ -161,6 +161,17 @@ async function mcpRequest(service, method, params, id = 1) {
 }
 
 describe('NUVO VSIM Stage 2 MCP acceptance', () => {
+  test('initialization gives the machine the fail-closed Guardian operating mandate', async () => {
+    const service = {};
+    const { body } = await mcpRequest(service, 'initialize', {
+      protocolVersion: '2025-11-25',
+      capabilities: {},
+      clientInfo: { name: 'nuvo-test-client', version: '1.0.0' },
+    });
+    assert.match(body.result.instructions, /Authority 1 read-only Guardian/u);
+    assert.match(body.result.instructions, /no broker mutation capability/u);
+  });
+
   test('exposes only the contracted surface and never exposes place/cancel/replace order', async () => {
     const service = new Proxy({}, { get: () => async () => ({ ok: true, authority_level: 1, asof: new Date().toISOString(), error: null }) });
     const { body } = await mcpRequest(service, 'tools/list', {});

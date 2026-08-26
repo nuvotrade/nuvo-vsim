@@ -54,7 +54,7 @@ function marketNodes(packet) {
   return nodes;
 }
 
-function sessionStatus(packet, now) {
+export function sessionStatus(packet, now) {
   const nodes = marketNodes(packet);
   const option = nodes.find((node) => String(node.marketType ?? node.category ?? '').toUpperCase().includes('OPTION'))
     ?? nodes.find((node) => String(node.product ?? '').toUpperCase().includes('OPTION'))
@@ -65,9 +65,16 @@ function sessionStatus(packet, now) {
     start: timestamp(period.start), end: timestamp(period.end),
   })).filter((period) => Number.isFinite(period.start) && Number.isFinite(period.end));
   const contains = (periods) => periods.some((period) => current >= period.start && current <= period.end);
-  if (contains(intervals('regularMarket'))) return 'OPEN';
-  if (contains(intervals('preMarket'))) return 'PRE';
-  if (contains(intervals('postMarket'))) return 'POST';
+  const regular = intervals('regularMarket');
+  const pre = intervals('preMarket');
+  const post = intervals('postMarket');
+  if (contains(regular)) return 'OPEN';
+  if (contains(pre)) return 'PRE';
+  if (contains(post)) return 'POST';
+  // Schwab's top-level isOpen can become true before the options regular
+  // session begins. When timestamped session intervals are present they are
+  // the authority; never promote an out-of-interval instant to OPEN.
+  if (regular.length || pre.length || post.length) return 'CLOSED';
   return option.isOpen ? 'OPEN' : 'CLOSED';
 }
 

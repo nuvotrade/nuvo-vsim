@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
-import { SchwabMarketProvider } from '../src/truth/providers/schwab.js';
+import { SchwabMarketProvider, sessionStatus } from '../src/truth/providers/schwab.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
@@ -445,6 +445,14 @@ function schwabMarketClient({ stale = false, incomplete = false } = {}) {
 }
 
 describe('Schwab-only production market provider', () => {
+  test('does not treat Schwab top-level isOpen as options RTH before the regular interval', () => {
+    const start = Date.UTC(2026, 7, 26, 13, 30);
+    const packet = { option: { OPTION: { marketType: 'OPTION', isOpen: true, sessionHours: {
+      regularMarket: [{ start: new Date(start).toISOString(), end: new Date(start + 6.5 * 3_600_000).toISOString() }],
+    } } } };
+    assert.equal(sessionStatus(packet, start - 15 * 60_000), 'CLOSED');
+    assert.equal(sessionStatus(packet, start), 'OPEN');
+  });
   test('normalizes real-time Schwab quotes, history, option chains, and market state', async () => {
     const eventProvider = { async events() { return { value: [], asOf: NOW, source: 'FUND_EVENT_CLEARANCE' }; } };
     const provider = new SchwabMarketProvider({

@@ -4,6 +4,7 @@ const TRADER_URL = 'https://api.schwabapi.com/trader/v1';
 const MARKETDATA_URL = 'https://api.schwabapi.com/marketdata/v1';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+import { normalizedBrokerEventKey } from './guardian.js';
 
 function finite(value, fallback = null) {
   if (value === null || value === undefined || value === '') return fallback;
@@ -164,6 +165,60 @@ function flattenOrders(order, accountRef, observedAt, rows = []) {
   }
   for (const child of order?.childOrderStrategies ?? []) flattenOrders(child, accountRef, observedAt, rows);
   return rows;
+}
+
+function flattenOrderEvents(order, accountMask, observedAt, rows = []) {
+  const brokerOrderId = String(order?.orderId ?? '').trim() || null;
+  const legById = new Map((order?.orderLegCollection ?? []).map((leg) => [String(leg.legId ?? ''), leg]));
+  if (brokerOrderId) {
+    const firstLeg = order?.orderLegCollection?.[0] ?? {};
+    rows.push({
+      type: 'ORDER_STATE', brokerOrderId, accountMask,
+      symbol: String(firstLeg.instrument?.symbol ?? '').replaceAll(' ', '').toUpperCase() || null,
+      side: String(firstLeg.instruction ?? 'UNKNOWN').toUpperCase(),
+      quantity: finite(order.quantity ?? firstLeg.quantity), price: finite(order.price), amount: null,
+      state: String(order.status ?? 'UNKNOWN').toUpperCase(),
+      occurredAt: iso(order.closeTime ?? order.cancelTime ?? order.enteredTime, observedAt), raw: order,
+    });
+  }
+  for (const activity of order?.orderActivityCollection ?? []) {
+    const activityId = String(activity.activityId ?? '').trim() || null;
+    for (const leg of activity.executionLegs ?? []) {
+      const orderLeg = legById.get(String(leg.legId ?? '')) ?? {};
+      rows.push({
+        type: String(activity.activityType ?? 'EXECUTION').toUpperCase(), brokerOrderId,
+        activityId, accountMask,
+        symbol: String(orderLeg.instrument?.symbol ?? '').replaceAll(' ', '').toUpperCase() || null,
+        side: String(orderLeg.instruction ?? 'UNKNOWN').toUpperCase(), quantity: finite(leg.quantity),
+        price: finite(leg.price), amount: null, state: String(order.status ?? 'UNKNOWN').toUpperCase(),
+        occurredAt: iso(leg.time ?? activity.executionType ?? order.closeTime, observedAt), raw: activity,
+      });
+    }
+  }
+  for (const child of order?.childOrderStrategies ?? []) flattenOrderEvents(child, accountMask, observedAt, rows);
+  return rows;
+}
+
+function normalizeTransaction(transaction, accountMask, observedAt) {
+  const transferItems = transaction?.transferItems ?? [];
+  const item = transferItems.find((candidate) => {
+    const assetType = String(candidate?.instrument?.assetType ?? '').toUpperCase();
+    return assetType && !['CURRENCY', 'CASH_EQUIVALENT'].includes(assetType);
+  }) ?? transferItems[0] ?? {};
+  const instrument = item.instrument ?? {};
+  return {
+    type: String(transaction?.type ?? 'BROKER_TRANSACTION').toUpperCase(),
+    transactionId: String(transaction?.activityId ?? transaction?.transactionId ?? '').trim() || null,
+    brokerOrderId: String(transaction?.orderId ?? '').trim() || null,
+    activityId: String(transaction?.activityId ?? '').trim() || null,
+    accountMask,
+    symbol: String(instrument.symbol ?? '').replaceAll(' ', '').toUpperCase() || null,
+    side: String(item.positionEffect ?? item.direction ?? transaction?.subAccount ?? 'UNKNOWN').toUpperCase(),
+    quantity: finite(item.amount ?? item.quantity), price: finite(item.price), amount: finite(transaction?.netAmount),
+    state: String(transaction?.status ?? 'RECORDED').toUpperCase(),
+    occurredAt: iso(transaction?.time ?? transaction?.settlementDate ?? transaction?.transactionDate, observedAt),
+    raw: transaction,
+  };
 }
 
 function isOpenOrder(order) {
@@ -515,35 +570,74 @@ export class SchwabD1Client {
         accountMask: String(number.accountNumber ?? '').slice(-4).padStart(4, '•'),
         cash, reportedCashBalance: reportedCash,
         buyingPower: finite(balances.buyingPower ?? balances.buyingPowerNonMarginableTrade),
+        withdrawableCash: finite(balances.cashAvailableForWithdrawal ?? balances.availableFundsNonMarginableTrade
+          ?? balances.cashAvailableForTrading),
+        marginBalance: finite(balances.marginBalance),
+        marginDebit: Math.max(0, -(finite(balances.marginBalance, cash) ?? 0)),
         nav, positions,
       };
     });
     if (accounts.some((account) => ![account.cash, account.buyingPower, account.nav].every(Number.isFinite))) {
       throw new Error('SCHWAB_ACCOUNT_BALANCES_INCOMPLETE');
     }
-    const from = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+    const latestTransaction = await this.env.DB.prepare(`SELECT MAX(occurred_at) AS latest
+      FROM broker_events WHERE owner_id=? AND transaction_id IS NOT NULL`).bind(ownerId).first();
+    const latestTransactionMs = Date.parse(latestTransaction?.latest ?? '');
+    const ledgerFloorMs = Date.now() - 60 * 24 * 60 * 60 * 1000;
+    const transactionFromMs = Number.isFinite(latestTransactionMs)
+      ? Math.max(ledgerFloorMs, latestTransactionMs - 3 * 24 * 60 * 60 * 1000)
+      : ledgerFloorMs;
+    const transactionFrom = new Date(transactionFromMs).toISOString();
+    const orderFrom = new Date(ledgerFloorMs).toISOString();
     const to = new Date(Date.now() + 60_000).toISOString();
-    const orderRows = await Promise.all(accounts.map(async (account) => {
-      const orders = await this._read(`/accounts/${encodeURIComponent(account.accountRef)}/orders?fromEnteredTime=${encodeURIComponent(from)}&toEnteredTime=${encodeURIComponent(to)}&maxResults=3000`, token);
-      return orders.flatMap((order) => flattenOrders(order, account.accountRef, observedAt));
+    const brokerPackets = await Promise.all(accounts.map(async (account) => {
+      const orders = await this._read(`/accounts/${encodeURIComponent(account.accountRef)}/orders?fromEnteredTime=${encodeURIComponent(orderFrom)}&toEnteredTime=${encodeURIComponent(to)}&maxResults=3000`, token);
+      let transactions = [];
+      try {
+        const types = 'TRADE,RECEIVE_AND_DELIVER,DIVIDEND_OR_INTEREST,ACH_RECEIPT,ACH_DISBURSEMENT,CASH_RECEIPT,CASH_DISBURSEMENT,ELECTRONIC_FUND,WIRE_OUT,WIRE_IN,JOURNAL,MEMORANDUM,MARGIN_CALL,MONEY_MARKET,SMA_ADJUSTMENT';
+        transactions = await this._read(`/accounts/${encodeURIComponent(account.accountRef)}/transactions?startDate=${encodeURIComponent(transactionFrom)}&endDate=${encodeURIComponent(to)}&types=${encodeURIComponent(types)}`, token);
+      } catch (error) {
+        // A complete ledger is a required truth source. Do not silently turn
+        // an unavailable transaction endpoint into an empty ledger.
+        throw new Error(`SCHWAB_TRANSACTION_LEDGER_UNAVAILABLE:${error.message}`);
+      }
+      return {
+        orders: orders.flatMap((order) => flattenOrders(order, account.accountRef, observedAt)),
+        events: [
+          ...orders.flatMap((order) => flattenOrderEvents(order, account.accountMask, observedAt)),
+          ...(transactions ?? []).map((row) => normalizeTransaction(row, account.accountMask, observedAt)),
+        ],
+      };
     }));
+    const orderRows = brokerPackets.map((packet) => packet.orders);
+    const brokerEvents = brokerPackets.flatMap((packet) => packet.events).filter((event) => event.occurredAt);
     const snapshot = {
       asOf: Date.parse(observedAt),
       cash: accounts.reduce((sum, account) => sum + account.cash, 0),
       buyingPower: accounts.reduce((sum, account) => sum + account.buyingPower, 0),
+      withdrawableCash: accounts.every((account) => Number.isFinite(account.withdrawableCash))
+        ? accounts.reduce((sum, account) => sum + account.withdrawableCash, 0) : null,
+      marginDebit: accounts.reduce((sum, account) => sum + account.marginDebit, 0),
       nav: accounts.reduce((sum, account) => sum + account.nav, 0),
       positions: aggregatePositions(accounts.flatMap((account) => account.positions)),
       openOrders: orderRows.flat().filter(isOpenOrder),
-      accounts: accounts.map(({ accountRef, accountMask, cash, reportedCashBalance, buyingPower, nav }) => ({
-        accountRef, accountMask, cash, reportedCashBalance, buyingPower, nav,
+      accounts: accounts.map(({ accountRef, accountMask, cash, reportedCashBalance, buyingPower,
+        withdrawableCash, marginBalance, marginDebit, nav }) => ({
+        accountRef, accountMask, cash, reportedCashBalance, buyingPower,
+        withdrawableCash, marginBalance, marginDebit, nav,
       })),
+      brokerEvents,
     };
     const account = {
       cash: snapshot.cash,
       buyingPower: snapshot.buyingPower,
+      withdrawableCash: snapshot.withdrawableCash,
+      marginDebit: snapshot.marginDebit,
       nav: snapshot.nav,
-      accounts: snapshot.accounts.map(({ accountMask, cash, reportedCashBalance, buyingPower, nav }) => ({
-        accountMask, cash, reportedCashBalance, buyingPower, nav,
+      accounts: snapshot.accounts.map(({ accountMask, cash, reportedCashBalance, buyingPower,
+        withdrawableCash, marginBalance, marginDebit, nav }) => ({
+        accountMask, cash, reportedCashBalance, buyingPower,
+        withdrawableCash, marginBalance, marginDebit, nav,
       })),
     };
     const snapshotHash = await digest(JSON.stringify({
@@ -558,11 +652,45 @@ export class SchwabD1Client {
       ownerId, snapshotHash, JSON.stringify(account), JSON.stringify(snapshot.positions),
       JSON.stringify(snapshot.openOrders), observedAt, observedAt,
     ).run();
+    const previousObservation = await this.env.DB.prepare(`SELECT chain_hash FROM broker_observations
+      WHERE owner_id=? ORDER BY observed_at DESC LIMIT 1`).bind(ownerId).first();
+    const previousChainHash = previousObservation?.chain_hash ?? `NUVO-GUARDIAN-GENESIS:${ownerId}`;
+    const chainHash = await digest(`${previousChainHash}|${snapshotHash}|${observedAt}`);
+    await this.env.DB.prepare(`INSERT INTO broker_observations
+      (owner_id,observation_id,snapshot_hash,previous_chain_hash,chain_hash,account_json,
+       positions_json,orders_json,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(
+      ownerId, crypto.randomUUID(), snapshotHash, previousChainHash, chainHash,
+      JSON.stringify(account), JSON.stringify(snapshot.positions), JSON.stringify(snapshot.openOrders),
+      observedAt, observedAt,
+    ).run();
+    const eventStatements = brokerEvents.map((event) => {
+      const eventKey = normalizedBrokerEventKey(event);
+      return this.env.DB.prepare(`INSERT INTO broker_events
+        (owner_id,event_key,event_type,broker_order_id,transaction_id,activity_id,account_mask,
+         symbol,side,quantity,price,amount,state,occurred_at,raw_json,first_seen_at,last_seen_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,event_key) DO UPDATE SET
+        broker_order_id=excluded.broker_order_id,transaction_id=excluded.transaction_id,
+        activity_id=excluded.activity_id,account_mask=excluded.account_mask,
+        symbol=excluded.symbol,side=excluded.side,quantity=excluded.quantity,
+        price=excluded.price,amount=excluded.amount,state=excluded.state,
+        occurred_at=excluded.occurred_at,raw_json=excluded.raw_json,last_seen_at=excluded.last_seen_at`).bind(
+        ownerId, eventKey, event.type ?? 'BROKER_EVENT', event.brokerOrderId ?? null,
+        event.transactionId ?? null, event.activityId ?? null, event.accountMask ?? null,
+        event.symbol ?? null, event.side ?? null, event.quantity ?? null, event.price ?? null,
+        event.amount ?? null, event.state ?? null, event.occurredAt ?? null,
+        JSON.stringify(event.raw ?? {}), observedAt, observedAt,
+      );
+    });
+    for (let offset = 0; offset < eventStatements.length; offset += 50) {
+      const chunk = eventStatements.slice(offset, offset + 50);
+      if (typeof this.env.DB.batch === 'function') await this.env.DB.batch(chunk);
+      else for (const statement of chunk) await statement.run();
+    }
     await this.env.DB.prepare(`UPDATE broker_connections SET status='CONNECTED',
       last_successful_sync_at=?,last_error_code=NULL,updated_at=? WHERE owner_id=?`).bind(
       observedAt, observedAt, ownerId,
     ).run();
-    return { ...snapshot, snapshotHash };
+    return { ...snapshot, snapshotHash, observationChainHash: chainHash };
   }
 
   async status(ownerId) {
