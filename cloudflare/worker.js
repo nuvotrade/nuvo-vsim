@@ -944,10 +944,16 @@ async function getMarketStateTool(env, ownerId) {
     }, { code: 'MARKET_DATA_BLOCKED', message: error.message });
   }
   const latest = await cycleSummary(env, ownerId);
-  const timestamps = check.symbols.flatMap((row) => [row.quoteAsOf, row.chainAsOf])
-    .map(epochMs).filter(Number.isFinite);
-  const oldest = timestamps.length ? Math.min(...timestamps) : null;
-  const quoteAge = oldest === null ? null : Math.max(0, (Date.now() - oldest) / 1000);
+  // The 60-second MCP field is the underlying-quote freshness gate. Option
+  // chains have their own stricter structural audit and a separate 120-second
+  // maximum in the provider. Mixing the oldest illiquid contract timestamp
+  // into quote_age_seconds falsely reports a live underlying feed as stale.
+  const quoteTimestamps = check.symbols.map((row) => epochMs(row.quoteAsOf)).filter(Number.isFinite);
+  const chainTimestamps = check.symbols.map((row) => epochMs(row.chainAsOf)).filter(Number.isFinite);
+  const oldestQuote = quoteTimestamps.length ? Math.min(...quoteTimestamps) : null;
+  const oldestChain = chainTimestamps.length ? Math.min(...chainTimestamps) : null;
+  const quoteAge = oldestQuote === null ? null : Math.max(0, (Date.now() - oldestQuote) / 1000);
+  const chainAge = oldestChain === null ? null : Math.max(0, (Date.now() - oldestChain) / 1000);
   const session = normalizeSession(check.marketState?.status);
   const latestAge = Number.isFinite(Number(latest?.at))
     ? Math.max(0, (Date.now() - Number(latest.at)) / 1000) : Infinity;
@@ -964,6 +970,8 @@ async function getMarketStateTool(env, ownerId) {
     underlyings_checked: check.symbols.length,
     quote_age_seconds: quoteAge,
     freshness_limit_seconds: 60,
+    chain_age_seconds: chainAge,
+    chain_freshness_limit_seconds: Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000) / 1000,
     asof: check.checkedAt,
   };
   if (!check.ok) return toolEnvelope(env, payload, { code: 'MARKET_DATA_BLOCKED', message: 'Live market verification failed.' });
