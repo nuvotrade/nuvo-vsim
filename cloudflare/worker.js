@@ -18,7 +18,8 @@ import { handleVsimMcp } from './mcp-server.js';
 import { SchwabD1Client } from './schwab-client.js';
 import { mapCustodyRisk } from './custody-risk.js';
 import {
-  evaluateGuardian, guardianReport, GUARDIAN_MANDATE_VERSION, GUARDIAN_STATES,
+  evaluateGuardian, guardianDiscordPayload, guardianReport, GUARDIAN_MANDATE_VERSION, GUARDIAN_STATES,
+  shouldNotifyGuardian,
 } from './guardian.js';
 
 const JSON_HEADERS = Object.freeze({
@@ -156,17 +157,6 @@ async function guardianLedgerSummary(env, ownerId, limit = 100) {
     activeCampaigns: Number(campaigns?.count ?? 0) };
 }
 
-function guardianDiscordText(review) {
-  const report = review.report;
-  const lead = report.violations?.some((row) => row.severity === 'CRITICAL')
-    ? 'CRITICAL NUVO VIOLATION' : 'NUVO GUARDIAN — CONTROL REPORT';
-  return [lead, `Account authority: ${report.accountAuthority}`, `Account equity: ${report.accountEquity ?? 'UNKNOWN'}`,
-    `Cash: ${report.cash ?? 'UNKNOWN'}`, `Margin debit: ${report.marginDebit ?? 'UNKNOWN'}`,
-    `Positions: ${report.openPositions}`, `Open orders: ${report.openOrders}`,
-    `Violations: ${(report.violations ?? []).map((row) => row.code).join(', ') || 'NONE'}`,
-    `Directive: ${report.finalDirective}`, `Evidence: ${review.id}`].join('\n').slice(0, 1900);
-}
-
 async function dispatchGuardianOutbox(env, ownerId) {
   if (!env.GUARDIAN_DISCORD_WEBHOOK_URL) return { configured: false, sent: 0 };
   const rows = await env.DB.prepare(`SELECT outbox_id,review_id,payload_json,attempts
@@ -220,6 +210,8 @@ export async function runGuardianReview(env, ownerId, { reviewType = 'EVENT', no
   report.marketData = session === 'RTH' ? 'LIVE' : 'NOT_RTH';
   report.brokerageSnapshotIdentifier = snapshot.snapshotHash;
   report.reconciliation = recon;
+  const { fingerprint: _preEnrichmentFingerprint, ...completeReport } = report;
+  report.fingerprint = contentHash(completeReport);
   const reviewId = crypto.randomUUID();
   await env.DB.prepare(`INSERT INTO guardian_reviews
     (owner_id,review_id,review_type,account_state,mandate_version,snapshot_hash,
@@ -230,15 +222,15 @@ export async function runGuardianReview(env, ownerId, { reviewType = 'EVENT', no
   const newEvents = await env.DB.prepare(`SELECT COUNT(*) AS count FROM broker_events
     WHERE owner_id=? AND first_seen_at=?`).bind(ownerId, new Date(snapshot.asOf).toISOString()).first();
   const critical = assessment.violations.some((row) => row.severity === 'CRITICAL');
-  const changed = previous?.state !== assessment.state || Number(newEvents?.count ?? 0) > 0;
-  const shouldNotify = notify && (critical || changed || reviewType === 'END_OF_DAY');
+  const shouldNotify = shouldNotifyGuardian({ previous, assessment,
+    newEventCount: Number(newEvents?.count ?? 0), reviewType, notify });
   if (shouldNotify) {
     const review = { id: reviewId, report };
     await env.DB.prepare(`INSERT INTO guardian_discord_outbox
       (owner_id,outbox_id,review_id,severity,payload_json,delivery_status,attempts,created_at)
       VALUES (?,?,?,?,?,'PENDING',0,?)`).bind(
       ownerId, crypto.randomUUID(), reviewId, critical ? 'CRITICAL' : 'INFO',
-      JSON.stringify({ content: guardianDiscordText(review), allowed_mentions: { parse: [] } }), report.timestamp,
+      JSON.stringify(guardianDiscordPayload(review)), report.timestamp,
     ).run();
   }
   const delivery = await dispatchGuardianOutbox(env, ownerId);

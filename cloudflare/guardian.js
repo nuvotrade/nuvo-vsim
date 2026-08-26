@@ -88,6 +88,21 @@ export function evaluateGuardian({ snapshot, reconStatus = 'MISSING', campaignCo
 }
 
 export function guardianReport({ snapshot, assessment, reconStatus, campaignCount = 0, previousReconciliation = null } = {}) {
+  const positions = (snapshot?.positions ?? []).map((position) => {
+    const quantity = finite(position.quantity, 0);
+    const multiplier = finite(position.multiplier, position.type === 'OPTION' ? 100 : 1);
+    const averagePrice = finite(position.averagePrice);
+    const marketValue = finite(position.marketValue);
+    const mark = quantity !== 0 && marketValue != null ? marketValue / (quantity * multiplier) : null;
+    const signedCost = averagePrice == null ? null : quantity * multiplier * averagePrice;
+    return {
+      symbol: position.symbol, underlying: underlyingOf(position), assetClass: position.type ?? 'UNKNOWN',
+      right: position.right ?? null, strike: finite(position.strike), expiration: position.expiration ?? null,
+      quantity, multiplier, averagePrice, mark, marketValue,
+      unrealizedPnl: marketValue == null || signedCost == null
+        ? null : Math.round((marketValue - signedCost) * 100) / 100,
+    };
+  });
   const report = {
     mandateVersion: GUARDIAN_MANDATE_VERSION,
     timestamp: new Date().toISOString(),
@@ -97,6 +112,7 @@ export function guardianReport({ snapshot, assessment, reconStatus, campaignCoun
     totalDeployment: (snapshot?.positions ?? []).reduce((sum, row) => sum + Math.abs(finite(row.marketValue, 0)), 0),
     largestUnderlyingExposure: assessment?.exposures?.[0] ?? null,
     openPositions: snapshot?.positions?.length ?? 0, openOrders: snapshot?.openOrders?.length ?? 0,
+    positions,
     unresolvedDiscrepancies: assessment?.violations?.find((row) => row.code === 'RECON/MISMATCH')?.detail?.unresolved
       ?? assessment?.violations?.filter((row) => row.code.startsWith('RECON/')).length ?? 0,
     campaignRecordVersion: campaignCount ? `ACTIVE-${campaignCount}` : 'MISSING',
@@ -115,6 +131,114 @@ export function guardianReport({ snapshot, assessment, reconStatus, campaignCoun
     previousReconciliation,
   };
   return { ...report, fingerprint: contentHash(report) };
+}
+
+export function wholeDollar(value) {
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return 'UNKNOWN';
+  const number = Number(value);
+  const rounded = Math.sign(number) * Math.round(Math.abs(number));
+  const absolute = Math.abs(rounded).toLocaleString('en-US');
+  return rounded < 0 ? `-$${absolute}` : `$${absolute}`;
+}
+
+function pct(value) {
+  return Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : 'UNKNOWN';
+}
+
+function optionDescription(position) {
+  const side = position.quantity < 0 ? 'Short' : 'Long';
+  const contracts = Math.abs(position.quantity);
+  const right = position.right === 'put' ? 'put' : 'call';
+  const expiry = position.expiration ?? 'unknown expiry';
+  const strike = Number.isFinite(position.strike) ? wholeDollar(position.strike) : 'unknown strike';
+  return `${side} ${contracts} ${position.underlying} ${expiry} ${strike} ${right}${contracts === 1 ? '' : 's'}`;
+}
+
+function positionField(position) {
+  const isOption = position.assetClass === 'OPTION';
+  const description = isOption
+    ? optionDescription(position)
+    : `${Math.abs(position.quantity).toLocaleString('en-US')} ${position.symbol} share${Math.abs(position.quantity) === 1 ? '' : 's'}`;
+  return {
+    name: description,
+    value: [`Mark: ${wholeDollar(position.mark)}`, `Market value: ${wholeDollar(position.marketValue)}`,
+      `Average price: ${wholeDollar(position.averagePrice)}`, `Current P&L: **${wholeDollar(position.unrealizedPnl)}**`].join(' · '),
+    inline: false,
+  };
+}
+
+function violationText(violation) {
+  const detail = violation.detail ?? {};
+  switch (violation.code) {
+    case 'RECON/MISMATCH':
+      return `Broker custody differs from the frozen baseline (${detail.unresolved ?? 'unknown'} unresolved facts). New exposure is blocked.`;
+    case 'RECON/MISSING':
+      return 'No verified reconciliation baseline exists. New exposure is blocked.';
+    case 'RISK/SINGLE_NAME_ABOVE_20':
+      return `${detail.symbol ?? 'A position'} is ${pct(detail.pctNav)} of NAV, above the 20% limit. No additional exposure is allowed.`;
+    case 'RISK/SINGLE_NAME_ABOVE_15':
+      return `${detail.symbol ?? 'A position'} is ${pct(detail.pctNav)} of NAV, above the 15% throttle level.`;
+    case 'RISK/SINGLE_NAME_ABOVE_10':
+      return `${detail.symbol ?? 'A position'} is ${pct(detail.pctNav)} of NAV, above the 10% warning level.`;
+    case 'RISK/MARGIN_DEBIT':
+      return `Margin debit is ${wholeDollar(detail.margin_debit)}. Account authority is HALTED.`;
+    case 'OPTIONS/UNCOVERED_CALL':
+      return `${detail.symbol ?? 'A short call'} requires ${detail.requiredShares ?? 'unknown'} shares but only ${detail.availableShares ?? 'unknown'} are available.`;
+    case 'CAMPAIGN/CONTRACTS_MISSING':
+      return `${detail.positions ?? 'Open'} position(s) have no frozen campaign contract. Management terms cannot be invented after entry.`;
+    case 'AUTH/BROKER_BYPASS':
+      return `${detail.open_orders ?? 'An'} broker order(s) lack frozen campaign authority.`;
+    case 'DATA/BROKER_STALE':
+      return `Broker data is ${Math.round(detail.age_seconds ?? 0)} seconds old and cannot authorize new exposure.`;
+    default:
+      return violation.code;
+  }
+}
+
+export function guardianDiscordPayload(review) {
+  const report = review.report;
+  const critical = (report.violations ?? []).some((row) => row.severity === 'CRITICAL');
+  const statusIcon = report.accountAuthority === GUARDIAN_STATES.OPEN ? '🟢'
+    : report.accountAuthority === GUARDIAN_STATES.THROTTLED ? '🟠' : '🛑';
+  const fields = [
+    { name: 'Account', value: [`NAV: **${wholeDollar(report.accountEquity)}**`,
+      `Cash: **${wholeDollar(report.cash)}**`, `Margin debit: **${wholeDollar(report.marginDebit)}**`,
+      `Deployed: **${wholeDollar(report.totalDeployment)}**`].join('\n'), inline: true },
+    { name: 'System status', value: [`Authority: **${report.accountAuthority}**`,
+      `Broker data: **${report.brokerData ?? 'UNKNOWN'}**`, `Market data: **${report.marketData ?? 'UNKNOWN'}**`,
+      `Reconciliation: **${report.reconciliation?.status ?? 'UNKNOWN'}**`,
+      `Open orders: **${report.openOrders ?? 0}**`].join('\n'), inline: true },
+    ...(report.positions ?? []).map(positionField),
+    { name: `Violations (${(report.violations ?? []).length})`,
+      value: (report.violations ?? []).length
+        ? report.violations.map((row) => `• **${row.code}** — ${violationText(row)}`).join('\n').slice(0, 1024)
+        : 'None.', inline: false },
+    { name: 'Guardian directive', value: report.finalDirective ?? 'No directive available.', inline: false },
+  ].slice(0, 25);
+  return {
+    content: `${statusIcon} **NUVO GUARDIAN — ${report.accountAuthority}**`,
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: critical ? 'Critical account control report' : 'Account control report',
+      description: `Schwab snapshot: ${report.timestamp}\nPosition P&L is current broker mark versus Schwab average price. Values are rounded to whole dollars.`,
+      color: critical ? 0xED4245 : report.accountAuthority === GUARDIAN_STATES.OPEN ? 0x57F287 : 0xFEE75C,
+      fields,
+      footer: { text: `Evidence ${review.id} · ${report.mandateVersion}` },
+      timestamp: report.timestamp,
+    }],
+  };
+}
+
+export function shouldNotifyGuardian({ previous = null, assessment, newEventCount = 0,
+  reviewType = 'EVENT', notify = true } = {}) {
+  if (!notify) return false;
+  if (reviewType === 'MANUAL' || reviewType === 'END_OF_DAY') return true;
+  if (!previous) return true;
+  if (previous.state !== assessment?.state) return true;
+  if (Number(newEventCount) > 0) return true;
+  const priorCodes = (previous.report?.violations ?? []).map((row) => row.code).sort();
+  const currentCodes = (assessment?.violations ?? []).map((row) => row.code).sort();
+  return JSON.stringify(priorCodes) !== JSON.stringify(currentCodes);
 }
 
 export function normalizedBrokerEventKey(event) {

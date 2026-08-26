@@ -1,7 +1,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  evaluateGuardian, GUARDIAN_STATES, normalizedBrokerEventKey, projectedExposure, uncoveredShortCalls,
+  evaluateGuardian, guardianDiscordPayload, guardianReport, GUARDIAN_STATES,
+  normalizedBrokerEventKey, projectedExposure, shouldNotifyGuardian, uncoveredShortCalls, wholeDollar,
 } from '../cloudflare/guardian.js';
 
 const NOW = Date.UTC(2026, 7, 26, 15, 0);
@@ -66,5 +67,46 @@ describe('NUVO Guardian enforcement', () => {
       normalizedBrokerEventKey({ ...common, brokerOrderId: 'parent-order' }),
       normalizedBrokerEventKey({ ...common, brokerOrderId: 'child-order' }),
     );
+  });
+
+  test('Discord currency is whole-dollar, signed, and always carries a dollar symbol', () => {
+    assert.equal(wholeDollar(161_825.49), '$161,825');
+    assert.equal(wholeDollar(161_825.5), '$161,826');
+    assert.equal(wholeDollar(-1_002.5), '-$1,003');
+    assert.equal(wholeDollar(null), 'UNKNOWN');
+  });
+
+  test('Discord control report describes every position and its current P&L', () => {
+    const snapshot = { ...base, nav: 161_825.14, cash: 3_520.14, positions: [
+      { symbol: 'SPCX', underlying: 'SPCX', type: 'EQUITY', quantity: 500,
+        multiplier: 1, averagePrice: 120.70, marketValue: 69_415 },
+      { symbol: 'SPCX260828C00141000', underlying: 'SPCX', type: 'OPTION', right: 'call',
+        strike: 141, expiration: '2026-08-28', quantity: -5, multiplier: 100,
+        averagePrice: 2.01, marketValue: -1_002.5 },
+    ] };
+    const assessment = evaluateGuardian({ snapshot, reconStatus: 'MISMATCH', campaignCount: 0, now: NOW });
+    const report = guardianReport({ snapshot, assessment, reconStatus: 'MISMATCH' });
+    report.marketData = 'LIVE';
+    report.reconciliation = { status: 'MISMATCH' };
+    const payload = guardianDiscordPayload({ id: 'review-1', report });
+    assert.match(payload.content, /HALTED/u);
+    assert.equal(payload.embeds[0].fields.filter((field) => /SPCX/u.test(field.name)).length, 2);
+    assert.match(payload.embeds[0].fields.find((field) => field.name.includes('500 SPCX shares')).value,
+      /Current P&L: \*\*\$9,065\*\*/u);
+    assert.match(payload.embeds[0].fields.find((field) => field.name.includes('Short 5 SPCX')).value,
+      /Current P&L: \*\*\$3\*\*/u);
+    assert.match(payload.embeds[0].fields.find((field) => field.name.startsWith('Violations')).value,
+      /Broker custody differs/u);
+  });
+
+  test('persistent unchanged violations do not spam Discord but manual reports always send', () => {
+    const violations = [{ code: 'RECON/MISMATCH', severity: 'CRITICAL' }];
+    const assessment = { state: GUARDIAN_STATES.HALTED, violations };
+    const previous = { state: GUARDIAN_STATES.HALTED, report: { violations } };
+    assert.equal(shouldNotifyGuardian({ previous, assessment, reviewType: 'EVENT' }), false);
+    assert.equal(shouldNotifyGuardian({ previous, assessment, reviewType: 'MANUAL' }), true);
+    assert.equal(shouldNotifyGuardian({ previous, assessment, reviewType: 'EVENT', newEventCount: 1 }), true);
+    assert.equal(shouldNotifyGuardian({ previous, assessment: { ...assessment,
+      violations: [...violations, { code: 'RISK/MARGIN_DEBIT', severity: 'CRITICAL' }] } }), true);
   });
 });
