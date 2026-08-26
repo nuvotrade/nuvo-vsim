@@ -69,6 +69,32 @@ export function underwrite({
     });
   }
 
+  // Success probability is deliberately separate from p_market/p_model.
+  // Those fields measure the calibrated terminal-breach event used by the
+  // short-put hypothesis. A Principal asking "what is the likelihood this
+  // trade makes money?" needs P(payoff > 0), not a strike-breach proxy.
+  const profitDirection = structure.profitDirection
+    ?? (structure.kind === 'CSP' || structure.kind === 'BULL_PUT_SPREAD'
+      || structure.kind === 'COVERED_CALL' || structure.kind === 'SHARES' ? 'above' : null);
+  const referenceIv = structure.legs.find((leg) => isNum(leg.contract?.iv))?.contract?.iv;
+  const marketSuccess = isNum(structure.breakeven) && isNum(referenceIv) && profitDirection
+    ? marketProbability({
+      spot,
+      strike: structure.breakeven,
+      strikeIv: referenceIv,
+      dte,
+      right: profitDirection === 'below' ? 'put' : 'call',
+    })
+    : null;
+  const success = {
+    p_model: evaluation.pWin,
+    p_market: marketSuccess?.p ?? null,
+    breakeven: structure.breakeven ?? null,
+    direction: profitDirection,
+    basis_model: 'ensemble-path-payoff-positive-after-entry-price-before-modeled-costs',
+    basis_market: marketSuccess?.basis ?? null,
+  };
+
   // ── Contract-level liquidity ──
   for (const leg of structure.legs) {
     if (!leg.contract) continue;
@@ -146,6 +172,7 @@ export function underwrite({
     evaluation,
     capital,
     probabilities,
+    success,
     conditionalLoss: condLoss,
     pTouch,
     costRatio: cRatio,

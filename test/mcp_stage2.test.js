@@ -168,7 +168,7 @@ describe('NUVO VSIM Stage 2 MCP acceptance', () => {
       capabilities: {},
       clientInfo: { name: 'nuvo-test-client', version: '1.0.0' },
     });
-    assert.match(body.result.instructions, /Authority 1 read-only Guardian/u);
+    assert.match(body.result.instructions, /Authority 2 propose-only Guardian/u);
     assert.match(body.result.instructions, /no broker mutation capability/u);
   });
 
@@ -180,7 +180,7 @@ describe('NUVO VSIM Stage 2 MCP acceptance', () => {
     assert.ok(!names.some((name) => /place_order|cancel_order|replace_order|override_gate|set_authority/u.test(name)));
   });
 
-  test('Authority 1 refuses execute_approved_intent through the real MCP handler', async () => {
+  test('propose authority still refuses execute_approved_intent through the real MCP handler', async () => {
     const service = {
       authorityDenied: (tool, required) => ({
         ok: false, cycle_id: null, authority_level: 1, asof: new Date().toISOString(),

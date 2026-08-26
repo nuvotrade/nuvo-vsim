@@ -1,6 +1,6 @@
 # NUVO VSIM v5 launch readiness
 
-Status: **SHADOW DEPLOYED; DO NOT REPLACE `vsim.nuvotrade.co`; DO NOT ENABLE LIVE MUTATION.**
+Status: **PROPOSE-ONLY HUMAN EXECUTION; PROTECTED V5 DEPLOYED; `vsim.nuvotrade.co` CUTOVER REQUIRES ACCESS-POLICY PERMISSION; DO NOT ENABLE BROKER MUTATION.**
 
 ## Deployed shadow boundary
 
@@ -8,9 +8,15 @@ The v5 engine is deployed separately at the protected Cloudflare Worker
 `nuvo-vsim-v5-shadow`. The existing production website is not routed to this
 Worker and was not modified.
 
-The shadow runtime is fixed at Authority 1 and has no submit, replace, or
-cancel route. Its Schwab adapter implements custody reads only; its mutation
+The runtime is fixed at Authority 2 (propose only) and has no broker submit,
+replace, or cancel route. Its Schwab adapter implements custody reads only; its mutation
 methods return `SCHWAB_MUTATION_DISABLED_SHADOW_ONLY`.
+
+Authority 2 permits only this non-mutating sequence: Guardian OPEN, current
+reconciled Schwab truth, live RTH market truth, deterministic sealed candidate,
+frozen proposal, and exact human order-ticket review. The Principal places any
+approved ticket manually. Approvals expire after 60 seconds and authorize only
+the frozen quantity, legs, expiry, strikes, and a limit no worse than the model.
 
 Cloudflare resources:
 
@@ -74,7 +80,7 @@ Cloudflare resources:
 - The environment classified `NORMAL` with independently sourced VIX 15.56.
   VIX3M remains explicitly unknown rather than duplicating VIX and inventing
   a term-structure signal.
-- The complete local suite passes: **303/303 tests**.
+- The complete local suite passes: **342/342 tests**.
 
 ## What remains blocked
 
@@ -85,10 +91,9 @@ Cloudflare resources:
 2. **No live order workflow.** This deployment deliberately has no production
    mutation adapter, distributed order outbox, broker-side intent lookup,
    partial-fill recovery, or live lifecycle loop.
-3. **No authority promotion.** Shadow observations cannot promote live
-   authority. Any future Authority 2 proposal/canary is a separate reviewed
-   change with human approval, a narrow allowlist, hard dollar caps, and
-   broker-confirmed idempotency.
+3. **No broker execution authority.** Authority 2 can approve an exact
+   human-executed ticket only. Automated submit/cancel/replace, broker-side
+   intent lookup, partial-fill recovery, and execution secrets remain absent.
 4. **No production hostname cutover.** Design acceptance, shadow evidence,
    and live-order authority are independent gates. The current site stays in
    place unless a separate cutover is explicitly approved.

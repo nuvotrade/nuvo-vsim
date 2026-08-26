@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   coveredCallLifecycleAnswer, deterministicBlockedAnswer, normalizeAiText, plainTelegramText,
-  requiresLifecycleAnalytics, requiresMarketData, secureSecretMatches,
+  deterministicNewExposureAnswer, requiresLifecycleAnalytics, requiresMarketData,
+  requiresNewExposureAnalysis, secureSecretMatches,
   TELEGRAM_GUARDIAN_INSTRUCTIONS,
 } from '../cloudflare/telegram-assistant.js';
 import { analyzeCoveredCallLifecycle } from '../src/lifecycle/covered_call_analysis.js';
@@ -43,6 +44,17 @@ describe('Telegram Guardian assistant', () => {
     assert.equal(requiresLifecycleAnalytics('What is my cash balance?'), false);
   });
 
+  test('new-position questions are intercepted for deterministic engine answers', () => {
+    assert.equal(requiresNewExposureAnalysis('Should I sell a cash secured put?'), true);
+    assert.equal(requiresNewExposureAnalysis('Can I buy shares of SPY?'), true);
+    assert.equal(requiresNewExposureAnalysis('What is my account balance?'), false);
+    const unsupported = deterministicNewExposureAnswer({
+      question: 'Should I open a bull put spread?', truth: {}, market: {}, cycle: {},
+    });
+    assert.match(unsupported, /^UNSUPPORTED/u);
+    assert.match(unsupported, /spreads are outside/u);
+  });
+
   test('existing covered-call close questions receive math-first lifecycle analysis without entry restrictions', () => {
     const analysis = analyzeCoveredCallLifecycle({
       optionPosition: {
@@ -64,6 +76,8 @@ describe('Telegram Guardian assistant', () => {
     assert.match(answer, /^(?:HOLD|CLOSE EARLY|NEAR TIE) —/u);
     assert.match(answer, /Market-implied probability of expiring OTM: \d+\.\d%/u);
     assert.match(answer, /Model probability holding beats closing now: \d+\.\d%/u);
+    assert.match(answer, /Model-minus-market assignment gap: -?\d+\.\d%/u);
+    assert.match(answer, /Expected upside surrendered if held: \$[\d,]+/u);
     assert.match(answer, /Expected hold-minus-close value: -?\$[\d,]+/u);
     assert.match(answer, /Reasoning/u);
     assert.match(answer, /No order was placed/u);
@@ -100,7 +114,8 @@ describe('Telegram Guardian assistant', () => {
     assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /never submit, replace, cancel/u);
     assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /Never invent a price/u);
     assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /A roll is a new trade/u);
-    assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /Authority level 1 always means SHADOW · READ-ONLY/u);
+    assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /Authority level 2 means PROPOSE · HUMAN EXECUTION/u);
+    assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /Bull-put spreads, bear-put spreads/u);
     assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /never label it LIVE/u);
     assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /This is a lifecycle comparison, not a new-position request/u);
     assert.match(TELEGRAM_GUARDIAN_INSTRUCTIONS, /do not replace the quantitative answer with MANAGE-ONLY/u);

@@ -113,8 +113,10 @@ export async function runCycle(ctx) {
     dteTargets = [14, 30, 45], baseRiskPct = 0.02, maxGovernanceAttempts = 25,
     screenSamples = 3000, decisionSamples = 20_000, refineTop = 12,
     modelDrift = 0,
+    structureAllowlist = null,
     commitmentsThisCycle = 0, closedTradePnl = null, externalizeRaw = false,
     portfolioReturnsBySymbol = {}, portfolioSectors = {},
+    holdings = {},
   } = ctx;
 
   const trace = [];
@@ -246,6 +248,8 @@ export async function runCycle(ctx) {
       limitsVersion: limits.version,
       seeds: { governor: `${cycleId}:governor`, distributions: `${cycleId}:<symbol>:<dte>` },
       sampling: { screenSamples, decisionSamples, refineTop },
+      structureAllowlist,
+      holdings,
     },
   };
 
@@ -403,7 +407,8 @@ export async function runCycle(ctx) {
       const { candidates: cands, screenedOut, screenedCount } = screenAndRefine({
         underlyingState: st, chain,
         regime: marketState.regime, limits, calibrationStore, strategyId,
-        holdings: ctx.holdings?.[sym] ?? null,
+        holdings: holdings?.[sym] ?? null,
+        allowedStructures: structureAllowlist ?? strategy?.allowedStructures ?? null,
         screenParams: { dist: screen.dist, diffusionDist: screen.diffusionDist },
         fullParams: { dist: full.dist, diffusionDist: full.diffusionDist },
         refineTop,
@@ -411,9 +416,10 @@ export async function runCycle(ctx) {
       screenLog.push({ symbol: sym, dte, screened: screenedCount, refined: cands.length, droppedByScreen: screenedOut.length });
       screenedOutAll.push(...screenedOut);
       // Respect the strategy's own structure and regime permissions.
+      const permittedStructures = structureAllowlist ?? strategy?.allowedStructures ?? null;
       const filtered = strategy
         ? cands.filter((c) =>
-          strategy.allowedStructures.includes(c.structure.kind)
+          permittedStructures.includes(c.structure.kind)
           && strategy.allowedRegimes.includes(marketState.regime.regime)
           && (c.dte === null || (c.dte >= strategy.dteBand[0] && c.dte <= strategy.dteBand[1])))
         : cands;

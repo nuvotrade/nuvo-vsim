@@ -25,6 +25,8 @@ import {
 import {
   handleTelegramWebhook, processTelegramUpdate, telegramAssistantStatus,
 } from './telegram-assistant.js';
+import { freezeTradeProposal, reviewTradeTicket } from './proposal-approval.js';
+import { performanceFromBrokerRows, portfolioFromCustody } from './portfolio-report.js';
 
 const JSON_HEADERS = Object.freeze({
   'content-type': 'application/json; charset=utf-8',
@@ -36,6 +38,7 @@ const JSON_HEADERS = Object.freeze({
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 const nowIso = () => new Date().toISOString();
 const authorityLevel = (env) => Number(env.NUVO_AUTHORITY_LEVEL ?? AUTHORITY.SHADOW);
+const operationalAuthority = (env) => Math.min(authorityLevel(env), AUTHORITY.PROPOSE);
 
 function epochMs(value) {
   const numeric = Number(value);
@@ -73,12 +76,13 @@ function publicStatus(env) {
     ok: true,
     service: 'nuvo-vsim-v5-shadow',
     environment: env.NUVO_ENVIRONMENT ?? 'unknown',
-    authority: `${authorityLevel(env)}_SHADOW`,
+    authority: authorityLevel(env) >= AUTHORITY.PROPOSE
+      ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW',
     authority_level: authorityLevel(env),
     broker_mode: 'READ_ONLY',
     broker_execution_mode: 'SHADOW_ONLY',
     mutation_routes: false,
-    existing_vsim_untouched: true,
+    canonical_dashboard: 'vsim.nuvotrade.co',
     schedule: 'Guardian every minute · VSIM every 15 minutes',
     version: env.CF_VERSION_METADATA?.id ?? 'local',
   };
@@ -440,6 +444,9 @@ function summaryOf(result, engine, connector) {
     pCal: candidate.probabilities?.calibration === 'UNCALIBRATED'
       ? null : candidate.probabilities?.pCal ?? null,
     pCalStatus: candidate.probabilities?.calibration === 'UNCALIBRATED' ? 'UNCALIBRATED' : 'ACTIVE',
+    probabilityOfProfitModel: candidate.success?.p_model ?? null,
+    probabilityOfProfitMarket: candidate.success?.p_market ?? null,
+    breakeven: candidate.success?.breakeven ?? null,
     admissible: Boolean(candidate.admissible),
     rejection: candidate.admissible ? null : candidate.violations?.map(String)?.[0] ?? null,
   }));
@@ -454,7 +461,8 @@ function summaryOf(result, engine, connector) {
       : 'SHADOW_RECORDED',
     reasonCode: firstReasonCode(result, result.outcome === 'NO_TRADE' ? 'NO_TRADE' : null),
     reason: result.reason ?? result.reasons?.[0] ?? null,
-    authority: '1_SHADOW',
+    authority: engine.authorityLevel >= AUTHORITY.PROPOSE
+      ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW',
     mutationEligible: false,
     regime: result.regime ?? result.marketState?.regime?.regime ?? null,
     regimeConfidence: result.marketState?.regime?.coverage ?? null,
@@ -529,7 +537,7 @@ async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
     modelVersion: 'nuvo-model-5.0.0',
     codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
     limits: DEFAULT_LIMITS,
-    authorityLevel: AUTHORITY.SHADOW,
+    authorityLevel: operationalAuthority(env),
     rawInputs: {
       operationalRefusal: { reason, detail },
       connectors: { market: 'LIVE_PRIVATE_SERVICE', schwab: 'READ_ONLY', evidence: 'D1_R2' },
@@ -541,7 +549,9 @@ async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
   const summary = {
     cycleId, at: Date.now(), outcome: 'REFUSED', decision: 'REFUSED',
     state: reason.includes('RECON') || reason.includes('MISMATCH') ? 'QUARANTINED' : 'REFUSED',
-    reasonCode: reason, reason: detail.message ?? reason, authority: '1_SHADOW',
+    reasonCode: reason, reason: detail.message ?? reason,
+    authority: operationalAuthority(env) >= AUTHORITY.PROPOSE
+      ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW',
     mutationEligible: false, regime: null, regimeConfidence: null, trace: [],
     opportunities: [], selected: null,
     evidence: {
@@ -564,6 +574,7 @@ async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
     summary, detail,
     codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
     constitutionVersion: DEFAULT_LIMITS.version,
+    authorityLevel: operationalAuthority(env),
   }));
   await audit(env, ownerId, 'SHADOW_CYCLE_BLOCKED', { cycleId, reason, ...detail });
   return summary;
@@ -632,7 +643,8 @@ export async function runShadowCycle(env, ownerId, {
         state: 'QUARANTINED',
         reasonCode: 'EVIDENCE/PROJECTION_INCOMPLETE',
         reason: 'Evidence sealed before its D1 summary/context projection completed; no second decision was run.',
-        authority: '1_SHADOW', mutationEligible: false,
+        authority: operationalAuthority(env) >= AUTHORITY.PROPOSE
+          ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW', mutationEligible: false,
         regime: null, regimeConfidence: null, trace: [], opportunities: [], selected: null,
         evidence: {
           hash: filed.evidence_hash,
@@ -653,6 +665,7 @@ export async function runShadowCycle(env, ownerId, {
         summary, detail: { massiveStatus: 'BLOCKED' },
         codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
         constitutionVersion: DEFAULT_LIMITS.version,
+        authorityLevel: operationalAuthority(env),
       }));
       finalStatus = 'QUARANTINED';
       return summary;
@@ -697,9 +710,27 @@ export async function runShadowCycle(env, ownerId, {
     }
     const persistence = new D1R2EvidencePersistence({ db: env.DB, bucket: env.EVIDENCE, ownerId });
     const evidenceStore = await EvidenceStore.open({ persistence, genesis: `NUVO-VSIM-V5-SHADOW:${ownerId}` });
-    const symbols = String(env.NUVO_SYMBOLS ?? 'SPY,QQQ,IWM').split(',').map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
+    const baseSymbols = String(env.NUVO_SYMBOLS ?? 'SPY,QQQ,IWM').split(',')
+      .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
+    const holdings = Object.fromEntries(baseline.positions
+      .filter((position) => position.type === 'EQUITY' && Number(position.quantity) >= 100)
+      .map((position) => [String(position.symbol).toUpperCase(), {
+        shares: Number(position.quantity), costBasis: Number(position.averagePrice),
+      }]));
+    // Owned whole-lot names are admitted to the covered-call scan only when
+    // Schwab proves a current option chain. An unoptionable holding is skipped
+    // rather than allowed to make the fixed ETF opportunity universe fail.
+    const optionableHoldings = [];
+    for (const symbol of Object.keys(holdings).filter((value) => !baseSymbols.includes(value))) {
+      const probe = await provider.optionChain(symbol, { expirations: dteTargets });
+      if (!probe.error && probe.value?.contracts?.length) optionableHoldings.push(symbol);
+      else await audit(env, ownerId, 'COVERED_CALL_UNIVERSE_EXCLUDED', {
+        symbol, reason: probe.error ?? 'NO_EXECUTABLE_CONTRACTS',
+      });
+    }
+    const symbols = [...new Set([...baseSymbols, ...optionableHoldings])];
     const engine = new NuvoEngine({
-      provider, broker, nav: currentSnapshot.nav, authorityLevel: AUTHORITY.SHADOW,
+      provider, broker, nav: currentSnapshot.nav, authorityLevel: operationalAuthority(env),
       symbols, approved: symbols, evidenceStore,
       accountMirror: { cash: baseline.account.cash, buyingPower: baseline.account.buyingPower },
       codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
@@ -715,6 +746,9 @@ export async function runShadowCycle(env, ownerId, {
     if (strategy?.state === 'RESEARCH') strategy.transition('VALIDATED', 'Architecture and correctness suite passed').transition('SHADOW', 'Real-market shadow observation');
     const result = await engine.cycle({
       cycleId,
+      structureAllowlist: String(env.NUVO_ALLOWED_STRUCTURES ?? 'CSP')
+        .split(',').map((value) => value.trim()).filter(Boolean),
+      holdings,
       dteTargets,
       screenSamples: Number(env.NUVO_SCREEN_SAMPLES ?? 1500),
       decisionSamples: Number(env.NUVO_DECISION_SAMPLES ?? 8000),
@@ -797,6 +831,74 @@ async function apiStatus(env, ownerId) {
     } : { state: GUARDIAN_STATES.BLOCKED, reviewId: null, reviewedAt: null,
       mandateVersion: GUARDIAN_MANDATE_VERSION, report: null },
     latestCycle: latest ? parseJson(latest.summary_json, null) : null,
+  };
+}
+
+async function portfolioDashboard(env, ownerId) {
+  const custody = await loadLatestCustody(env, ownerId);
+  if (!custody) throw new Error('SCHWAB_CUSTODY_SYNC_REQUIRED');
+  const shortOptions = (custody.positions ?? []).filter((position) =>
+    position.type === 'OPTION' && Number(position.quantity) < 0);
+  const analytics = new Map();
+  if (shortOptions.length) {
+    const provider = marketProvider(env, ownerId);
+    const quotes = await Promise.all(shortOptions.map(async (position) => {
+      const quote = await provider.optionQuote(position.symbol);
+      return { symbol: position.symbol, quote };
+    }));
+    for (const { symbol, quote } of quotes) {
+      if (!quote?.error && quote?.value) analytics.set(symbol, {
+        theta: quote.value.theta,
+        asof: Number.isFinite(quote.asOf) ? new Date(quote.asOf).toISOString() : null,
+      });
+    }
+  }
+  const report = portfolioFromCustody(custody, analytics);
+  return {
+    ...report,
+    source: 'SCHWAB_READ_ONLY_CUSTODY',
+    option_analytics_source: shortOptions.length
+      ? (analytics.size === shortOptions.length ? 'SCHWAB_REALTIME_COMPLETE' : 'SCHWAB_REALTIME_PARTIAL')
+      : 'NO_OPEN_SHORT_OPTIONS',
+    missing_option_analytics: shortOptions.filter((position) => !analytics.has(position.symbol))
+      .map((position) => position.symbol),
+  };
+}
+
+async function performanceDashboard(env, ownerId) {
+  const client = new SchwabD1Client(env);
+  const [rows, current, ledgerStatus] = await Promise.all([
+    env.DB.prepare(`SELECT transaction_id,raw_json,occurred_at FROM broker_events
+      WHERE owner_id=? AND transaction_id IS NOT NULL AND transaction_leg_id IS NULL
+      AND raw_json IS NOT NULL ORDER BY occurred_at ASC LIMIT 10000`).bind(ownerId).all(),
+    env.DB.prepare(`SELECT unrealized_pnl,observed_at FROM broker_account_performance
+      WHERE owner_id=? ORDER BY observed_at DESC LIMIT 1`).bind(ownerId).first(),
+    client.ledgerStatus(ownerId),
+  ]);
+  const report = performanceFromBrokerRows(rows.results ?? [], {
+    currentUnrealized: current?.unrealized_pnl,
+  });
+  const importedCount = Number(ledgerStatus.transaction_count ?? 0);
+  const rowCount = (rows.results ?? []).length;
+  const complete = Boolean(ledgerStatus.complete) && report.summary.history_complete
+    && rowCount >= importedCount;
+  return {
+    ...report,
+    asof: current?.observed_at ?? ledgerStatus.latest_transaction ?? null,
+    source: 'SCHWAB_APPEND_ONLY_LEDGER',
+    history: {
+      status: complete ? 'COMPLETE_TO_CONFIGURED_HISTORY_FLOOR' : 'PARTIAL',
+      broker_sync_complete: Boolean(ledgerStatus.complete),
+      imported_transactions: importedCount,
+      evaluated_packets: rowCount,
+      earliest_transaction: ledgerStatus.earliest_transaction ?? null,
+      latest_transaction: ledgerStatus.latest_transaction ?? null,
+      unmatched_closures: report.summary.unmatched_closures,
+      note: complete
+        ? 'Every imported Schwab transaction packet was evaluated and all closures have an imported opening lot.'
+        : 'Totals include only matched Schwab lifecycles. Unmatched closures are excluded from realized P&L.',
+    },
+    raw_packets: 'PROTECTED_NOT_EXPOSED',
   };
 }
 
@@ -1071,7 +1173,7 @@ async function reconciledSnapshot(env, ownerId) {
   return accountCoordinator(env, ownerId).reconciledSnapshot(ownerId);
 }
 
-export async function triggerShadowCycle(env, ownerId, { source = 'MCP' } = {}) {
+export async function triggerShadowCycle(env, ownerId, { source = 'MCP', idempotencyKey = null } = {}) {
   if (authorityLevel(env) < AUTHORITY.SHADOW) {
     return toolEnvelope(env, {}, { code: 'AUTHORITY_DENIED', message: 'Authority level does not permit shadow ranking.' });
   }
@@ -1119,7 +1221,12 @@ export async function triggerShadowCycle(env, ownerId, { source = 'MCP' } = {}) 
     }, { code: summary.reasonCode, message: summary.reason });
   }
 
-  const cycleId = cycleIdFor({ ownerId, source: 'SCHEDULED' });
+  const operatorSource = source === 'OPERATOR' || source === 'TELEGRAM_PROPOSAL';
+  const cycleId = cycleIdFor({
+    ownerId,
+    source: operatorSource ? 'OPERATOR' : 'SCHEDULED',
+    idempotencyKey: operatorSource ? idempotencyKey : null,
+  });
   const completed = await cycleSummary(env, ownerId, cycleId);
   if (completed) {
     return toolEnvelope(env, {
@@ -1316,12 +1423,48 @@ async function listEvidenceTool(env, ownerId, limit) {
   });
 }
 
+async function createTradeProposalTool(env, ownerId, { cycleId, candidateId }) {
+  if (authorityLevel(env) < AUTHORITY.PROPOSE) {
+    return toolEnvelope(env, { cycle_id: cycleId }, {
+      code: 'AUTHORITY_DENIED', message: 'Frozen ticket proposals require Authority 2.',
+    });
+  }
+  const context = await contextFor(env, ownerId, cycleId);
+  if (!context) return toolEnvelope(env, { cycle_id: cycleId }, { code: 'NOT_FOUND', message: 'Sealed cycle context not found.' });
+  const truth = await getAccountTruthTool(env, ownerId);
+  const market = await getMarketStateTool(env, ownerId);
+  const result = await freezeTradeProposal({ env, ownerId, context, candidateId, truth, market });
+  return result.ok
+    ? toolEnvelope(env, { cycle_id: cycleId, ...result })
+    : toolEnvelope(env, { cycle_id: cycleId, proposal_id: null }, { code: result.code, message: result.message });
+}
+
+async function reviewTradeTicketTool(env, ownerId, input) {
+  if (authorityLevel(env) < AUTHORITY.PROPOSE) {
+    return toolEnvelope(env, {}, { code: 'AUTHORITY_DENIED', message: 'Ticket review requires Authority 2.' });
+  }
+  const truth = await getAccountTruthTool(env, ownerId);
+  const market = await getMarketStateTool(env, ownerId);
+  const result = await reviewTradeTicket({
+    env, ownerId, proposalId: input.proposalId,
+    ticket: { quantity: input.quantity, limit_price: input.limitPrice, time_in_force: input.timeInForce },
+    truth, market,
+  });
+  if (result.ok) return toolEnvelope(env, result);
+  const { ok: _ignored, code, message, ...detail } = result;
+  return toolEnvelope(env, detail, { code: code ?? result.reason_codes?.[0] ?? 'TICKET_REVISE',
+    message: message ?? 'The ticket does not match the frozen deterministic proposal.' });
+}
+
 export function createMcpService(env, ownerId) {
   return Object.freeze({
     getAccountTruth: () => getAccountTruthTool(env, ownerId),
     getLifecycleAnalytics: (truth) => getCoveredCallLifecycleTool(env, ownerId, truth),
     getMarketState: () => getMarketStateTool(env, ownerId),
     runShadowCycle: () => triggerShadowCycle(env, ownerId, { source: 'MCP' }),
+    runProposalCycle: (idempotencyKey) => triggerShadowCycle(env, ownerId, {
+      source: 'TELEGRAM_PROPOSAL', idempotencyKey,
+    }),
     getCycle: (cycleId) => getCycleTool(env, ownerId, cycleId),
     listCycles: (limit) => listCyclesTool(env, ownerId, limit),
     listRankedOpportunities: (cycleId) => listRankedOpportunitiesTool(env, ownerId, cycleId),
@@ -1329,6 +1472,8 @@ export function createMcpService(env, ownerId) {
     explainRejection: (cycleId) => explainRejectionTool(env, ownerId, cycleId),
     replayEvidence: (input) => replayEvidenceTool(env, ownerId, input),
     listEvidence: (limit) => listEvidenceTool(env, ownerId, limit),
+    createTradeProposal: (input) => createTradeProposalTool(env, ownerId, input),
+    reviewTradeTicket: (input) => reviewTradeTicketTool(env, ownerId, input),
     authorityDenied: (tool, required, cycleId) => toolEnvelope(env, { cycle_id: cycleId }, {
       code: 'AUTHORITY_DENIED',
       message: `${tool} requires authority level ${required}; current level is ${authorityLevel(env)}.`,
@@ -1366,7 +1511,7 @@ export async function executeShadowWorkflow(env, { ownerId, cycleId, source }, s
 function dashboardHtml() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>NUVO VSIM v5 — Shadow</title><style>
   :root{color-scheme:dark;--bg:#07100e;--p:#0d1a16;--l:#22382f;--t:#e8f1ec;--m:#8ca096;--g:#60e2a8;--a:#f4ba61;--r:#f27676;font:14px Inter,system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#123328,#07100e 38%);color:var(--t)}header,main{max-width:1200px;margin:auto}header{padding:26px 24px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--l)}h1{margin:0;letter-spacing:.06em}h1 b{color:var(--g);font-size:.55em}.pill{padding:7px 10px;border:1px solid #725d34;color:var(--a);border-radius:99px;font-size:11px}main{padding:22px 24px 60px}.warning{border:1px solid #725d34;background:#2b2314;padding:12px 15px;border-radius:8px;color:#f4d6a5}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.card{background:linear-gradient(145deg,#10201b,#0a1512);border:1px solid var(--l);border-radius:10px;padding:18px}.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.13em;color:var(--m);margin:0 0 13px}.value{font-size:22px;font-weight:750}.sub{color:var(--m);font-size:11px;margin-top:7px}.wide{grid-column:1/-1}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{padding:12px;background:#08130f;border:1px solid var(--l);border-radius:7px}.metric span{display:block;color:var(--m);font-size:10px;text-transform:uppercase;letter-spacing:.1em}.metric b{display:block;font-size:19px;margin-top:5px}button,a.action{border:1px solid #315445;background:#10271f;color:var(--g);padding:9px 12px;border-radius:6px;cursor:pointer;text-decoration:none;font-weight:650;margin:5px 7px 0 0}button:disabled{opacity:.45;cursor:not-allowed}pre{white-space:pre-wrap;color:#c8d8cf;background:#07100e;padding:14px;border-radius:7px;max-height:320px;overflow:auto}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{text-align:left;border-bottom:1px solid var(--l);padding:9px 7px;font-variant-numeric:tabular-nums}th{color:var(--m);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.empty{color:var(--m);padding:12px 0}.ok{color:var(--g)}.bad{color:var(--r)}@media(max-width:760px){.grid,.metrics{grid-template-columns:1fr}.wide{grid-column:auto}.card{overflow-x:auto}}</style></head><body>
-  <header><h1>NUVO VSIM <b>v5</b></h1><span class="pill">AUTHORITY 1 · SHADOW ONLY</span></header><main><div class="warning">This is the isolated v5 shadow system. It cannot submit, replace, or cancel a broker order. The existing vsim.nuvotrade.co deployment is untouched.</div><section class="grid">
+  <header><h1>NUVO VSIM <b>v5</b></h1><span class="pill">AUTHORITY 2 · PROPOSE ONLY</span></header><main><div class="warning">This is the protected v5 proposal system. It cannot submit, replace, or cancel a broker order. Execution remains locked.</div><section class="grid">
   <article class="card"><h2>Market data</h2><div class="value" id="market">Not checked</div><div class="sub" id="marketTime">Schwab Market Data · strict live chains</div></article>
   <article class="card"><h2>Schwab custody</h2><div class="value" id="schwab">Checking…</div><div class="sub" id="schwabTime">Read-only account, positions, and orders</div></article>
   <article class="card"><h2>Evidence</h2><div class="value" id="evidence">Checking…</div><div class="sub">D1 ordered index + R2 immutable packages</div></article>
@@ -1402,11 +1547,37 @@ const DASHBOARD_HEADERS = Object.freeze({
 });
 
 export function rewriteDesignHtml(source) {
+  const portfolio = `<section class="portfolio-ledger" aria-label="Current Schwab portfolio books">
+    <article class="panel"><div class="panel-head"><div><p class="kicker">Current portfolio · Schwab custody</p><h3>Portfolio economics</h3></div><span class="readonly-tag">READ ONLY</span></div>
+      <div class="desk-metrics">
+        <div><span>Booked premium</span><strong data-vsim="booked-premium">—</strong><small>open short-option entry credit</small></div>
+        <div><span>Income θ / day</span><strong data-vsim="income-theta">—</strong><small>live option theta exposure</small></div>
+        <div><span>Net θ / day</span><strong data-vsim="net-theta">—</strong><small>current portfolio theta</small></div>
+        <div><span>Open P&amp;L</span><strong data-vsim="open-pnl">—</strong><small>shares + open options</small></div>
+        <div><span>Margin debit</span><strong data-vsim="margin-debit">—</strong><small>financing in use</small></div>
+        <div><span>Buying power</span><strong data-vsim="buying-power">—</strong><small>informational · never cash</small></div>
+      </div>
+    </article>
+    <article class="panel"><div class="panel-head"><div><p class="kicker">Current market value and assignment collateral</p><h3>Capital committed by ticker</h3></div><span data-vsim="portfolio-asof" class="as-of">—</span></div><div class="commitment-bars" data-vsim="commitments"></div></article>
+    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Current shares from Schwab custody</p><h3>Inventory / ownership book</h3></div><span data-vsim="inventory-count" class="count">0 positions</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Qty</th><th>Average price</th><th>Mark</th><th>Market value</th><th>Open P&amp;L</th><th>Portfolio weight</th><th>CC capacity</th></tr></thead><tbody data-vsim="inventory-body"></tbody></table></div></article>
+    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Open short options from Schwab custody</p><h3>Income / harvest book</h3></div><span data-vsim="harvest-count" class="count">0 active</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Type</th><th>Strike</th><th>Expiration</th><th>Qty</th><th>Entry credit</th><th>Mark</th><th>Open P&amp;L</th><th>θ / day</th><th>Capital committed</th><th>Quote</th></tr></thead><tbody data-vsim="harvest-body"></tbody></table></div><div class="panel-note">Option analytics are shown only when the Schwab real-time quote passes the freshness and completeness checks.</div></article>
+    <article class="panel"><div class="panel-head"><div><p class="kicker">Option-adjusted current state</p><h3>Current portfolio</h3></div></div><div class="desk-metrics account-grid">
+      <div><span>Net liquidation</span><strong data-vsim="portfolio-nav">—</strong><small>Schwab account equity</small></div><div><span>Signed cash</span><strong data-vsim="portfolio-cash">—</strong><small>negative means margin borrowing</small></div><div><span>Gross positions</span><strong data-vsim="gross-positions">—</strong><small>absolute market value</small></div><div><span>Positions</span><strong data-vsim="position-count">—</strong><small>current custody</small></div><div><span>Open contracts</span><strong data-vsim="open-contracts">—</strong><small>short option contracts</small></div><div><span>Withdrawable cash</span><strong data-vsim="withdrawable-cash">—</strong><small>not buying power</small></div>
+    </div></article>
+  </section>`;
+  const records = `<section class="view" id="records" aria-labelledby="records-title"><div class="page-heading"><div><p class="kicker">Canonical append-only Schwab ledger</p><h2 id="records-title">Records</h2></div><span class="readonly-tag">BROKER TRUTH</span></div><div class="desk-metrics record-metrics"><div><span>Matched closed trades</span><strong data-vsim="closed-trades">—</strong><small>complete broker lifecycles</small></div><div><span>Realized P&amp;L</span><strong data-vsim="records-realized">—</strong><small>fees included</small></div><div><span>Imported transactions</span><strong data-vsim="imported-transactions">—</strong><small>append-only packets</small></div><div><span>History status</span><strong data-vsim="history-status">—</strong><small data-vsim="history-note">—</small></div></div><article class="panel table-panel"><div class="panel-head"><div><p class="kicker">FIFO matched from raw Schwab packets</p><h3>Closed trade performance</h3></div></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div></article><article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Every ingested order, execution, cash, assignment and transfer event</p><h3>Broker activity</h3></div></div><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div><div class="panel-note">Raw Schwab packets remain protected. Realized P&amp;L excludes any close whose opening lot is outside imported history.</div></article></section>`;
+  const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Every total derives from the canonical Schwab ledger</p><h2 id="performance-title">Performance</h2></div><span data-vsim="performance-asof" class="as-of">—</span></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L</span><strong data-vsim="performance-realized">—</strong><small>matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small>latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small>realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small>gross wins ÷ gross losses</small></div></div><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles</p><h3>Cumulative realized P&amp;L</h3></div></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss"></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Realized attribution</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Realized attribution</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
+  const additions = `<style>
+    .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th{white-space:nowrap}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}}
+  </style>`;
   return source
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
-    .replace('</head>', '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('</head>', additions + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="records">Records</button><button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="evidence">Evidence</button>')
+    .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
+    .replace('      <section class="view" id="evidence"', records + performance + '\n      <section class="view" id="evidence"')
     .replace('</body>', '<script src="/design/live.js"></script></body>');
 }
 
@@ -1436,7 +1607,7 @@ export function liveDashboardScript() {
   const q = (selector, root = document) => root.querySelector(selector);
   const qa = (selector, root = document) => [...root.querySelectorAll(selector)];
   const present = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
-  const money = value => present(value) ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(Number(value)) : '—';
+  const money = value => present(value) ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(Number(value)) : '—';
   const number = value => present(value) ? Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—';
   const percent = value => present(value) ? (Number(value) * 100).toFixed(1) + '%' : '—';
   const when = value => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) : 'Not available';
@@ -1452,6 +1623,7 @@ export function liveDashboardScript() {
     text(q('.header-status small'), 'Loading verified data…');
     text(q('.safety-title'), '◇  LIVE SHADOW');
     text(q('.safety-banner p'), 'Loading protected account, market, and evidence state. Broker mutation remains disabled.');
+    text(q('.authority-pill strong'), '2 · PROPOSE ONLY');
     text(q('footer span:first-child'), 'NUVO VSIM v5 · Protected live shadow');
     text(q('footer span:nth-child(2)'), 'Schwab read-only custody and market data · no broker mutation');
   }
@@ -1467,6 +1639,113 @@ export function liveDashboardScript() {
       cells.forEach(formatter => { const cell = make('td'); const result = formatter(item, index); if (result instanceof Node) cell.append(result); else cell.textContent = result; row.append(cell); });
       tbody.append(row);
     });
+  }
+
+  function fillTable(tbody, rows, cells, emptyMessage) {
+    clear(tbody);
+    if (!rows.length) {
+      const row = make('tr'); const cell = make('td', emptyMessage, 'muted');
+      cell.colSpan = cells.length; row.append(cell); tbody.append(row); return;
+    }
+    rows.forEach(item => {
+      const row = make('tr');
+      cells.forEach(formatter => { const cell = make('td'); const value = formatter(item);
+        cell.textContent = value; if (typeof value === 'string' && value.startsWith('-$')) cell.className = 'negative';
+        row.append(cell); });
+      tbody.append(row);
+    });
+  }
+
+  function setValue(name, value, formatter = String) {
+    const node = q('[data-vsim="' + name + '"]');
+    if (!node) return;
+    const rendered = present(value) ? formatter(value) : (value === 0 ? formatter(value) : '—');
+    text(node, rendered);
+    if (present(value)) node.classList.toggle('negative', Number(value) < 0);
+  }
+
+  function renderPortfolio(portfolio) {
+    const account = portfolio.account || {}; const summary = portfolio.summary || {};
+    setValue('booked-premium', summary.booked_premium, money);
+    setValue('income-theta', summary.income_theta_per_day, money);
+    setValue('net-theta', summary.net_theta_per_day, money);
+    setValue('open-pnl', summary.open_pnl, money);
+    setValue('margin-debit', account.margin_debit, money);
+    setValue('buying-power', account.buying_power, money);
+    setValue('portfolio-nav', account.nav, money); setValue('portfolio-cash', account.cash, money);
+    setValue('gross-positions', account.gross_positions, money); setValue('position-count', account.position_count, number);
+    setValue('open-contracts', account.open_contracts, number); setValue('withdrawable-cash', account.withdrawable_cash, money);
+    text(q('[data-vsim="portfolio-asof"]'), 'As of ' + when(portfolio.asof));
+    text(q('[data-vsim="inventory-count"]'), (portfolio.inventory || []).length + ' positions');
+    text(q('[data-vsim="harvest-count"]'), (portfolio.harvest || []).length + ' active');
+
+    const bars = q('[data-vsim="commitments"]'); clear(bars);
+    const commitments = portfolio.capital_committed || [];
+    if (!commitments.length) bars.append(make('p', 'No marked positions or positive cash commitment is available.', 'muted'));
+    commitments.forEach(item => { const row = make('div', undefined, 'commitment-row');
+      row.append(make('strong', item.symbol)); const track = make('div', undefined, 'commitment-track');
+      const fill = make('i'); fill.style.width = Math.min(100, Math.max(0, Number(item.pct_nav || 0) * 100)) + '%'; track.append(fill);
+      row.append(track, make('span', percent(item.pct_nav)), make('b', money(item.value))); bars.append(row); });
+
+    fillTable(q('[data-vsim="inventory-body"]'), portfolio.inventory || [], [
+      item => item.symbol || '—', item => number(item.quantity), item => money(item.average_price), item => money(item.mark),
+      item => money(item.market_value), item => money(item.unrealized_pnl), item => percent(item.portfolio_weight),
+      item => number(item.covered_call_capacity),
+    ], 'No current Schwab equity positions.');
+    fillTable(q('[data-vsim="harvest-body"]'), portfolio.harvest || [], [
+      item => item.symbol || '—', item => item.type || '—', item => money(item.strike), item => item.expiration || '—',
+      item => number(item.quantity), item => money(item.entry_credit), item => money(item.mark), item => money(item.unrealized_pnl),
+      item => money(item.theta_per_day), item => money(item.capital_committed), item => item.quote_asof ? when(item.quote_asof) : 'UNAVAILABLE',
+    ], 'No current short-option positions in Schwab custody.');
+  }
+
+  function renderRecords(performance, ledger) {
+    const summary = performance.summary || {}; const history = performance.history || {};
+    setValue('closed-trades', summary.closed_trades, number); setValue('records-realized', summary.realized_pnl, money);
+    setValue('imported-transactions', history.imported_transactions, number);
+    text(q('[data-vsim="history-status"]'), history.status || 'PARTIAL');
+    text(q('[data-vsim="history-note"]'), history.note || 'History status unavailable.');
+    fillTable(q('[data-vsim="closed-trades-body"]'), performance.trades || [], [
+      item => when(item.closed_at), item => item.underlying || item.symbol || '—', item => item.asset_class || '—',
+      item => item.direction || '—', item => number(item.quantity), item => when(item.opened_at), item => money(item.opening_price),
+      item => money(item.closing_price), item => money(item.fees), item => money(item.realized_pnl),
+    ], history.status === 'PARTIAL' ? 'No fully matched closed lifecycle is available in imported history.' : 'No closed trades.');
+    fillTable(q('[data-vsim="broker-activity-body"]'), ledger.events || [], [
+      item => when(item.occurred_at || item.first_seen_at), item => item.event_type || '—', item => item.symbol || '—',
+      item => item.side || '—', item => number(item.quantity), item => money(item.price), item => money(item.amount), item => item.state || '—',
+    ], 'No broker activity has been ingested.');
+  }
+
+  function attribution(root, rows, key) {
+    clear(root); const maximum = Math.max(1, ...(rows || []).map(row => Math.abs(Number(row.realized_pnl || 0))));
+    if (!rows.length) { root.append(make('p', 'No matched realized trades.', 'muted')); return; }
+    rows.forEach(item => { const row = make('div', undefined, 'attribution-row'); row.append(make('strong', item[key] || '—'));
+      const track = make('div', undefined, 'attribution-track'); const fill = make('i');
+      fill.style.width = Math.abs(Number(item.realized_pnl || 0)) / maximum * 100 + '%'; if (Number(item.realized_pnl) < 0) fill.style.background = 'var(--red)';
+      track.append(fill); row.append(track, make('span', money(item.realized_pnl)), make('b', item.closed_trades ? item.closed_trades + ' trades' : '')); root.append(row); });
+  }
+
+  function drawPerformanceChart(svg, points) {
+    clear(svg); if (!points || !points.length) { const label = document.createElementNS('http://www.w3.org/2000/svg','text'); label.setAttribute('x','500'); label.setAttribute('y','112'); label.setAttribute('text-anchor','middle'); label.setAttribute('fill','#82978e'); label.textContent='No matched realized trades'; svg.append(label); return; }
+    const values = points.map(point => Number(point.value)); const min = Math.min(0, ...values); const max = Math.max(0, ...values); const span = Math.max(1, max - min);
+    const coordinates = points.map((point,index) => [30 + index * (940 / Math.max(1, points.length - 1)), 195 - ((Number(point.value)-min)/span)*165]);
+    const zeroY = 195 - ((0-min)/span)*165; const zero = document.createElementNS('http://www.w3.org/2000/svg','line');
+    zero.setAttribute('x1','25'); zero.setAttribute('x2','975'); zero.setAttribute('y1',String(zeroY)); zero.setAttribute('y2',String(zeroY)); zero.setAttribute('stroke','#28443a'); svg.append(zero);
+    const path = document.createElementNS('http://www.w3.org/2000/svg','polyline'); path.setAttribute('points', coordinates.map(pair => pair.join(',')).join(' '));
+    path.setAttribute('fill','none'); path.setAttribute('stroke','#60e2a8'); path.setAttribute('stroke-width','3'); svg.append(path);
+  }
+
+  function renderPerformance(performance) {
+    const summary = performance.summary || {};
+    setValue('performance-realized', summary.realized_pnl, money); setValue('performance-unrealized', summary.unrealized_pnl, money);
+    setValue('performance-total', summary.total_pnl, money); setValue('win-rate', summary.win_rate, percent);
+    setValue('profit-factor', summary.profit_factor, value => Number(value).toFixed(2));
+    text(q('[data-vsim="win-count"]'), number(summary.wins || 0) + ' wins · ' + number(summary.losses || 0) + ' losses');
+    text(q('[data-vsim="performance-asof"]'), 'As of ' + when(performance.asof));
+    text(q('[data-vsim="performance-warning"]'), performance.history && performance.history.note || 'Performance history unavailable.');
+    drawPerformanceChart(q('[data-vsim="performance-chart"]'), performance.curve || []);
+    attribution(q('[data-vsim="ticker-attribution"]'), performance.by_ticker || [], 'ticker');
+    attribution(q('[data-vsim="strategy-attribution"]'), performance.by_strategy || [], 'strategy');
   }
 
   function renderOverview(status) {
@@ -1524,7 +1803,7 @@ export function liveDashboardScript() {
       text(q('h3', decision), outcome === 'REFUSED' ? 'Proposal withheld' : outcome);
       text(q('.decision-badge', decision), outcome);
       text(q('.decision-copy strong', decision), cycle.reason || 'No completed live decision yet');
-      text(q('.decision-copy p', decision), cycle.cycleId ? ('Cycle ' + cycle.cycleId + ' · Authority 1 cannot allocate capital.') : 'Run a verified live shadow scan after reconciliation and market freshness pass.');
+      text(q('.decision-copy p', decision), cycle.cycleId ? ('Cycle ' + cycle.cycleId + ' · proposals remain read-only; execution is locked.') : 'Run a verified live proposal scan after reconciliation and market freshness pass.');
       const trace = q('.trace-mini', decision); clear(trace);
       const steps = cycle.trace && cycle.trace.length ? cycle.trace.slice(-4) : ['Custody synchronized', 'Reconciliation baseline checked', 'Live market freshness checked', 'Risk governor retained'];
       steps.forEach((step, index) => { const li = make('li', undefined, index === steps.length - 1 && outcome === 'REFUSED' ? 'stop' : 'pass'); li.append(make('span', typeof step === 'string' ? step : (step.layer || step.stage || 'Verified gate')), make('small', index === steps.length - 1 ? (cycle.reason || 'Shadow only') : 'Recorded')); trace.append(li); });
@@ -1554,7 +1833,7 @@ export function liveDashboardScript() {
       clear(health);
       const entries = [
         ['Evidence chain', status.evidence && status.evidence.records + ' RECORDS', true],
-        ['Constitution', 'AUTHORITY 1', true],
+        ['Constitution', 'AUTHORITY 2 · PROPOSE', true],
         ['Market adapter', market ? (market.ok ? 'LIVE' : 'BLOCKED') : 'NOT CHECKED', Boolean(market && market.ok)],
         ['Broker adapter', status.schwab && status.schwab.status || 'UNKNOWN', connectorOk(status.schwab && status.schwab.status)],
         ['Order mutation', 'DISABLED', true],
@@ -1603,7 +1882,7 @@ export function liveDashboardScript() {
     records.forEach(record => { const row = make('tr'); [record.sequence, record.cycle_id, record.decision, record.authority_level, (record.decision_fingerprint || '').slice(0, 16) + '…', when(record.created_at)].forEach(value => row.append(make('td', String(value ?? '—')))); body.append(row); });
     if (!records.length) { const row = make('tr'); const cell = make('td', 'No evidence records have been sealed.'); cell.colSpan = 6; row.append(cell); body.append(row); }
     table.append(thead, body); tableWrap.append(table); list.append(tableWrap); layout.append(list);
-    const side = make('aside', undefined, 'evidence-side'); const facts = make('article', undefined, 'panel'); facts.append(make('p', 'Protected evidence storage', 'kicker'), make('h3', status.evidence.storage)); const dl = make('dl', undefined, 'package-facts'); [['Index','Cloudflare D1'],['Raw packages','Protected R2'],['Records',String(records.length)],['Mutation request','None'],['Authority','1 · Shadow']].forEach(pair => { const div = make('div'); div.append(make('dt', pair[0]), make('dd', pair[1])); dl.append(div); }); facts.append(dl); side.append(facts); layout.append(side);
+    const side = make('aside', undefined, 'evidence-side'); const facts = make('article', undefined, 'panel'); facts.append(make('p', 'Protected evidence storage', 'kicker'), make('h3', status.evidence.storage)); const dl = make('dl', undefined, 'package-facts'); [['Index','Cloudflare D1'],['Raw packages','Protected R2'],['Records',String(records.length)],['Mutation request','None'],['Authority','2 · Propose only']].forEach(pair => { const div = make('div'); div.append(make('dt', pair[0]), make('dd', pair[1])); dl.append(div); }); facts.append(dl); side.append(facts); layout.append(side);
     text(q('#evidence .preview-disclaimer'), 'Live protected evidence metadata. Raw evidence packages remain private and are not exposed to the browser.');
   }
 
@@ -1681,10 +1960,10 @@ export function liveDashboardScript() {
 
   let currentStatus = null;
   async function refresh() {
-    const payloads = await Promise.all([api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=100')]);
+    const payloads = await Promise.all([api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance')]);
     currentStatus = payloads[0];
     renderOverview(currentStatus); renderOpportunities(currentStatus); renderSystem(currentStatus); await renderEvidence(currentStatus);
-    renderGuardian(payloads[1], payloads[2]);
+    renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3]); renderRecords(payloads[4], payloads[2]); renderPerformance(payloads[4]);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
     text(q('.safety-banner p'), 'Live Schwab custody, Schwab market data, and D1/R2 evidence are connected. Broker order mutation is disabled.');
@@ -1791,6 +2070,12 @@ async function route(request, env, ctx) {
 
   const client = new SchwabD1Client(env);
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
+  if (url.pathname === '/api/portfolio' && request.method === 'GET') {
+    return json(await portfolioDashboard(env, owner.id));
+  }
+  if (url.pathname === '/api/performance' && request.method === 'GET') {
+    return json(await performanceDashboard(env, owner.id));
+  }
   if (url.pathname === '/api/integrations/telegram/status' && request.method === 'GET') {
     return json(await telegramAssistantStatus(env, owner.id));
   }
@@ -1815,7 +2100,7 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/integrations/schwab/connect' && request.method === 'GET') {
     const destination = await client.beginOAuth(owner.id);
     const safeDestination = destination.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
-    return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Connect Schwab read-only</title><style>body{color-scheme:dark;background:#07100e;color:#e8f1ec;font:16px system-ui;display:grid;min-height:100vh;place-items:center;margin:0}.card{max-width:620px;background:#0d1a16;border:1px solid #22382f;border-radius:12px;padding:28px}h1{margin-top:0}p{color:#a9bbb2;line-height:1.55}.warn{color:#f4ba61}a{display:inline-block;margin-top:12px;border:1px solid #315445;background:#10271f;color:#60e2a8;padding:11px 15px;border-radius:7px;text-decoration:none;font-weight:700}</style></head><body><main class="card"><h1>Connect Schwab read-only</h1><p>This authorizes custody reads for account balances, positions, and open orders. NUVO VSIM v5 remains at Authority 1 and has no order submission, replacement, or cancellation capability.</p><p class="warn">You will review and approve the connection on Schwab.</p><a href="${safeDestination}" rel="noreferrer">Continue to Schwab</a></main></body></html>`, {
+    return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Connect Schwab read-only</title><style>body{color-scheme:dark;background:#07100e;color:#e8f1ec;font:16px system-ui;display:grid;min-height:100vh;place-items:center;margin:0}.card{max-width:620px;background:#0d1a16;border:1px solid #22382f;border-radius:12px;padding:28px}h1{margin-top:0}p{color:#a9bbb2;line-height:1.55}.warn{color:#f4ba61}a{display:inline-block;margin-top:12px;border:1px solid #315445;background:#10271f;color:#60e2a8;padding:11px 15px;border-radius:7px;text-decoration:none;font-weight:700}</style></head><body><main class="card"><h1>Connect Schwab read-only</h1><p>This authorizes custody reads for account balances, positions, and open orders. NUVO VSIM v5 remains proposal-only and has no order submission, replacement, or cancellation capability.</p><p class="warn">You will review and approve the connection on Schwab.</p><a href="${safeDestination}" rel="noreferrer">Continue to Schwab</a></main></body></html>`, {
       headers: {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'private, no-store',

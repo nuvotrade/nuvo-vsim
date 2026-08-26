@@ -48,10 +48,13 @@ export function enumerateCandidates({
   maxSpreadWidth = 6,
   holdings = null,
   only = null,
+  allowedStructures = null,
 }) {
   const candidates = [];
   const spot = underlyingState.spot;
   const [dLo, dHi] = deltaBand;
+  const allowed = allowedStructures ? new Set(allowedStructures) : null;
+  const allows = (kind) => !allowed || allowed.has(kind);
 
   const puts = chain.contracts
     .filter((c) => c.right === 'put' && isNum(c.delta) && Math.abs(c.delta) >= dLo && Math.abs(c.delta) <= dHi)
@@ -68,7 +71,7 @@ export function enumerateCandidates({
   };
 
   // ── Cash-secured puts across the whole admissible chain ──
-  if (isPermitted(regime?.regime, STRUCTURE.CSP)) {
+  if (allows(STRUCTURE.CSP) && isPermitted(regime?.regime, STRUCTURE.CSP)) {
     for (const put of puts) {
       const s = cashSecuredPut({ underlying: chain.underlying, put, contracts });
       const r = score(s);
@@ -77,7 +80,7 @@ export function enumerateCandidates({
   }
 
   // ── Bull put spreads: every short strike against every valid long ──
-  if (isPermitted(regime?.regime, STRUCTURE.BULL_PUT_SPREAD)) {
+  if (allows(STRUCTURE.BULL_PUT_SPREAD) && isPermitted(regime?.regime, STRUCTURE.BULL_PUT_SPREAD)) {
     const allPuts = chain.contracts.filter((c) => c.right === 'put').sort((a, b) => b.strike - a.strike);
     for (const shortPut of puts) {
       for (const longPut of allPuts) {
@@ -94,7 +97,8 @@ export function enumerateCandidates({
 
   // ── Covered calls, only where shares are actually held (§11) ──
   const shares = holdings?.shares ?? 0;
-  if (shares >= 100 && isPermitted(regime?.regime, STRUCTURE.COVERED_CALL)) {
+  if (allows(STRUCTURE.COVERED_CALL) && shares >= 100
+    && isPermitted(regime?.regime, STRUCTURE.COVERED_CALL)) {
     const calls = chain.contracts
       .filter((c) => c.right === 'call' && isNum(c.delta) && c.delta >= 0.10 && c.delta <= 0.45);
     for (const call of calls) {
@@ -108,8 +112,11 @@ export function enumerateCandidates({
   }
 
   // ── Shares, so "just own it" competes rather than being assumed away ──
-  if (stanceFor(regime?.regime, STRUCTURE.SHARES) !== STANCE.FORBIDDEN) {
-    const s = longShares({ underlying: chain.underlying, spot, shares: 100 });
+  if (allows(STRUCTURE.SHARES)
+    && stanceFor(regime?.regime, STRUCTURE.SHARES) !== STANCE.FORBIDDEN) {
+    const expiration = chain.contracts[0]?.expiration ?? null;
+    const dte = chain.contracts[0]?.dte ?? null;
+    const s = longShares({ underlying: chain.underlying, spot, shares: 100, dte, expiration });
     const r = score(s);
     if (r) candidates.push(r);
   }

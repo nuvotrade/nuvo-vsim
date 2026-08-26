@@ -4,6 +4,7 @@ const PERMITTED_ACTIONS = Object.freeze([
   'run_shadow_cycle', 'get_account_truth', 'get_market_state', 'get_cycle',
   'list_cycles', 'list_ranked_opportunities', 'explain_candidate',
   'explain_rejection', 'replay_evidence', 'list_evidence',
+  'create_trade_proposal', 'review_order_ticket',
 ]);
 
 const isFiniteNumber = (value) => value !== null && value !== undefined
@@ -19,6 +20,7 @@ function contextFingerprint(context) {
     constitution_version: context.constitution_version,
     candidates: context.candidates,
     decision: context.decision,
+    proposal_template: context.proposal_template,
   });
 }
 
@@ -76,6 +78,12 @@ function candidateRows(evidence, result) {
       p_cal: calibrated ? candidate.probabilities?.pCal ?? null : null,
       p_cal_status: calibrated ? 'ACTIVE' : 'UNCALIBRATED',
       model_confidence: candidate.probabilities?.confidence ?? null,
+      probability_of_profit_model: candidate.success?.p_model ?? null,
+      probability_of_profit_market: candidate.success?.p_market ?? null,
+      breakeven: candidate.success?.breakeven ?? null,
+      probability_of_profit_direction: candidate.success?.direction ?? null,
+      entry_credit: candidate.credit ?? null,
+      buying_power: candidate.buyingPower ?? null,
       ev: candidate.ev ?? null,
       cvar: candidate.cvar ?? null,
       gap_risk: candidate.gapRisk ?? null,
@@ -134,10 +142,23 @@ export function buildCycleContext({ result, summary, snapshotHash = null }) {
   ];
   const accountSnapshotHash = snapshotHash ?? contentHash({ account, positions, openOrders });
   const decision = decisionName(summary.outcome);
+  const selectedCandidate = candidates.find((candidate) => candidate.verdict === 'ELIGIBLE') ?? null;
+  const proposalTemplate = result?.order && selectedCandidate ? {
+    candidate_id: selectedCandidate.candidate_id,
+    client_order_id: result.order.clientOrderId,
+    strategy: result.order.intent?.strategy ?? result.selected?.structure?.kind ?? null,
+    underlying: result.order.intent?.underlying ?? result.selected?.underlying ?? null,
+    legs: result.order.legs ?? [],
+    recommended_limit_price: result.order.limitPrice ?? null,
+    order_type: result.order.orderType ?? 'NET_LIMIT',
+    time_in_force: result.order.timeInForce ?? 'DAY',
+    maximum_quantity: result.sizing?.contracts ?? null,
+    expectation: result.order.expectation ?? null,
+  } : null;
 
   return {
     cycle_id: summary.cycleId,
-    authority_level: 1,
+    authority_level: evidence?.authorityLevel ?? 1,
     engine_version: evidence?.codeVersion ?? null,
     model_version: evidence?.modelVersion ?? null,
     constitution_version: evidence?.limitsVersion ?? null,
@@ -159,15 +180,17 @@ export function buildCycleContext({ result, summary, snapshotHash = null }) {
     reason: summary.reason ?? null,
     evidence_fingerprint: evidence?.decisionFingerprint ?? null,
     evidence_hash: evidence?.hash ?? null,
+    proposal_template: proposalTemplate,
     permitted_actions: [...PERMITTED_ACTIONS],
     created_at: new Date(summary.at).toISOString(),
   };
 }
 
-export function buildBlockedCycleContext({ summary, detail = {}, codeVersion, constitutionVersion }) {
+export function buildBlockedCycleContext({ summary, detail = {}, codeVersion, constitutionVersion,
+  authorityLevel = 1 }) {
   return {
     cycle_id: summary.cycleId,
-    authority_level: 1,
+    authority_level: authorityLevel,
     engine_version: codeVersion,
     model_version: 'nuvo-model-5.0.0',
     constitution_version: constitutionVersion,

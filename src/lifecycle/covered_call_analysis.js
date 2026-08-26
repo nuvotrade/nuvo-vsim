@@ -77,10 +77,11 @@ export function analyzeCoveredCallLifecycle({
   const lockedProfit = entryCredit - closeOutlay;
   const capturedProfitPct = entryCredit > 0 ? lockedProfit / entryCredit : null;
   const expectedIntrinsicPerShare = mean(dist.samples.map((terminal) => Math.max(terminal - strike, 0)));
+  const expectedSurrenderedUpside = expectedIntrinsicPerShare * multiplier * contracts;
   const pModelItm = 1 - probabilityBelow(dist, strike);
   const expectedAssignmentFee = pModelItm * costs.assignmentFee;
   const expectedHoldProfit = entryCredit
-    - expectedIntrinsicPerShare * multiplier * contracts
+    - expectedSurrenderedUpside
     - expectedAssignmentFee;
   const expectedHoldVsClose = expectedHoldProfit - lockedProfit;
   const holdCloseBreakeven = strike + closeOutlay / (multiplier * contracts);
@@ -143,6 +144,7 @@ export function analyzeCoveredCallLifecycle({
       market_implied_touch_strike: pMarketTouch,
       model_expire_otm: probabilityBelow(dist, strike),
       model_expire_itm_assignment: pModelItm,
+      model_minus_market_assignment: pModelItm - pMarketItm,
       model_short_call_profitable_from_entry: probabilityBelow(dist, totalProfitBreakeven),
       market_implied_short_call_profitable_from_entry: pMarketProfit,
       model_hold_outperforms_close_now: probabilityBelow(dist, holdCloseBreakeven),
@@ -152,7 +154,9 @@ export function analyzeCoveredCallLifecycle({
       close_now_locked_profit: lockedProfit,
       hold_expected_profit_model: expectedHoldProfit,
       hold_minus_close_expected_value: expectedHoldVsClose,
-      expected_expiry_intrinsic_value_total: expectedIntrinsicPerShare * multiplier * contracts,
+      expected_expiry_intrinsic_value_total: expectedSurrenderedUpside,
+      expected_upside_surrendered_if_held: expectedSurrenderedUpside,
+      expected_assignment_fee: expectedAssignmentFee,
       hold_outperformance_breakeven_spot: holdCloseBreakeven,
       total_trade_profit_breakeven_spot: totalProfitBreakeven,
       quantitative_verdict: quantitativeVerdict,

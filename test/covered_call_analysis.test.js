@@ -42,7 +42,27 @@ test('covered-call lifecycle analysis quantifies close versus hold deterministic
   assert.equal(first.current_trade.executable_buyback_total, 201.6);
   assert.equal(first.current_trade.profit_locked_if_closed_now, 278.4);
   assert.ok(first.current_trade.profit_captured_pct > 0.5);
-  for (const probability of Object.values(first.probabilities).filter(Number.isFinite)) {
+  assert.equal(
+    first.comparison.expected_upside_surrendered_if_held,
+    first.comparison.expected_expiry_intrinsic_value_total,
+  );
+  assert.ok(first.comparison.expected_upside_surrendered_if_held >= 0);
+  assert.equal(
+    first.comparison.hold_expected_profit_model,
+    first.current_trade.entry_credit_total
+      - first.comparison.expected_upside_surrendered_if_held
+      - first.comparison.expected_assignment_fee,
+  );
+  assert.equal(
+    first.probabilities.model_minus_market_assignment,
+    first.probabilities.model_expire_itm_assignment
+      - first.probabilities.market_implied_expire_itm_assignment,
+  );
+  assert.ok(Number.isFinite(first.probabilities.model_minus_market_assignment));
+  assert.ok(first.probabilities.model_minus_market_assignment >= -1);
+  assert.ok(first.probabilities.model_minus_market_assignment <= 1);
+  for (const [name, probability] of Object.entries(first.probabilities)) {
+    if (name === 'model_minus_market_assignment' || !Number.isFinite(probability)) continue;
     assert.ok(probability >= 0 && probability <= 1);
   }
   assert.match(first.comparison.quantitative_verdict, /STATISTICALLY_FAVORED|NEAR_TIE/u);

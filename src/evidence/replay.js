@@ -167,6 +167,8 @@ export async function replay(pkg, { limits = null, rawInputs = null } = {}) {
     baseRiskPct: es.baseRiskPct,
     maxGovernanceAttempts: es.maxGovernanceAttempts,
     commitmentsThisCycle: es.commitmentsThisCycle,
+    structureAllowlist: es.structureAllowlist ?? null,
+    holdings: es.holdings ?? {},
     portfolioReturnsBySymbol: es.portfolioReturnsBySymbol ?? {},
     portfolioSectors: es.portfolioSectors ?? {},
     screenSamples: es.sampling?.screenSamples,

@@ -113,7 +113,7 @@ export function bullPutSpread({ underlying, shortPut, longPut, contracts = 1, ag
 }
 
 /** Long shares. Included so "just buy it" competes on the same scoreboard. */
-export function longShares({ underlying, spot, shares = 100 }) {
+export function longShares({ underlying, spot, shares = 100, dte = null, expiration = null }) {
   return {
     kind: STRUCTURE.SHARES,
     underlying,
@@ -126,9 +126,11 @@ export function longShares({ underlying, spot, shares = 100 }) {
     definedRisk: false,
     multiplier: 1,
     shortStrike: null,
-    dte: null,
+    dte,
+    expiration,
     payoff: (S) => (S - spot) * shares,
     breakeven: spot,
+    profitDirection: 'above',
   };
 }
 

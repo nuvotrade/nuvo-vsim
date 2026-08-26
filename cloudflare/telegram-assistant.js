@@ -1,6 +1,6 @@
 import { contentHash } from '../src/execution/order.js';
 
-export const TELEGRAM_ASSISTANT_VERSION = 'NUVO-TELEGRAM-GUARDIAN-2026-08-26-v2';
+export const TELEGRAM_ASSISTANT_VERSION = 'NUVO-TELEGRAM-GUARDIAN-2026-08-26-v4';
 export const TELEGRAM_MODEL_DEFAULT = '@cf/openai/gpt-oss-120b';
 
 const encoder = new TextEncoder();
@@ -12,9 +12,11 @@ export const TELEGRAM_GUARDIAN_INSTRUCTIONS = `You are NUVO Guardian, YG's priva
 
 The structured NUVO context supplied with every turn is authoritative. It was read from Schwab and the deterministic VSIM engine for this exact question. Never invent a price, position, order, fill, campaign term, reconciliation result, market status, option metric, approval, protection, cancellation, or broker action. If a required fact is absent, say UNKNOWN and identify the missing fact. If ok=false, reconciliation is not CAPTURED, Schwab is disconnected, or required market data is stale or outside RTH, do not authorize new exposure.
 
-Authority level 1 always means SHADOW · READ-ONLY. It is not full account authority, proposal authority, execution authority, or permission to trade. Never describe Authority 1 as full authority. If market_state is null, say market data was not required or not checked for that question; never label it LIVE from another field.
+Authority level 2 means PROPOSE · HUMAN EXECUTION. It may freeze an engine-selected proposal and approve the Principal's exact matching ticket after all current gates pass. It still has no broker mutation, cancellation, replacement, or execution authority. If market_state is null, say market data was not required or not checked for that question; never label it LIVE from another field.
 
-You may answer questions, explain the current account, identify violations, and apply frozen Guardian rules. You are not a signal generator and you do not calculate EV, CVaR, NEV, RAROC, option prices, probabilities, Greeks, or position size. Those numbers are valid only when returned by VSIM. You never submit, replace, cancel, or construct a broker order. Chat cannot change the Constitution, authority, campaign contract, or limits.
+You may answer questions, explain the current account, identify violations, and apply frozen Guardian rules. You are not a signal generator and you do not calculate EV, CVaR, NEV, RAROC, option prices, probabilities, Greeks, or position size. Those numbers are valid only when returned by VSIM. The only permitted strategy set is buying fully paid shares, selling owned shares, fully cash-secured puts, covered calls against verified unencumbered shares, and risk-reducing buy-to-close actions. Bull-put spreads, bear-put spreads, and all other spreads are unsupported: never recommend or approve them. You never submit, replace, cancel, or construct a broker order from prose. Chat cannot change the Constitution, authority, campaign contract, or limits.
+
+For any new-position question, use only a sealed ranked_opportunities candidate. Report the engine's probability of profit, p_market, p_model, EV, CVaR, gap risk, liquidity risk, NEV, RAROC, economic capital, breakeven, Governor verdict, and calibration status. If the exact requested trade is absent, say NO TRADE or UNKNOWN; never fill in missing strikes, expirations, quantities, limits, or probabilities. The required workflow is Guardian OPEN -> live reconciled account truth -> deterministic cycle -> frozen proposal -> exact ticket review. An approval covers only that exact ticket and expires; it is not general permission.
 
 For a question about closing an existing option early versus holding it, use position_lifecycle_analytics first. This is a lifecycle comparison, not a new-position request. A buy-to-close that removes an existing short option is risk-reducing; do not call it new exposure and do not replace the quantitative answer with MANAGE-ONLY or campaign-contract language. Explain profit already captured, executable buyback cost, market and model probabilities, hold-versus-close expected value, assignment/touch risk, and the deterministic quantitative verdict. Guardian restrictions may be stated afterward as a separate risk-control note. A roll or a new option sale remains a new trade and must be evaluated separately.
 
@@ -63,6 +65,49 @@ export function requiresMarketData(question) {
 export function requiresLifecycleAnalytics(question) {
   return /\b(covered calls?|short calls?|buy back|buyback|close early|closing early|let (?:it|them) expire|hold (?:it|them) to expiry|roll(?:ing)?)\b/iu
     .test(String(question));
+}
+
+export function requiresNewExposureAnalysis(question) {
+  return /\b(should i|can i|recommend|initiat|open|enter|buy|sell|write)\b/iu.test(String(question))
+    && /\b(cash[- ]?secured put|csp|covered call|shares?|stock|bull put|bear put|spread)\b/iu.test(String(question));
+}
+
+export function deterministicNewExposureAnswer({ question, truth, market, cycle }) {
+  if (/\b(?:bull|bear) put spread|\bspread\b/iu.test(String(question))) {
+    return 'UNSUPPORTED — option spreads are outside the Principal mandate and cannot be recommended or approved. Permitted structures are fully paid shares, owned-share sales, cash-secured puts, covered calls, and risk-reducing closes.';
+  }
+  const state = truth?.guardian?.state ?? 'BLOCKED-INCOMPLETE';
+  if (!truth?.ok || !market?.ok || state !== 'OPEN') {
+    return deterministicBlockedAnswer({ truth, market, guardian: truth?.guardian,
+      error: { code: state !== 'OPEN' ? 'GUARDIAN/STATE_NOT_OPEN' : 'TRUTH/UNAVAILABLE' } });
+  }
+  const requested = /\b(cash[- ]?secured put|csp)\b/iu.test(String(question)) ? 'CSP'
+    : /\bcovered call\b/iu.test(String(question)) ? 'COVERED_CALL'
+      : /\b(shares?|stock)\b/iu.test(String(question)) ? 'SHARES' : null;
+  const candidates = (cycle?.ranked_opportunities?.candidates ?? []).filter((candidate) =>
+    (!requested || candidate.structure === requested)
+    && ['CSP', 'COVERED_CALL', 'SHARES'].includes(candidate.structure)
+    && candidate.verdict === 'ELIGIBLE' && ['PASS', 'REDUCED'].includes(candidate.governor));
+  const candidate = candidates[0];
+  if (!candidate) {
+    return [
+      'NO TRADE — the latest sealed deterministic cycle contains no Guardian-eligible candidate matching this request.',
+      `Guardian: ${state} · Cycle: ${cycle?.latest_cycle?.cycle_id ?? 'UNKNOWN'}`,
+      'No strike, expiration, quantity, limit, probability, or edge will be guessed.',
+      `Schwab as of: ${truth?.asof ?? 'UNKNOWN'} · Market as of: ${market?.asof ?? 'UNKNOWN'}`,
+    ].join('\n');
+  }
+  return [
+    'ELIGIBLE FOR A FROZEN PROPOSAL — not yet an approved broker order.',
+    `${candidate.symbol} · ${candidate.structure} · ${candidate.expiry} · strike(s) ${candidate.strikes}`,
+    `Model probability of profit: ${percent(candidate.probability_of_profit_model)} · Market-implied: ${percent(candidate.probability_of_profit_market)}`,
+    `p_market breach: ${percent(candidate.p_market)} · p_model breach: ${percent(candidate.p_model)} · Calibration: ${candidate.p_cal_status}`,
+    `EV: ${wholeDollar(candidate.ev)} · CVaR: ${wholeDollar(candidate.cvar)} · Gap risk: ${wholeDollar(candidate.gap_risk)} · Liquidity risk: ${wholeDollar(candidate.liquidity_risk)}`,
+    `NEV: ${wholeDollar(candidate.nev)} · RAROC: ${percent(candidate.raroc)} · Economic capital: ${wholeDollar(candidate.economic_capital)}`,
+    `Breakeven: ${wholeDollar(candidate.breakeven)} · Governor: ${candidate.governor}`,
+    'Next: freeze this candidate, then submit the exact quantity and DAY limit for Guardian ticket review. Only the exact approved ticket is authorized; you execute it manually.',
+    `Schwab as of: ${truth.asof} · Market as of: ${market.asof}`,
+  ].join('\n');
 }
 
 export function normalizeAiText(result) {
@@ -139,8 +184,10 @@ export function coveredCallLifecycleAnswer(lifecycle) {
     `Model probability holding beats closing now: ${percent(analysis.probabilities?.model_hold_outperforms_close_now)}`,
     `Model probability of assignment at expiry: ${percent(analysis.probabilities?.model_expire_itm_assignment)}`,
     `Market-implied probability of assignment at expiry: ${percent(analysis.probabilities?.market_implied_expire_itm_assignment)}`,
+    `Model-minus-market assignment gap: ${percent(analysis.probabilities?.model_minus_market_assignment)}`,
     `Market-implied probability of touching the strike: ${percent(analysis.probabilities?.market_implied_touch_strike)}`,
     `Expected profit if held to expiry: ${wholeDollar(holdExpected)}`,
+    `Expected upside surrendered if held: ${wholeDollar(analysis.comparison?.expected_upside_surrendered_if_held)}`,
     `Expected hold-minus-close value: ${wholeDollar(analysis.comparison?.hold_minus_close_expected_value)}`,
     '',
     'Reasoning',
@@ -219,6 +266,16 @@ async function latestCycleContext(service) {
     ranked_opportunities: ranked,
     explanations,
   };
+}
+
+async function waitForTriggeredCycle(service, trigger, { attempts = 30, intervalMs = 1_000 } = {}) {
+  if (!trigger?.cycle_id || trigger.state !== 'TRIGGERED') return trigger;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    const cycle = await service.getCycle(trigger.cycle_id);
+    if (cycle?.ok && cycle.state && cycle.state !== 'TRIGGERED') return cycle;
+  }
+  return trigger;
 }
 
 async function brokerLedgerContext(env, ownerId) {
@@ -335,6 +392,14 @@ export async function processTelegramUpdate({ env, ownerId, service, reviewGuard
 
     await reviewGuardian({ reviewType: 'MANUAL', notify: false });
     const truth = await service.getAccountTruth();
+    const newExposureQuestion = requiresNewExposureAnalysis(question);
+    if (newExposureQuestion && truth?.ok && truth?.guardian?.state === 'OPEN'
+      && service.runProposalCycle) {
+      const trigger = await service.runProposalCycle(
+        `telegram:${update.update_id}:${contentHash(question).slice(0, 24)}`,
+      );
+      await waitForTriggeredCycle(service, trigger);
+    }
     const [market, guardian, cycle, brokerLedger, lifecycle] = await Promise.all([
       requiresMarketData(question) ? service.getMarketState() : Promise.resolve(null),
       latestGuardianReport(env, ownerId),
@@ -344,11 +409,13 @@ export async function processTelegramUpdate({ env, ownerId, service, reviewGuard
         ? service.getLifecycleAnalytics(truth) : Promise.resolve(null),
     ]);
     const lifecycleAnswer = coveredCallLifecycleAnswer(lifecycle);
-    const explanation = lifecycleAnswer ? '' : await generateAnswer(env, {
+    const exposureAnswer = lifecycleAnswer || !requiresNewExposureAnalysis(question) ? ''
+      : deterministicNewExposureAnswer({ question, truth, market, cycle });
+    const explanation = lifecycleAnswer || exposureAnswer ? '' : await generateAnswer(env, {
       question, history, truth, market, guardian, lifecycle,
       cycle: { ...cycle, broker_ledger: brokerLedger },
     });
-    const answer = plainTelegramText(lifecycleAnswer || explanation);
+    const answer = plainTelegramText(lifecycleAnswer || exposureAnswer || explanation);
     await sendTelegramReply(env, chatId, message.message_id, answer);
     await recordMessage(env, ownerId, chatId, update.update_id, 'assistant', answer);
     await env.DB.prepare(`UPDATE telegram_updates SET status='ANSWERED',answer_hash=?,finished_at=?,error_code=NULL

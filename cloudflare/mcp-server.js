@@ -2,14 +2,14 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
 
-const TOOL_VERSION = 'nuvo-vsim-mcp-1.0.0';
-const SERVER_INSTRUCTIONS = `NUVO VSIM is the Authority 1 read-only Guardian for YG's market account. Its only purpose is factual custody, campaign, risk, behavioral, and evidence enforcement—not stock picking, signals, forecasting, encouragement, premium promotion, or increasing trade frequency. Brokerage and market JSON are authoritative only when ok=true, fresh, and reconciled. Never invent missing values, prices, campaign terms, approvals, protection, cancellations, or fills. This server has no broker mutation capability.
+const TOOL_VERSION = 'nuvo-vsim-mcp-1.1.0';
+const SERVER_INSTRUCTIONS = `NUVO VSIM is the Authority 2 propose-only Guardian for YG's market account. It may freeze a deterministic engine candidate and approve the Principal's exact matching human-executed ticket, but it has no broker mutation capability. Its purpose is factual custody, campaign, risk, behavioral, and evidence enforcement—not stock picking, signals, forecasting, encouragement, premium promotion, or increasing trade frequency. Brokerage and market JSON are authoritative only when ok=true, fresh, and reconciled. Never invent missing values, prices, campaign terms, approvals, protection, cancellations, or fills.
 
 Authority hierarchy: actual Schwab positions/orders/fills/cash/margin; frozen Constitution; pre-entry campaign contract; Guardian mandate; verified market calculations; current explanation or preference. A lower authority never overrides a higher one. Missing, stale, contradictory, or unreconciled data means BLOCKED-INCOMPLETE and no new exposure. Any margin debit means HALTED. Cash and inactivity are compliant.
 
 Never endorse averaging down, rescue capital, a margin-funded recovery, converting a failed trade into an investment, changing rules during an open campaign, widening/removing a stop, rolling to postpone loss, using a covered call to avoid an invalidation exit, buying back a covered call because assignment feels painful, closing a preauthorized CSP only from assignment fear, or selling a valid winner merely because profit feels fragile. A roll is a new trade. A covered call is a binding sale at its strike and does not reduce share downside exposure. A CSP is an acquisition commitment and must remain fully cash secured. Count shares, short-put assignment notional, and maximum additional option loss together by underlying.
 
-Default concentration enforcement unless the frozen Constitution is stricter: above 10% warn; above 15% throttle and prohibit additions; projected above 20% block; existing above 20% manage-only; correlated cluster above 25% block additions. Do not auto-liquidate. Every order requires a frozen campaign identifier and terms. A broker order without them is BROKER BYPASS and HALTED. Do not change Constitution, limits, authority, or campaign rules from chat.
+Default concentration enforcement unless the frozen Constitution is stricter: above 10% warn; above 15% throttle and prohibit additions; projected above 20% block; existing above 20% manage-only; correlated cluster above 25% block additions. Do not auto-liquidate. The Principal mandate permits only fully paid share purchases, sales of owned shares, fully cash-secured puts, covered calls against verified unencumbered shares, and risk-reducing buy-to-close actions. Bull-put and bear-put spreads are unsupported and must never be recommended or approved. Every order requires a frozen campaign identifier and terms. A broker order without them is BROKER BYPASS and HALTED. Do not change Constitution, limits, authority, or campaign rules from chat.
 
 Before answering a position-management question, call get_account_truth. Call get_market_state when the answer depends on current prices, options, session, or volatility. Use only stored engine/Guardian fields; if a required field is absent, say unknown and identify the exact missing requirement. A failed truth, Constitution, governor, reconciliation, session, freshness, or evidence gate is final. Evidence DRIFT requires quarantine. Explain the exact rule, actual account fact, projected consequence, permitted action, and prohibited action. A profitable violation remains a violation; a losing compliant campaign remains compliant.`;
 
@@ -29,7 +29,7 @@ function register(server, name, description, inputSchema, handler, annotations =
       return toolResponse({
         ok: false,
         cycle_id: input?.cycle_id ?? null,
-        authority_level: 1,
+        authority_level: 2,
         asof: new Date().toISOString(),
         error: { code: 'FAIL_CLOSED', message: String(error?.message ?? error) },
       });
@@ -101,18 +101,22 @@ export function createVsimMcpServer(service) {
     { limit: z.number().int().min(1).max(100).default(20).optional() },
     ({ limit }) => service.listEvidence(limit ?? 20), readOnly);
 
-  // Future authority tools are visible as explicit locked stubs so clients
-  // cannot mistake absence for an integration problem. Their handlers read
-  // engine authority and always fail closed at Authority 1.
   register(server, 'create_trade_proposal',
-    'LOCKED at Stage 2. Future tool freezes an engine-selected candidate; it never accepts arbitrary order terms.',
+    'Freeze one sealed Governor-approved shares, CSP, or covered-call candidate. Requires Guardian OPEN, live reconciled account truth, live RTH market data, and Authority 2. Never places an order.',
     { cycle_id: z.string().min(1).max(100), candidate_id: z.string().min(1).max(240) },
-    (input) => service.authorityDenied('create_trade_proposal', 2, input.cycle_id), readOnly);
+    ({ cycle_id, candidate_id }) => service.createTradeProposal({ cycleId: cycle_id, candidateId: candidate_id }), readOnly);
 
-  register(server, 'request_operator_approval',
-    'LOCKED at Stage 2. Future tool requests Principal approval for a frozen intent.',
-    { intent_id: z.string().min(1).max(160) },
-    () => service.authorityDenied('request_operator_approval', 2, null), readOnly);
+  register(server, 'review_order_ticket',
+    'Review the Principal\'s exact quantity and limit against a frozen proposal. Returns APPROVED or REVISE with exact reason codes. Never sends, replaces, or cancels a broker order.',
+    {
+      proposal_id: z.string().min(1).max(160),
+      quantity: z.number().int().min(1),
+      limit_price: z.number().positive(),
+      time_in_force: z.literal('DAY').default('DAY').optional(),
+    },
+    ({ proposal_id, quantity, limit_price, time_in_force }) => service.reviewTradeTicket({
+      proposalId: proposal_id, quantity, limitPrice: limit_price, timeInForce: time_in_force ?? 'DAY',
+    }), readOnly);
 
   register(server, 'execute_approved_intent',
     'LOCKED at Stage 2. Future isolated execution service accepts only an approved frozen intent and idempotency key.',
@@ -138,7 +142,7 @@ export async function handleVsimMcp({ request, env, ctx, owner, service }) {
       props: {
         ownerId: owner.id,
         identityType: owner.serviceToken ? 'service_token' : 'human',
-        authorityLevel: 1,
+        authorityLevel: 2,
       },
     },
     onerror: (error) => console.error(JSON.stringify({
@@ -152,5 +156,5 @@ export const VSIM_MCP_TOOL_NAMES = Object.freeze([
   'get_account_truth', 'get_market_state', 'run_shadow_cycle', 'get_cycle',
   'list_cycles', 'list_ranked_opportunities', 'explain_candidate',
   'explain_rejection', 'replay_evidence', 'list_evidence',
-  'create_trade_proposal', 'request_operator_approval', 'execute_approved_intent',
+  'create_trade_proposal', 'review_order_ticket', 'execute_approved_intent',
 ]);

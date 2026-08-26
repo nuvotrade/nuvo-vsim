@@ -51,6 +51,10 @@ export function stableStringify(v) {
  * gives back the edge the underwriting just measured.
  */
 export function limitPrice({ structure, side, aggression = 0.35 }) {
+  if (structure?.legs?.length === 1 && structure.legs[0].right === 'shares') {
+    const price = structure.legs[0].price;
+    return { price: isNum(price) ? +price.toFixed(2) : NaN, side, aggression: 0 };
+  }
   let net = 0;
   for (const leg of structure.legs) {
     const c = leg.contract;
@@ -122,7 +126,7 @@ export function buildOrder({
       intent,
       legs,
       limitPrice: price.price,
-      orderType: 'NET_LIMIT',
+      orderType: candidate.structure.kind === 'SHARES' ? 'LIMIT' : 'NET_LIMIT',
       timeInForce: 'DAY',
       ladder: priceLadder({ structure: candidate.structure, side: 'OPEN' }),
       positionContractId: position?.id ?? null,

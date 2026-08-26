@@ -279,6 +279,7 @@ function summariseCandidate(c) {
       edge: c.probabilities.edge,
       confidence: c.probabilities.confidence,
     } : null,
+    success: c.success ?? null,
     admissible: c.admissible,
     violations: (c.violations ?? []).map(String),
   };
