@@ -7,6 +7,7 @@ import { buildEvidence, verifyEvidence, verifyFingerprint } from '../src/evidenc
 import { replay } from '../src/evidence/replay.js';
 import { AUTHORITY } from '../src/constitution/authority.js';
 import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
+import { analyzeCoveredCallLifecycle } from '../src/lifecycle/covered_call_analysis.js';
 import { contentHash, ORDER_STATE } from '../src/execution/order.js';
 import { reconcile, RECON } from '../src/truth/reconciliation.js';
 import { authenticateAccess } from './access-auth.js';
@@ -22,7 +23,7 @@ import {
   shouldNotifyGuardian,
 } from './guardian.js';
 import {
-  handleTelegramWebhook, telegramAssistantStatus,
+  handleTelegramWebhook, processTelegramUpdate, telegramAssistantStatus,
 } from './telegram-assistant.js';
 
 const JSON_HEADERS = Object.freeze({
@@ -862,6 +863,7 @@ async function getAccountTruthTool(env, ownerId) {
   const recon = accountReconciliation(baseline, snapshot);
   const positions = snapshot.positions.map((position) => ({
     symbol: position.symbol,
+    underlying: position.underlying,
     qty: position.quantity,
     mark: Number.isFinite(position.marketValue) && Number.isFinite(position.quantity)
       && position.quantity !== 0
@@ -869,6 +871,19 @@ async function getAccountTruthTool(env, ownerId) {
       : null,
     mv: position.marketValue,
     asset_class: position.type,
+    right: position.right,
+    strike: position.strike,
+    expiration: position.expiration,
+    multiplier: position.multiplier,
+    average_price: position.averagePrice,
+    unrealized_pnl: Number.isFinite(position.averagePrice)
+      && Number.isFinite(position.quantity) && Number.isFinite(position.marketValue)
+      ? position.quantity < 0
+        ? position.averagePrice * Math.abs(position.quantity) * (position.multiplier || 1)
+          + position.marketValue
+        : position.marketValue
+          - position.averagePrice * position.quantity * (position.multiplier || 1)
+      : null,
   }));
   const openOrders = snapshot.openOrders.map((order) => ({
     id: order.brokerOrderId ?? order.clientOrderId,
@@ -939,6 +954,58 @@ async function getAccountTruthTool(env, ownerId) {
     });
   }
   return toolEnvelope(env, payload);
+}
+
+async function getCoveredCallLifecycleTool(env, ownerId, truth) {
+  if (!truth?.ok || truth?.schwab !== 'CONNECTED' || truth?.recon?.baseline !== 'CAPTURED') {
+    return toolEnvelope(env, { covered_calls: [] }, {
+      code: 'LIFECYCLE_ACCOUNT_TRUTH_UNAVAILABLE',
+      message: 'Current reconciled Schwab custody is required for lifecycle analysis.',
+    });
+  }
+  const shortCalls = (truth.positions ?? []).filter((position) =>
+    position.asset_class === 'OPTION' && position.right === 'call' && Number(position.qty) < 0);
+  if (!shortCalls.length) {
+    return toolEnvelope(env, {
+      covered_calls: [], empty_reason: 'NO_OPEN_SHORT_CALLS', asof: truth.asof,
+    });
+  }
+  const provider = marketProvider(env, ownerId);
+  const coveredCalls = await Promise.all(shortCalls.map(async (position) => {
+    const shares = (truth.positions ?? []).find((candidate) =>
+      candidate.asset_class === 'EQUITY' && candidate.symbol === position.underlying);
+    const [option, underlying, history] = await Promise.all([
+      provider.optionQuote(position.symbol),
+      provider.markQuote(position.underlying),
+      provider.history(position.underlying, { lookback: 400, minBars: 20 }),
+    ]);
+    const error = option.error ?? underlying.error ?? history.error;
+    if (error) return { ok: false, symbol: position.symbol, error };
+    return analyzeCoveredCallLifecycle({
+      optionPosition: position,
+      sharePosition: shares,
+      optionQuote: {
+        ...option.value,
+        asof: new Date(option.asOf).toISOString(),
+        source: option.source,
+      },
+      underlyingQuote: underlying.value,
+      historyBars: history.value,
+      now: Date.now(),
+      samples: 12_000,
+      seed: `telegram-lifecycle:${position.symbol}:${option.asOf}`,
+    });
+  }));
+  const usable = coveredCalls.filter((row) => row.ok);
+  return toolEnvelope(env, {
+    covered_calls: coveredCalls,
+    analysis_status: usable.length === coveredCalls.length ? 'COMPLETE' : 'PARTIAL',
+    method: 'LIVE_SCHWAB_IV_PLUS_ZERO_DRIFT_REALIZED_VOL_ENSEMBLE',
+    asof: usable.map((row) => row.quote?.asof).filter(Boolean).sort().at(0) ?? truth.asof,
+  }, usable.length ? null : {
+    code: 'LIFECYCLE_ANALYSIS_UNAVAILABLE',
+    message: coveredCalls.map((row) => row.error).filter(Boolean).join(', ') || 'No covered call could be analyzed.',
+  });
 }
 
 function normalizeSession(status) {
@@ -1252,6 +1319,7 @@ async function listEvidenceTool(env, ownerId, limit) {
 export function createMcpService(env, ownerId) {
   return Object.freeze({
     getAccountTruth: () => getAccountTruthTool(env, ownerId),
+    getLifecycleAnalytics: (truth) => getCoveredCallLifecycleTool(env, ownerId, truth),
     getMarketState: () => getMarketStateTool(env, ownerId),
     runShadowCycle: () => triggerShadowCycle(env, ownerId, { source: 'MCP' }),
     getCycle: (cycleId) => getCycleTool(env, ownerId, cycleId),
@@ -1899,5 +1967,23 @@ export default {
         }
       }
     })());
+  },
+  async queue(batch, env) {
+    for (const message of batch.messages) {
+      const ownerId = String(message.body?.ownerId ?? '');
+      const update = message.body?.update;
+      if (!ownerId || ownerId !== String(env.ACCESS_OWNER_ID ?? '') || !update) {
+        message.ack();
+        continue;
+      }
+      await processTelegramUpdate({
+        env,
+        ownerId,
+        service: createMcpService(env, ownerId),
+        reviewGuardian: (options) => runGuardianReview(env, ownerId, options),
+        update,
+      });
+      message.ack();
+    }
   },
 };

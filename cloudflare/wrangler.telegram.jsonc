@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nuvo-vsim-telegram-gateway",
+  "main": "telegram-gateway.js",
+  "compatibility_date": "2026-08-26",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "invocation_logs": true }
+  },
+  "services": [
+    { "binding": "VSIM", "service": "nuvo-vsim-v5-shadow" }
+  ]
+}

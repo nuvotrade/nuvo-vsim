@@ -39,6 +39,21 @@
     { "binding": "EVIDENCE", "bucket_name": "nuvo-vsim-v5-evidence-shadow" }
   ],
   "ai": { "binding": "AI" },
+  "queues": {
+    "producers": [
+      { "binding": "TELEGRAM_JOBS", "queue": "nuvo-vsim-telegram-jobs" }
+    ],
+    "consumers": [
+      {
+        "queue": "nuvo-vsim-telegram-jobs",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "nuvo-vsim-telegram-dead-letter",
+        "max_concurrency": 1
+      }
+    ]
+  },
   "services": [
     { "binding": "MARKET", "service": "master", "environment": "production" }
   ],
