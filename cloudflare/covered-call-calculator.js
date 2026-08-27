@@ -7,6 +7,16 @@ import { DEFAULT_COSTS } from '../src/underwriter/costs.js';
 
 export const COVERED_CALL_DTE_TARGETS = Object.freeze([7, 14, 21]);
 
+export function configuredCoveredCallDteTargets(value) {
+  if (value === null || value === undefined || value === '') return [...COVERED_CALL_DTE_TARGETS];
+  const tokens = Array.isArray(value) ? value : String(value).split(',');
+  const parsed = tokens.map((token) => Number(String(token).trim()));
+  if (!parsed.length || parsed.some((dte) => !Number.isInteger(dte) || dte <= 0 || dte > 365)) {
+    return null;
+  }
+  return [...new Set(parsed)].sort((a, b) => a - b);
+}
+
 const finite = (value) => value !== null && value !== undefined && value !== ''
   && Number.isFinite(Number(value)) ? Number(value) : null;
 const clampProbability = (value) => Number.isFinite(value)
@@ -44,10 +54,9 @@ export function calculateCoveredCallCandidates({
   const basis = finite(averagePrice);
   const capacity = finite(availableContracts);
   const underlying = finite(spot);
-  const targetDtes = [...new Set((targets ?? []).map(Number).filter((value) => value > 0))]
-    .sort((a, b) => a - b);
+  const targetDtes = configuredCoveredCallDteTargets(targets);
   if (!ticker || !(ownedShares >= 100) || !(basis > 0) || !(capacity >= 1)
-    || !(underlying > 0) || targetDtes.length !== 3 || !Array.isArray(contracts)
+    || !(underlying > 0) || !targetDtes?.length || !Array.isArray(contracts)
     || !Array.isArray(historyBars)) {
     return { ok: false, outcome: 'NO_ELIGIBLE_COVERED_CALL', reason_code: 'CALCULATOR_INPUT_INCOMPLETE' };
   }
@@ -72,8 +81,8 @@ export function calculateCoveredCallCandidates({
 
   const contractCount = Math.min(Math.floor(ownedShares / 100), Math.floor(capacity));
   const minimumStrikeExclusive = Math.max(basis, underlying);
-  const entryFees = contractCount * (finite(costs?.commissionPerContract) ?? 0
-    + (finite(costs?.exchangeFeePerContract) ?? 0));
+  const entryFees = Math.round(contractCount * ((finite(costs?.commissionPerContract) ?? 0)
+    + (finite(costs?.exchangeFeePerContract) ?? 0)) * 100) / 100;
   const economicCapital = underlying * 100 * contractCount;
   const rejected = {
     at_or_below_cost_basis: 0, at_or_below_market: 0, incomplete_quote: 0,
@@ -196,6 +205,7 @@ export function calculateCoveredCallCandidates({
       executable_credit_per_share: bid,
       gross_premium: grossPremium,
       entry_fees: entryFees,
+      cost_model_version: costs?.version ?? 'UNVERSIONED_EXECUTION_COST',
       net_premium: netPremium,
       economic_capital: economicCapital,
       premium_roc: premiumRoc,
@@ -285,6 +295,7 @@ export function calculateCoveredCallCandidates({
       garch: true, drift: 0, models: 'LOGNORMAL_JUMP_DIFFUSION_STUDENT_T_BLOCK_BOOTSTRAP',
     },
     method: {
+      cost_model_version: costs?.version ?? 'UNVERSIONED_EXECUTION_COST',
       credit: 'SCHWAB_EXECUTABLE_BID',
       assignment_probability: 'MARKET_IMPLIED_FROM_SCHWAB_IV',
       independent_forecast: 'ZERO_DRIFT_REALIZED_VOLATILITY_ENSEMBLE_WITH_GARCH_AND_BOOTSTRAP',

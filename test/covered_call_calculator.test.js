@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  calculateCoveredCallCandidates, COVERED_CALL_DTE_TARGETS,
+  calculateCoveredCallCandidates, configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS,
 } from '../cloudflare/covered-call-calculator.js';
 
 function call({ dte, strike, bid, ask = bid + 0.1, delta = 0.25, oi = 500 } = {}) {
@@ -41,12 +41,33 @@ test('covered-call calculator evaluates the 7, 14, and 21 DTE targets and ranks 
   assert.equal(result.selected.rank, 1);
   assert.equal(result.selected.contracts, 3);
   assert.equal(result.selected.covered_shares, 300);
-  assert.ok(result.selected.net_premium < result.selected.gross_premium);
+  assert.equal(result.selected.entry_fees, 2.40,
+    '3 contracts must charge ($0.65 commission + $0.15 exchange fee) exactly once at entry');
+  assert.ok(Math.abs((result.selected.gross_premium - result.selected.net_premium) - 2.40) < 1e-9);
+  assert.equal(result.selected.cost_model_version, 'execution-cost-v2');
   assert.ok(result.selected.incremental_nev_vs_holding > 0);
   assert.ok(result.selected.incremental_nev_per_day > 0);
   assert.equal(result.objective, 'MAX_INCREMENTAL_NEV_PER_DAY_VS_HOLDING_SHARES');
   assert.equal(result.forecast.status, 'VERIFIED_NO_FALLBACK');
   assert.equal(result.method.credit, 'SCHWAB_EXECUTABLE_BID');
+});
+
+test('covered-call tenor targets are configurable while 7/14/21 remains the unratified default', () => {
+  assert.deepEqual(configuredCoveredCallDteTargets(undefined), [7, 14, 21]);
+  assert.deepEqual(configuredCoveredCallDteTargets('45,14,30,14'), [14, 30, 45]);
+  assert.equal(configuredCoveredCallDteTargets('14,not-a-dte,45'), null);
+
+  const result = calculateCoveredCallCandidates({
+    symbol: 'ABC', shares: 100, averagePrice: 90, availableContracts: 1, spot: 100,
+    historyBars: history(), samples: 1_500, targets: [14, 30, 45],
+    contracts: [
+      call({ dte: 14, strike: 110, bid: 1.2 }),
+      call({ dte: 30, strike: 115, bid: 2.0 }),
+      call({ dte: 45, strike: 120, bid: 2.8 }),
+    ],
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.targets.map((row) => row.target_dte), [14, 30, 45]);
 });
 
 test('strike at or below average share price is never admitted', () => {

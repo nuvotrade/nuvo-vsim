@@ -109,7 +109,7 @@ export async function runCycle(ctx) {
     reconcileAccount = null, reconcileOpenOrders = null,
     symbols, approved,
     nav, drawdownPct = 0, strategyId = 'VSIM-001',
-    modelVersion = 'nuvo-model-5.0.0', codeVersion = 'nuvo-5.0.0',
+    modelVersion = 'nuvo-model-5.0.1-execution-cost-v2', codeVersion = 'nuvo-5.0.0',
     dteTargets = [14, 30, 45], baseRiskPct = 0.02, maxGovernanceAttempts = 25,
     screenSamples = 3000, decisionSamples = 20_000, refineTop = 12,
     modelDrift = 0,

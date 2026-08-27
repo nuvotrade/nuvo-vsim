@@ -268,6 +268,15 @@ function summariseCandidate(c) {
     liquidityRisk: c.evaluation?.liquidityRisk?.value,
     collateralOpportunityCost: c.evaluation?.collateralOpportunity?.value ?? 0,
     collateralHurdleRate: c.evaluation?.collateralOpportunity?.annualRate ?? null,
+    costModelVersion: c.evaluation?.costs?.modelVersion ?? null,
+    executionCosts: c.evaluation?.costs ? {
+      commissions: c.evaluation.costs.commissions,
+      embeddedEntrySlippage: c.evaluation.costs.embeddedEntrySlippage,
+      exitSlippage: c.evaluation.costs.exitSlippage,
+      allInSlippage: c.evaluation.costs.allInSlippage,
+      chargedAfterExecutableEntry: c.evaluation.costs.total,
+      allInTotal: c.evaluation.costs.allInTotal,
+    } : null,
     nevBeforeCollateral: c.evaluation?.nevBeforeCollateral ?? c.evaluation?.nev,
     nevPerDay: Number.isFinite(c.evaluation?.nev) && Number.isFinite(c.dte) && c.dte > 0
       ? c.evaluation.nev / c.dte : null,

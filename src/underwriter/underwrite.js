@@ -152,12 +152,12 @@ export function underwrite({
 
   // ── The edge must dominate its own cost estimate ──
   const cRatio = costRatio(structure, costs);
-  if (!cspObjective && evaluation.costs.total > 0 && evaluation.ev > 0) {
-    const multiple = evaluation.ev / evaluation.costs.total;
+  if (!cspObjective && evaluation.costs.allInTotal > 0 && evaluation.ev > 0) {
+    const multiple = evaluation.ev / evaluation.costs.allInTotal;
     if (multiple < limits.minEdgeOverCosts) {
       violations.push(violation(TIER.EXPECTANCY, 'EDGE_THIN_VS_COSTS',
         `Edge is only ${multiple.toFixed(1)}x modelled costs; ${limits.minEdgeOverCosts}x required.`,
-        { multiple, costs: evaluation.costs.total }));
+        { multiple, costs: evaluation.costs.allInTotal }));
     }
   }
 

@@ -51,8 +51,10 @@ export function realisticFill(contract, side, aggression = 0.35) {
 /** Cash-secured put. Undefined risk below the strike, full capital lockup. */
 export function cashSecuredPut({ underlying, put, contracts = 1, aggression = 0.35 }) {
   const credit = realisticFill(put, 'sell', aggression);
+  const marketMid = mid(put);
   const mult = put.multiplier ?? 100;
   if (!isNum(credit)) return null;
+  const entrySlippage = (marketMid - credit) * mult * contracts;
   // Cash-secured means the complete assignment purchase price is reserved.
   // Entry credit is income received, not permission to under-collateralise.
   const bp = put.strike * mult * contracts;
@@ -72,6 +74,7 @@ export function cashSecuredPut({ underlying, put, contracts = 1, aggression = 0.
     shortStrike: put.strike,
     dte: put.dte,
     expiration: put.expiration,
+    entrySlippage,
     payoff: (S) => (Math.min(0, S - put.strike) + credit) * mult * contracts,
     breakeven: put.strike - credit,
   };
@@ -84,6 +87,7 @@ export function bullPutSpread({ underlying, shortPut, longPut, contracts = 1, ag
   if (!isNum(sc) || !isNum(lc)) return null;
   const mult = shortPut.multiplier ?? 100;
   const net = sc - lc;
+  const entrySlippage = ((mid(shortPut) - sc) + (lc - mid(longPut))) * mult * contracts;
   const width = shortPut.strike - longPut.strike;
   if (width <= 0 || net <= 0) return null;
   return {
@@ -105,6 +109,7 @@ export function bullPutSpread({ underlying, shortPut, longPut, contracts = 1, ag
     width,
     dte: shortPut.dte,
     expiration: shortPut.expiration,
+    entrySlippage,
     payoff: (S) => {
       const shortLeg = Math.min(0, S - shortPut.strike);
       const longLeg = Math.max(0, longPut.strike - S);
@@ -143,6 +148,7 @@ export function coveredCall({ underlying, call, shares = 100, costBasis, aggress
   const contracts = Math.floor(shares / 100);
   if (contracts < 1) return null;
   const mult = call.multiplier ?? 100;
+  const entrySlippage = (mid(call) - credit) * mult * contracts;
   return {
     kind: STRUCTURE.COVERED_CALL,
     underlying,
@@ -158,6 +164,7 @@ export function coveredCall({ underlying, call, shares = 100, costBasis, aggress
     shortStrike: call.strike,
     dte: call.dte,
     expiration: call.expiration,
+    entrySlippage,
     // P&L measured against cost basis, including the capped upside.
     payoff: (S) => (Math.min(S, call.strike) - costBasis + credit) * shares,
     breakeven: costBasis - credit,

@@ -192,7 +192,7 @@ export function buildBlockedCycleContext({ summary, detail = {}, codeVersion, co
     cycle_id: summary.cycleId,
     authority_level: authorityLevel,
     engine_version: codeVersion,
-    model_version: 'nuvo-model-5.0.0',
+    model_version: 'nuvo-model-5.0.1-execution-cost-v2',
     constitution_version: constitutionVersion,
     account_snapshot_hash: detail.accountSnapshotHash ?? null,
     nav: detail.nav ?? null,

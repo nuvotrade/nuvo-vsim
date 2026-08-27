@@ -373,8 +373,12 @@ describe('evidence is complete and tamper-evident (§19)', () => {
   });
 
   test('the package records rejected candidates, not just the winner', async () => {
-    const { eng } = build({ ivMult: 1.30 });
+    // Keep both sides of the field populated. Under execution-cost-v2 an
+    // ivMult of 1.30 makes every refined fixture candidate admissible, which
+    // cannot exercise rejected-row persistence.
+    const { eng } = build({ ivMult: 1.20 });
     const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.ok(r.selected, 'the fixture must retain a winner as well as rejected rows');
     assert.ok(r.evidence.candidates.length > 10, 'the whole field must be recorded');
     assert.ok(r.evidence.rejectedCount > 0);
     const rejected = r.evidence.candidates.find((c) => !c.admissible);
@@ -389,6 +393,9 @@ describe('evidence is complete and tamper-evident (§19)', () => {
     assert.ok(e.market.regimeComponents.length > 0, 'the regime call must show its inputs');
     assert.ok(e.universe.tierA.length > 0);
     assert.ok(e.modelVersion && e.codeVersion && e.limitsVersion);
+    assert.equal(e.modelVersion, 'nuvo-model-5.0.1-execution-cost-v2');
+    assert.equal(e.selected.costModelVersion, 'execution-cost-v2');
+    assert.ok(e.selected.executionCosts.allInTotal >= e.selected.executionCosts.chargedAfterExecutableEntry);
     assert.ok(e.truth.factsAsOf, 'every fact must carry its observation time');
     assert.ok(e.distributions.length > 0);
     assert.ok(e.distributions.every((distribution) => distribution.modelDrift === 0),

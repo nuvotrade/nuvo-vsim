@@ -74,11 +74,25 @@ describe('structures', () => {
 });
 
 describe('costs are charged before an edge is believed', () => {
-  test('round trip is the default', () => {
-    const s = bullPutSpread({ underlying: 'X', shortPut: mkPut(95, 0.32), longPut: mkPut(90, 0.35) });
+  test('CSP all-in cost charges embedded entry slippage exactly once', () => {
+    const put = {
+      ...mkPut(95, 0.32), bid: 1.00, ask: 1.20, multiplier: 100,
+    };
+    const s = cashSecuredPut({ underlying: 'X', put, aggression: 0.35 });
     const c = structureCost(s, DEFAULT_COSTS);
+    // Half-spread is $0.10. At 35% aggression one side costs
+    // $0.10 × 0.35 × 100 = $3.50. Entry is embedded in the executable
+    // credit; only the $3.50 exit slippage is charged again. Round-trip
+    // commissions are 2 × ($0.65 + $0.15) = $1.60.
+    assert.ok(Math.abs(c.embeddedEntrySlippage - 3.50) < 1e-9);
+    assert.ok(Math.abs(c.exitSlippage - 3.50) < 1e-9);
+    assert.ok(Math.abs(c.commissions - 1.60) < 1e-9);
+    assert.ok(Math.abs(c.total - 5.10) < 1e-9,
+      'only exit slippage and round-trip fees are subtracted after executable entry');
+    assert.ok(Math.abs(c.allInTotal - 8.60) < 1e-9,
+      'all-in cost includes one entry side, one exit side, and round-trip fees');
     assert.equal(c.trips, 2, 'positions are managed, not merely expired');
-    assert.ok(c.slippage > 0 && c.commissions > 0);
+    assert.equal(c.modelVersion, 'execution-cost-v2');
   });
 
   test('a two-leg structure costs more than a one-leg one', () => {

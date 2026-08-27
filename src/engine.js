@@ -29,7 +29,7 @@ export class NuvoEngine {
     provider, broker, nav, limits = DEFAULT_LIMITS,
     authorityLevel = AUTHORITY.SHADOW, symbols = [], approved = [],
     clock = () => Date.now(), codeVersion = 'nuvo-5.0.0',
-    modelVersion = 'nuvo-model-5.0.0',
+    modelVersion = 'nuvo-model-5.0.1-execution-cost-v2',
     evidenceStore = null, calibrationStore = null, accountMirror = null,
   }) {
     if (!provider) throw new Error('NuvoEngine requires a data provider.');

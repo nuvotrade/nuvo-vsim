@@ -255,6 +255,7 @@ function diff(a, b) {
   check('selected.shortStrike', a.selected?.shortStrike, b.selected?.shortStrike);
   check('selected.longStrike', a.selected?.longStrike, b.selected?.longStrike);
   check('selected.nev', a.selected?.nev, b.selected?.nev);
+  check('selected.costModelVersion', a.selected?.costModelVersion, b.selected?.costModelVersion);
   check('selected.raroc', a.selected?.raroc, b.selected?.raroc);
   check('sizing.contracts', a.sizing?.contracts, b.sizing?.contracts);
   check('order.limitPrice', a.order?.limitPrice, b.order?.limitPrice);

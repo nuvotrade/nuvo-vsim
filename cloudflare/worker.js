@@ -28,7 +28,7 @@ import {
 import { freezeTradeProposal, reviewTradeTicket } from './proposal-approval.js';
 import { performanceFromBrokerRows, portfolioFromCustody, realizedPnlCalendar } from './portfolio-report.js';
 import {
-  calculateCoveredCallCandidates, COVERED_CALL_DTE_TARGETS,
+  calculateCoveredCallCandidates, configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS,
 } from './covered-call-calculator.js';
 import {
   BUNDLED_DESIGN_APP, BUNDLED_DESIGN_HTML, BUNDLED_DESIGN_STYLES,
@@ -599,7 +599,7 @@ async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
     decision: 'REFUSED',
     candidates: [],
     strategyId: 'VSIM-001',
-    modelVersion: 'nuvo-model-5.0.0',
+    modelVersion: 'nuvo-model-5.0.1-execution-cost-v2',
     codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
     limits: DEFAULT_LIMITS,
     authorityLevel: operationalAuthority(env),
@@ -799,7 +799,7 @@ export async function runShadowCycle(env, ownerId, {
       symbols, approved: symbols, evidenceStore,
       accountMirror: { cash: baseline.account.cash, buyingPower: baseline.account.buyingPower },
       codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
-      modelVersion: 'nuvo-model-5.0.0',
+      modelVersion: 'nuvo-model-5.0.1-execution-cost-v2',
     });
     engine.positions = custodyRisk.positions.map((position) => structuredClone(position));
     for (const position of baseline.positions) engine.legPositions.set(position.symbol, structuredClone(position));
@@ -966,19 +966,29 @@ function blockedCoveredCall(symbol, reasonCode, reason, detail = {}) {
 
 async function coveredCallDashboard(env, ownerId, rawSymbol) {
   const symbol = String(rawSymbol ?? '').trim().toUpperCase();
+  const targetDtes = configuredCoveredCallDteTargets(env.NUVO_CC_DTE_TARGETS);
+  if (!targetDtes) return blockedCoveredCall(symbol || null,
+    'CONFIG/COVERED_CALL_DTE_TARGETS_INVALID',
+    'The configured covered-call tenor targets are invalid. No strike was selected.', {
+      target_dtes: [],
+      diagnostics: { configured_value_present: env.NUVO_CC_DTE_TARGETS !== undefined },
+    });
+  const blocked = (blockedSymbol, reasonCode, reason, detail = {}) => blockedCoveredCall(
+    blockedSymbol, reasonCode, reason, { ...detail, target_dtes: targetDtes },
+  );
   if (!/^[A-Z][A-Z0-9.]{0,9}$/u.test(symbol)) {
-    return blockedCoveredCall(symbol || null, 'SYMBOL_INVALID', 'Choose a ticker from the ownership book.');
+    return blocked(symbol || null, 'SYMBOL_INVALID', 'Choose a ticker from the ownership book.');
   }
   const [snapshot, baseline, controls] = await Promise.all([
     reconciledSnapshot(env, ownerId), loadBaseline(env, ownerId), loadOperatorControls(env, ownerId),
   ]);
-  if (controls.independentKill) return blockedCoveredCall(symbol,
+  if (controls.independentKill) return blocked(symbol,
     'CONSTITUTION/INDEPENDENT_KILL_SWITCH',
     'The independent safety switch is active. No new covered call may be evaluated.');
-  if (controls.globalPause) return blockedCoveredCall(symbol, 'CONSTITUTION/GLOBAL_PAUSE',
+  if (controls.globalPause) return blocked(symbol, 'CONSTITUTION/GLOBAL_PAUSE',
     'New-trade evaluation is paused.');
   const reconciliation = accountReconciliation(baseline, snapshot);
-  if (reconciliation.status !== 'CAPTURED') return blockedCoveredCall(symbol,
+  if (reconciliation.status !== 'CAPTURED') return blocked(symbol,
     `RECON/${reconciliation.status}`, 'Current Schwab custody does not match the captured reconciliation checkpoint.',
     { diagnostics: { reconciliation } });
   const encumberingOrders = (snapshot.openOrders ?? []).filter((order) => {
@@ -986,48 +996,48 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
       .toUpperCase().replaceAll(' ', '');
     return !orderSymbol || orderSymbol === symbol || orderSymbol.startsWith(symbol);
   });
-  if (encumberingOrders.length) return blockedCoveredCall(symbol,
+  if (encumberingOrders.length) return blocked(symbol,
     'CUSTODY/OPEN_ORDERS_PRESENT',
     'Working broker orders may already encumber shares. VSIM will not allocate the same shares twice.',
     { diagnostics: { encumbering_order_count: encumberingOrders.length } });
 
   const equity = (snapshot.positions ?? []).find((position) => position.type === 'EQUITY'
     && String(position.symbol).toUpperCase() === symbol && Number(position.quantity) > 0);
-  if (!equity) return blockedCoveredCall(symbol, 'CUSTODY/SHARES_NOT_OWNED',
+  if (!equity) return blocked(symbol, 'CUSTODY/SHARES_NOT_OWNED',
     'No owned shares for this ticker were found in current Schwab custody.');
   const shortCallContracts = (snapshot.positions ?? []).filter((position) => position.type === 'OPTION'
     && String(position.right).toLowerCase() === 'call'
     && String(position.underlying).toUpperCase() === symbol && Number(position.quantity) < 0)
     .reduce((sum, position) => sum + Math.abs(Number(position.quantity)), 0);
   const availableContracts = Math.max(0, Math.floor(Number(equity.quantity) / 100) - shortCallContracts);
-  if (availableContracts < 1) return blockedCoveredCall(symbol, 'CUSTODY/NO_UNENCUMBERED_WHOLE_LOT',
+  if (availableContracts < 1) return blocked(symbol, 'CUSTODY/NO_UNENCUMBERED_WHOLE_LOT',
     'Every whole 100-share lot is already covered or fewer than 100 shares are available.', {
       shares: Number(equity.quantity), existing_short_calls: shortCallContracts,
     });
-  if (!(Number(equity.averagePrice) > 0)) return blockedCoveredCall(symbol,
+  if (!(Number(equity.averagePrice) > 0)) return blocked(symbol,
     'CUSTODY/AVERAGE_SHARE_PRICE_UNAVAILABLE',
     'Average share price is required because a covered-call strike may never be at or below cost basis.');
 
   const provider = marketProvider(env, ownerId);
   const session = await provider.marketState();
-  if (session.error) return blockedCoveredCall(symbol, 'TRUTH/MARKET_SESSION_UNVERIFIED',
+  if (session.error) return blocked(symbol, 'TRUTH/MARKET_SESSION_UNVERIFIED',
     'The live options session could not be verified. VSIM will retry automatically when market truth is valid.',
     { diagnostics: { market_error: session.error } });
-  if (String(session.value?.status).toUpperCase() !== 'OPEN') return blockedCoveredCall(symbol,
+  if (String(session.value?.status).toUpperCase() !== 'OPEN') return blocked(symbol,
     'TRUTH/SESSION_NOT_RTH',
     `The options market is ${String(session.value?.status ?? 'closed').toLowerCase()}. Recalculation becomes available automatically during regular trading hours.`);
   const [chain, events, history] = await Promise.all([
-    provider.optionChain(symbol, { expirations: COVERED_CALL_DTE_TARGETS }),
+    provider.optionChain(symbol, { expirations: targetDtes }),
     provider.events(symbol),
     provider.history(symbol, { lookback: 400, minBars: 121 }),
   ]);
-  if (chain.error) return blockedCoveredCall(symbol, 'TRUTH/EXECUTABLE_CHAIN_UNAVAILABLE',
-    'Fresh, complete executable quotes for the 7-, 14-, and 21-DTE targets are unavailable. No strike was selected.',
+  if (chain.error) return blocked(symbol, 'TRUTH/EXECUTABLE_CHAIN_UNAVAILABLE',
+    `Fresh, complete executable quotes for the ${targetDtes.join(', ')}-DTE targets are unavailable. No strike was selected.`,
     { diagnostics: { chain_error: chain.error } });
-  if (events.error) return blockedCoveredCall(symbol, 'TRUTH/EVENT_CLEARANCE_UNAVAILABLE',
+  if (events.error) return blocked(symbol, 'TRUTH/EVENT_CLEARANCE_UNAVAILABLE',
     'The earnings and corporate-action calendar could not be verified. No strike was selected.',
     { diagnostics: { event_error: events.error } });
-  if (history.error) return blockedCoveredCall(symbol, 'TRUTH/FORECAST_HISTORY_UNAVAILABLE',
+  if (history.error) return blocked(symbol, 'TRUTH/FORECAST_HISTORY_UNAVAILABLE',
     'At least 121 verified daily bars are required for independent covered-call valuation. No fallback volatility was used.',
     { diagnostics: { history_error: history.error } });
 
@@ -1042,6 +1052,7 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     events: events.value,
     now: Date.now(),
     seed: `covered-call-entry:${symbol}:${chain.asOf}`,
+    targets: targetDtes,
   });
   return {
     ...calculation,
@@ -1050,7 +1061,9 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
       : calculation.reason_code === 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES'
         ? 'Every eligible call surrendered at least as much modeled upside as its executable premium paid. Holding the shares uncovered is preferred.'
         : 'No liquid call strictly above both average share price and the current market passed every gate.',
-    target_dtes: COVERED_CALL_DTE_TARGETS,
+    target_dtes: targetDtes,
+    target_dtes_source: env.NUVO_CC_DTE_TARGETS === undefined
+      ? 'CODE_DEFAULT_7_14_21_UNRATIFIED' : 'WORKER_VAR_UNRATIFIED',
     execution: 'READ_ONLY_CALCULATION_NO_ORDER_ROUTE',
     mutation_eligible: false,
     user_action_required: calculation.ok,
@@ -2413,8 +2426,10 @@ export function liveDashboardScript() {
         + ' (' + moneyExact(selected.incremental_nev_per_day) + ' per day). User action is required outside VSIM; this screen cannot place the trade.');
     }
     const tenors = q('[data-vsim="cc-tenors"]'); clear(tenors);
+    const configuredTargets = result && (result.target_dtes || []).length
+      ? result.target_dtes : ${JSON.stringify(COVERED_CALL_DTE_TARGETS)};
     const tenorRows = result && (result.targets || []).length ? result.targets
-      : [7, 14, 21].map(target => ({ target_dte: target, status: 'NOT_EVALUATED' }));
+      : configuredTargets.map(target => ({ target_dte: target, status: 'NOT_EVALUATED' }));
     tenorRows.forEach(tenor => {
       const card = make('div', undefined, 'cc-tenor');
       card.append(make('strong', number(tenor.target_dte) + ' DTE target'));
@@ -2426,7 +2441,7 @@ export function liveDashboardScript() {
       tenors.append(card);
     });
     const candidateRows = [];
-    [7, 14, 21].forEach(target => candidateRows.push(...((result && result.candidates) || [])
+    configuredTargets.forEach(target => candidateRows.push(...((result && result.candidates) || [])
       .filter(row => Number(row.target_dte) === target).slice(0, 4)));
     const candidatePanel = q('[data-vsim="cc-candidate-panel"]');
     if (candidatePanel) candidatePanel.hidden = candidateRows.length === 0;

@@ -139,7 +139,7 @@ export function buildOrder({
         credit: candidate.structure.credit * sizing.contracts / Math.max(1, candidate.structure.contracts),
         nev: candidate.evaluation.nev,
         raroc: candidate.capital.raroc,
-        modelledSlippage: candidate.evaluation.costs.slippage,
+        modelledSlippage: candidate.evaluation.costs.allInSlippage,
       },
     },
   };

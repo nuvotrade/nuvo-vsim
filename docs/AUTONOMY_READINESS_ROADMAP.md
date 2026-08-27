@@ -45,6 +45,14 @@ The cap measures the capital unit being added, not every option contract. A stan
 
 Pending risk-increasing tickets reserve their maximum capital commitment. The reservation transitions to observed exposure on fill and releases on ticket expiry, void, or confirmed cancellation. Sequential proposals on the same underlying during one New York trading session share one logical batch and cannot evade the single-underlying or Authority-2 proposal-capacity limits by splitting the trade over time.
 
+### DTE policy — open
+
+No product DTE window has been approved. The proposed 14-DTE interim floor is
+recorded as rejected for now, not activated. The current covered-call 7/14/21
+targets remain an unratified compatibility default while the fixed-horizon
+renewal model is built. The alternatives, cost-model boundary, and governing
+value inventory are recorded in `docs/COPILOT_DTE_POLICY_OPTIONS.md`.
+
 ## Operating standard
 
 The standard established during the 2026-08-26 V5 investigation is load-bearing:
