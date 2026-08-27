@@ -919,16 +919,27 @@ async function apiStatus(env, ownerId) {
   };
 }
 
-async function portfolioDashboard(env, ownerId) {
+export async function portfolioDashboard(env, ownerId) {
   const custody = await loadLatestCustody(env, ownerId);
-  if (!custody) throw new Error('SCHWAB_CUSTODY_SYNC_REQUIRED');
+  const now = Date.now();
+  if (!custody) return {
+    ...portfolioFromCustody(null, new Map(), { limits: DEFAULT_LIMITS, now }),
+    source: 'SCHWAB_READ_ONLY_CUSTODY',
+    source_state: 'NOT_MEASURED',
+    source_reason: 'SCHWAB_CUSTODY_SYNC_REQUIRED',
+    option_analytics_source: 'NOT_MEASURED',
+    option_analytics_freshness: 'NOT_MEASURED',
+    option_analytics_asof: null,
+    option_positions: null,
+    short_option_positions: null,
+    missing_option_analytics: [],
+  };
   const optionPositions = (custody.positions ?? []).filter((position) => position.type === 'OPTION');
   const analytics = new Map();
   const missingAnalytics = [];
   if (optionPositions.length) {
     const client = new SchwabD1Client(env);
     const maxAgeMs = Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000);
-    const now = Date.now();
     const quotes = await Promise.all(optionPositions.map(async (position) => {
       try {
         const quote = await client.marketOptionQuote(ownerId, position.symbol);
@@ -948,7 +959,7 @@ async function portfolioDashboard(env, ownerId) {
       else missingAnalytics.push({ symbol, error: error || 'SCHWAB_OPTION_QUOTE_UNAVAILABLE' });
     }
   }
-  const report = portfolioFromCustody(custody, analytics, { limits: DEFAULT_LIMITS });
+  const report = portfolioFromCustody(custody, analytics, { limits: DEFAULT_LIMITS, now });
   const analyticsRows = [...analytics.values()];
   const lastMarketQuotes = analyticsRows.filter((row) => row.freshness === 'LAST_MARKET_QUOTE').length;
   const analyticsAsOf = analyticsRows.length && analyticsRows.every((row) => row.asof)
@@ -1800,6 +1811,7 @@ const DASHBOARD_HEADERS = Object.freeze({
 });
 
 export function rewriteDesignHtml(source) {
+  const mandateStatePanel = `<article class="panel mandate-state-panel"><div class="panel-head"><div><p class="kicker">Account scope · active runtime limits</p><h3>Mandate state</h3></div><strong data-vsim="mandate-breach-count" class="mandate-breach-count">NOT MEASURED</strong></div><div class="mandate-state-rows" data-vsim="mandate-state-rows"></div><div class="mandate-review-count" data-vsim="mandate-review-count">POSITIONS UNDER REVIEW · NOT MEASURED</div><p class="mandate-lifecycle-note">C1 unspecified · no action ranked</p><details class="mandate-provenance"><summary>Sources, derivations, and caveats</summary><dl data-vsim="mandate-provenance"></dl></details><p class="panel-note" data-vsim="mandate-state-stamp">Measurement time unavailable · constitution version unavailable</p></article>`;
   const portfolio = `<section class="portfolio-ledger" aria-label="Current Schwab portfolio books">
     <article class="panel expiration-panel"><div class="panel-head"><div><p class="kicker">Open short-option capital by time to expiry</p><h3>Expiration ladder</h3></div><span data-vsim="custody-scope" class="as-of">—</span></div><div class="expiration-ladder" data-vsim="expiration-ladder"></div><div class="panel-note" data-vsim="expiration-note">W1–W4 use current V5 custody and the configured expiration concentration limit.</div></article>
     <article class="panel"><div class="panel-head"><div><p class="kicker">Open-position economics · Schwab custody</p><h3>Portfolio economics</h3></div><span class="readonly-tag">READ ONLY</span></div>
@@ -1844,6 +1856,7 @@ export function rewriteDesignHtml(source) {
     .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th,#calculators table td,#calculators table th{white-space:nowrap}.cc-directive,.cc-back{appearance:none;border:1px solid rgba(61,222,169,.55);border-radius:4px;background:rgba(35,196,143,.1);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:7px 10px;cursor:pointer}.cc-directive:hover,.cc-back:hover{background:rgba(35,196,143,.2)}.cc-unavailable{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.cc-status[data-state="blocked"],.csp-status[data-state="blocked"]{border-color:rgba(242,118,118,.38)}.cc-status[data-state="ready"],.csp-status[data-state="ready"]{border-color:rgba(96,226,168,.38)}.cc-reason,.cc-decision-impact{color:var(--text);line-height:1.55}.cc-rule{margin-top:12px;padding:11px 13px;border-left:2px solid var(--amber);background:rgba(244,186,97,.06);color:var(--amber);font-size:11px}.cc-tenors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.cc-tenor{padding:13px;border:1px solid var(--line);border-radius:5px;background:rgba(7,23,20,.42)}.cc-tenor strong,.cc-tenor span,.cc-tenor small{display:block}.cc-tenor strong{color:var(--green);font-size:16px}.cc-tenor span{margin:5px 0;color:var(--text);font-size:11px}.cc-tenor small{color:var(--muted);font-size:9px}.cc-metrics{margin-top:8px}.cc-decision-impact{margin:14px 0 0;color:var(--green)}.calculator-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.calculator-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.calculator-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.calculator-pane{display:grid;gap:12px}.calculator-pane[hidden]{display:none}.calculator-selector{margin-bottom:0}.calculator-symbols{display:flex;flex-wrap:wrap;gap:8px}.calculator-symbol{display:grid;grid-template-columns:auto auto;gap:3px 14px;align-items:center;text-align:left}.calculator-symbol b{color:var(--text)}.calculator-symbol small{grid-column:1/-1;color:var(--muted);font-size:8px}.calculator-symbol[data-actionable="false"]{border-color:var(--line);color:var(--amber);background:rgba(244,186,97,.05)}.csp-run{margin-top:12px}.csp-recommendation{border-color:rgba(96,226,168,.38)}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}.cc-tenors{grid-template-columns:1fr}.calculator-tabs{overflow:auto}.calculator-symbol{width:100%}}
     .underwrite-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.underwrite-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.underwrite-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.underwrite-pane[hidden]{display:none}.underwrite-pane>.page-heading{display:none}.history-link{appearance:none;background:transparent;border:0;color:var(--green);cursor:pointer}.mandate-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}.attribution-row{width:100%;appearance:none;border:0;padding:4px;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:4px}.attribution-row:hover,.attribution-row.active{background:rgba(35,196,143,.1);outline:1px solid rgba(61,222,169,.25)}.performance-chart{touch-action:none;cursor:crosshair}.performance-chart .range-selection{fill:rgba(96,226,168,.14);stroke:#60e2a8;stroke-width:1}.performance-ledger{margin-top:16px}.ledger-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:12px;color:var(--muted);font-size:10px}.ledger-filters>span{margin-right:auto;color:var(--text)}.ledger-filters label{display:flex;align-items:center;gap:6px}.ledger-filters input{color:var(--text);background:#071712;border:1px solid var(--line);border-radius:4px;padding:6px;font:10px var(--mono);color-scheme:dark}.broker-activity{margin-top:16px}.broker-activity summary{cursor:pointer;color:var(--text);font-weight:700}.performance-ledger td,.performance-ledger th,.broker-activity td,.broker-activity th{white-space:nowrap}.system-history{scroll-margin-top:20px}@media(max-width:680px){.mandate-metrics{grid-template-columns:1fr 1fr}.ledger-filters>span{width:100%;margin-right:0}}
     .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}}
+    .mandate-state-panel{min-width:0}.mandate-breach-count{color:var(--red);font:700 11px/1.2 var(--mono);letter-spacing:.08em}.mandate-state-rows{display:grid;gap:0;border-top:1px solid var(--line)}.mandate-state-row{display:grid;grid-template-columns:14px minmax(96px,.7fr) minmax(150px,1.5fr) minmax(82px,.65fr) minmax(140px,1fr);gap:9px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);font-size:9px}.mandate-state-row .indicator{width:7px;height:7px;border-radius:50%;border:1px solid var(--muted);background:transparent}.mandate-state-row .label{color:var(--text);font-weight:750;letter-spacing:.07em}.mandate-state-row .measurement{font-variant-numeric:tabular-nums}.mandate-state-row .limit{color:var(--muted)}.mandate-state-row .state{justify-self:end;text-align:right;font:700 8px/1.3 var(--mono);letter-spacing:.06em}.mandate-state-row .visible-note{grid-column:3/6;color:var(--muted);font-size:8px}.mandate-finding-link{appearance:none;border:0;border-bottom:1px dotted currentColor;padding:0;background:transparent;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer}.mandate-state-row[data-state="BREACH"] .indicator{border-color:var(--red);background:var(--red)}.mandate-state-row[data-state="BREACH"] .state,.mandate-state-row[data-state="BREACH"] .measurement{color:var(--red)}.mandate-state-row[data-state="SUSPECT"] .indicator,.mandate-state-row[data-state="STALE"] .indicator{border-color:var(--amber);background:var(--amber)}.mandate-state-row[data-state="SUSPECT"] .state,.mandate-state-row[data-state="STALE"] .state{color:var(--amber)}.mandate-state-row[data-state="NOT_MEASURED"]{color:var(--muted)}.mandate-state-row[data-state="NOT_MEASURED"] .indicator{border-style:dashed}.mandate-state-row[data-state="WITHIN"] .indicator{border-color:var(--muted)}.mandate-review-count{margin-top:12px;color:var(--text);font:700 9px/1.4 var(--mono);letter-spacing:.06em}.mandate-lifecycle-note{margin:4px 0 0;color:var(--muted);font-size:8px}.mandate-provenance{margin-top:11px;color:var(--muted)}.mandate-provenance summary{cursor:pointer;font-size:8px;letter-spacing:.08em;text-transform:uppercase}.mandate-provenance dl{display:grid;grid-template-columns:minmax(100px,.35fr) 1fr;gap:7px 12px;margin:10px 0 0}.mandate-provenance dt{color:var(--text);font-size:8px}.mandate-provenance dd{margin:0;font-size:8px;line-height:1.4;overflow-wrap:anywhere}.mandate-finding-target:target{color:var(--amber)}@media(max-width:760px){.mandate-state-row{grid-template-columns:12px minmax(88px,.7fr) 1.4fr}.mandate-state-row .limit{grid-column:2}.mandate-state-row .state{grid-column:3;grid-row:1/3}.mandate-state-row .visible-note{grid-column:2/4}.mandate-provenance dl{grid-template-columns:1fr}}
   </style>`;
   const operationalStyles = `<style>
     #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
@@ -1858,6 +1871,7 @@ export function rewriteDesignHtml(source) {
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
+    .replace(/<article class="panel scorecard">[\s\S]*?<\/article>/u, mandateStatePanel)
     .replace('</head>', additions + operationalStyles + calculatorStyles + calendarStyles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
     .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
     .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button>')
@@ -2874,6 +2888,90 @@ export function liveDashboardScript() {
     renderPerformanceLedger(); renderPerformanceCalendar(performanceState.calendar);
   }
 
+  function renderMandateState(portfolio) {
+    const panel = portfolio && portfolio.mandate_state;
+    const rowsRoot = q('[data-vsim="mandate-state-rows"]');
+    const provenanceRoot = q('[data-vsim="mandate-provenance"]');
+    clear(rowsRoot); clear(provenanceRoot);
+    const fallbackRows = ['CONCENTRATION','RESERVE','DEPLOYMENT','EXPIRATION','DATA','EVIDENCE'].map(id => ({
+      id, label: id.replaceAll('_', ' '), state: 'NOT_MEASURED', breached: null,
+      measurement: null, limit: null, classification: null, finding_id: null,
+      source: 'SOURCE NOT WIRED', derivation: 'No canonical measurement contract was returned.',
+      asof: null, caveat: 'This row cannot assert compliance.',
+    }));
+    const rows = panel && Array.isArray(panel.rows) ? panel.rows : fallbackRows;
+    const age = value => {
+      if (!present(value)) return 'unavailable';
+      const seconds = Math.max(0, Math.round(Number(value) / 1000));
+      if (seconds < 60) return seconds + 's';
+      const minutes = Math.round(seconds / 60);
+      return minutes < 60 ? minutes + 'm' : (minutes / 60).toFixed(1) + 'h';
+    };
+    const rowMeasurement = row => {
+      const measurement = row.measurement;
+      if (!measurement) return 'NOT MEASURED';
+      if (measurement.kind === 'PER_UNDERLYING_PCT_NAV') return (measurement.items || [])
+        .map(item => item.symbol + ' ' + percent(item.pct_nav)).join(' · ') || '0.0% · no concentrated underlyings';
+      if (measurement.kind === 'PCT_NAV') return percent(measurement.value);
+      if (measurement.kind === 'PER_EXPIRATION_PCT_NAV') {
+        const primary = measurement.primary || {};
+        return present(primary.pct_nav) && primary.expiration
+          ? percent(primary.pct_nav) + ' on ' + primary.expiration
+          : '0.0% · no open short-option expiration';
+      }
+      if (measurement.kind === 'FRESHNESS_AGE_MS') return 'custody ' + age(measurement.custody_age_ms)
+        + (measurement.quotes_required ? ' · quotes ' + age(measurement.quote_age_ms) : ' · no option quotes required');
+      return 'NOT MEASURED';
+    };
+    const rowLimit = row => {
+      const limit = row.limit;
+      if (!limit) return row.id === 'EVIDENCE' ? 'cadence pending H-06' : 'LIMIT NOT MEASURED';
+      if (limit.kind === 'MAX_PCT_NAV') return 'max ' + percent(limit.value);
+      if (limit.kind === 'MIN_PCT_NAV') return 'floor ' + percent(limit.value);
+      if (limit.kind === 'MAX_AGE_MS') return 'custody ≤' + age(limit.custody)
+        + (present(limit.quotes) ? ' · quotes ≤' + age(limit.quotes) : '');
+      return 'LIMIT NOT MEASURED';
+    };
+    rows.forEach(row => {
+      const state = ['WITHIN','BREACH','NOT_MEASURED','STALE','SUSPECT'].includes(row.state)
+        ? row.state : 'NOT_MEASURED';
+      const root = make('div', undefined, 'mandate-state-row'); root.dataset.state = state;
+      const stateNode = make('span', [state, row.classification].filter(Boolean).join(' · '), 'state');
+      if (row.finding_id) {
+        const finding = make('button', row.finding_id, 'mandate-finding-link');
+        finding.type = 'button'; finding.dataset.mandateFinding = row.finding_id;
+        stateNode.append(document.createTextNode(' · '), finding);
+      }
+      root.append(make('i', undefined, 'indicator'), make('span', row.label || row.id, 'label'),
+        make('span', rowMeasurement(row), 'measurement'), make('span', rowLimit(row), 'limit'),
+        stateNode);
+      if (row.visible_note) root.append(make('small', row.visible_note, 'visible-note'));
+      rowsRoot.append(root);
+      const label = make('dt', row.id || row.label || 'ROW');
+      const detail = [row.source || 'SOURCE NOT WIRED', row.derivation || 'DERIVATION NOT WIRED',
+        row.asof ? when(row.asof) : null, row.caveat].filter(Boolean).join(' · ');
+      const detailNode = make('dd', detail);
+      if (row.finding_id) {
+        detailNode.id = 'mandate-finding-' + row.finding_id;
+        detailNode.classList.add('mandate-finding-target');
+      }
+      provenanceRoot.append(label, detailNode);
+    });
+    const breachCount = panel && Number.isInteger(panel.breach_count)
+      ? panel.breach_count : rows.filter(row => row.breached === true).length;
+    const review = panel && panel.positions_under_review;
+    const unmeasuredCount = panel && Number.isInteger(panel.unmeasured_count)
+      ? panel.unmeasured_count : rows.filter(row => row.state === 'NOT_MEASURED').length
+        + (!review || review.state === 'NOT_MEASURED' ? 1 : 0);
+    text(q('[data-vsim="mandate-breach-count"]'), breachCount + ' BREACH' + (breachCount === 1 ? '' : 'ES')
+      + (unmeasuredCount ? ' · ' + unmeasuredCount + ' UNMEASURED' : ''));
+    text(q('[data-vsim="mandate-review-count"]'), review && review.state !== 'NOT_MEASURED'
+      ? number(review.count) + ' POSITION' + (Number(review.count) === 1 ? '' : 'S') + ' UNDER REVIEW'
+      : 'POSITIONS UNDER REVIEW · NOT MEASURED');
+    text(q('[data-vsim="mandate-state-stamp"]'), 'Measured ' + when(panel && panel.asof)
+      + ' · ' + (panel && panel.limits_version || 'CONSTITUTION VERSION UNAVAILABLE'));
+  }
+
   function renderOverview(status, portfolio) {
     const custody = status.custody || {};
     const account = custody.account || {};
@@ -3000,10 +3098,8 @@ export function liveDashboardScript() {
       ];
       entries.forEach(entry => { const li = make('li'); const label = make('span'); label.append(make('i', undefined, 'health ' + (entry[2] ? 'green' : 'amber')), document.createTextNode(entry[0])); li.append(label, make('strong', entry[1])); health.append(li); });
       text(q('#overview .system-brief .status-badge'), 'LIVE SHADOW');
-      text(q('#overview .readiness'), '1 / 5');
-      const scoreNotes = qa('#overview .scorecard .score-rows small');
-      ['Collecting shadow outcomes','Uncalibrated · non-blocking','Mutation intentionally disabled','Clean','Collecting survival evidence'].forEach((value, index) => text(scoreNotes[index], value));
     }
+    renderMandateState(portfolio);
   }
 
   function renderOpportunities(status) {
@@ -3191,6 +3287,14 @@ export function liveDashboardScript() {
   }
 
   document.addEventListener('click', event => {
+    const mandateFinding = event.target.closest('[data-mandate-finding]');
+    if (mandateFinding) {
+      const details = q('.mandate-provenance');
+      const target = q('#mandate-finding-' + mandateFinding.dataset.mandateFinding);
+      if (details) details.open = true;
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      return;
+    }
     const underwriteTab = event.target.closest('[data-underwrite-mode]');
     if (underwriteTab) { setUnderwriteMode(underwriteTab.dataset.underwriteMode); return; }
     const performanceFilter = event.target.closest('[data-performance-filter]');

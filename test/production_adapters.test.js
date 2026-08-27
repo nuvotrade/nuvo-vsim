@@ -9,7 +9,7 @@ import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
 import {
   cycleIdFor, dashboardHtml, designAsset, fullDashboard, liveDashboardScript,
-  rewriteDesignHtml, runShadowCycle, serveDashboard,
+  portfolioDashboard, rewriteDesignHtml, runShadowCycle, serveDashboard,
 } from '../cloudflare/worker.js';
 import {
   BUNDLED_DESIGN_APP, BUNDLED_DESIGN_HTML, BUNDLED_DESIGN_SHA256, BUNDLED_DESIGN_STYLES,
@@ -64,6 +64,7 @@ describe('protected live dashboard', () => {
 
   test('rewrites the polished design to same-origin protected assets and live bindings', () => {
     const html = rewriteDesignHtml('<title>NUVO VSIM v5 — Shadow Preview</title><link rel="stylesheet" href="styles.css"></head><body><button class="nav-button" data-view="opportunities">Opportunities</button><button class="nav-button" data-view="evidence">Evidence</button><section class="view" id="evidence"></section><script src="app.js"></script></body>');
+    const productionHtml = rewriteDesignHtml(BUNDLED_DESIGN_HTML);
     assert.match(html, /NUVO VSIM v5 — Live Shadow/u);
     assert.match(html, /href="\/design\/styles\.css"/u);
     assert.match(html, /src="\/design\/app\.js"/u);
@@ -118,6 +119,18 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /today-pnl-card \.metric-value\{font-variant-numeric:tabular-nums/u);
     assert.doesNotMatch(rewriteSource, /today-pnl-card \.metric-value\{[^}]*font-(?:size|weight)/u);
     assert.doesNotMatch(rewriteSource, /today-pnl-card \.metric-value\{[^}]*line-height/u);
+    assert.match(productionHtml, /<h3>Mandate state<\/h3>/u);
+    assert.match(productionHtml, /data-vsim="mandate-state-rows"/u);
+    assert.match(productionHtml, /data-vsim="mandate-review-count"/u);
+    assert.doesNotMatch(productionHtml, /\b1\s*\/\s*5\b/u);
+    for (const staleReadinessCopy of ['Collecting shadow outcomes','Uncalibrated · non-blocking',
+      'Mutation intentionally disabled','Collecting survival evidence']) {
+      assert.doesNotMatch(productionHtml, new RegExp(staleReadinessCopy, 'u'));
+    }
+    assert.match(rewriteSource, /mandate-state-row\[data-state="WITHIN"\] \.indicator\{border-color:var\(--muted\)\}/u,
+      'WITHIN is neutral and must not reuse the green success treatment');
+    assert.match(rewriteSource, /mandate-state-row\[data-state="NOT_MEASURED"\].*border-style:dashed/u,
+      'absence must remain visibly different from a measured state');
   });
 
   test('ships syntactically valid live bindings for every protected shadow surface', () => {
@@ -141,6 +154,30 @@ describe('protected live dashboard', () => {
     assert.match(source, /Schwab brokerage account/u);
     assert.match(source, /equities and options/u);
     assert.match(source, /risk_instrumentation/u);
+    assert.match(source, /function renderMandateState\(portfolio\)/u);
+    assert.match(source, /POSITIONS UNDER REVIEW · NOT MEASURED/u);
+    assert.match(source, /CONSTITUTION VERSION UNAVAILABLE/u);
+    assert.match(source, /breachCount \+ ' BREACH'/u);
+    assert.match(source, /Number\.isInteger\(panel\.unmeasured_count\)/u,
+      'the header must render the contract count including the separate review-count state');
+    assert.match(source, /row\.visible_note/u,
+      'an explicit contract note must render without the UI inventing policy copy');
+    assert.match(source, /finding\.dataset\.mandateFinding = row\.finding_id/u,
+      'a finding id must render as an explicit provenance control rather than dead text');
+    assert.match(source, /details\.open = true/u,
+      'the finding control must reveal the inline evidence and derivation');
+    assert.match(source, /mandate-finding-.*mandateFinding/u,
+      'the finding control and its provenance target must share the canonical finding id');
+    assert.doesNotMatch(source, /#overview \.readiness/u);
+    assert.doesNotMatch(source, /Collecting shadow outcomes|Uncalibrated · non-blocking|Mutation intentionally disabled|Collecting survival evidence/u);
+    const mandateRendererStart = source.indexOf('function renderMandateState(portfolio)');
+    const mandateRendererEnd = source.indexOf('\n  function renderOverview', mandateRendererStart);
+    assert.ok(mandateRendererStart >= 0 && mandateRendererEnd > mandateRendererStart,
+      'the Mandate State renderer must remain independently auditable');
+    const mandateRenderer = source.slice(mandateRendererStart, mandateRendererEnd);
+    assert.doesNotMatch(mandateRenderer,
+      /\b(?:EXIT|ROLL|HOLD|POP|ACTION_REQUIRED|ACTION_RECOMMENDED|BEST ACTION|RECOMMEND|CLOSE NOW|BUY TO CLOSE|SELL SHARES)\b/iu,
+      'the Mandate State renderer must not invent or imply lifecycle directives');
     assert.match(source, /expiration_ladder/u);
     assert.match(source, /quoteValue\(item, item\.mark, true\)/u);
     assert.match(source, /distance_to_strike_sigma/u);
@@ -218,6 +255,17 @@ describe('protected live dashboard', () => {
     assert.match(source, /data-performance-filter/u);
     assert.match(source, /onpointerdown/u);
     assert.match(source, /system-history/u);
+  });
+
+  test('renders a fully unmeasured Mandate State contract when custody is unavailable', async () => {
+    const env = { DB: { prepare: () => ({ bind: () => ({ first: async () => null }) }) } };
+    const report = await portfolioDashboard(env, 'owner-1');
+    assert.equal(report.source_state, 'NOT_MEASURED');
+    assert.equal(report.source_reason, 'SCHWAB_CUSTODY_SYNC_REQUIRED');
+    assert.equal(report.mandate_state.breach_count, 0);
+    assert.ok(report.mandate_state.rows.every((row) => row.state === 'NOT_MEASURED'));
+    assert.equal(report.mandate_state.positions_under_review.state, 'NOT_MEASURED');
+    assert.equal(report.mandate_state.positions_under_review.count, null);
   });
 });
 

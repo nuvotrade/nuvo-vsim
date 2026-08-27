@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
-  matchRealizedTrades, performanceFromBrokerRows, portfolioFromCustody, transactionFills,
+  MANDATE_PANEL_STATES, mandateStateFromPortfolio, matchRealizedTrades,
+  performanceFromBrokerRows, portfolioFromCustody, transactionFills,
 } from '../cloudflare/portfolio-report.js';
 
 function packet(overrides = {}) {
@@ -243,5 +244,159 @@ describe('canonical Schwab portfolio and performance reporting', () => {
     assert.ok(Math.abs(cbrs.distance_to_strike_pct - (22.96 / 187.04)) < 1e-12);
     assert.ok(cbrs.distance_to_strike_sigma > 1);
     assert.equal(cbrs.quote_freshness, 'LAST_MARKET_QUOTE');
+  });
+});
+
+describe('Mandate State panel contract', () => {
+  const observedAt = '2026-08-27T19:42:00.000Z';
+  const now = Date.parse('2026-08-27T19:42:30.000Z');
+  const limits = {
+    version: 'constitution-v5.2.1',
+    maxSingleUnderlyingPct: 0.20,
+    minReservePct: 0.20,
+    maxDeployedPct: 0.65,
+    maxExpirationPct: 0.25,
+    maxAccountAgeMs: 120_000,
+    maxQuoteAgeMs: 60_000,
+  };
+
+  test('reproduces every displayed breach exactly from the canonical portfolio fields', () => {
+    const report = portfolioFromCustody({
+      observedAt,
+      account: { nav: 167_242.68, cash: 3_467.68, accounts: [{ accountMask: '4315' }] },
+      positions: [
+        { type: 'EQUITY', symbol: 'CBRS', quantity: 500, averagePrice: 202.95, marketValue: 93_520 },
+        { type: 'OPTION', symbol: 'CBRS260828C00210000', underlying: 'CBRS', right: 'call',
+          quantity: -5, multiplier: 100, averagePrice: 0.56, marketValue: -212.5,
+          strike: 210, expiration: '2026-08-28' },
+        { type: 'EQUITY', symbol: 'SPCX', quantity: 500, averagePrice: 145.18, marketValue: 70_100 },
+        { type: 'OPTION', symbol: 'SPCX260828C00143000', underlying: 'SPCX', right: 'call',
+          quantity: -5, multiplier: 100, averagePrice: 1.35, marketValue: -738,
+          strike: 143, expiration: '2026-08-28' },
+      ],
+    }, new Map([
+      ['CBRS260828C00210000', { theta: -0.03, iv: 0.44, spot: 187.04,
+        asof: '2026-08-27T19:42:18.000Z', freshness: 'CURRENT' }],
+      ['SPCX260828C00143000', { theta: -0.06, iv: 0.28, spot: 140.20,
+        asof: '2026-08-27T19:42:18.000Z', freshness: 'CURRENT' }],
+    ]), { limits, now });
+
+    const panel = report.mandate_state;
+    const row = id => panel.rows.find((value) => value.id === id);
+    assert.equal(panel.breach_count, 4);
+    assert.equal(panel.unmeasured_count, 2);
+    assert.equal(panel.limits_version, 'constitution-v5.2.1');
+    assert.equal(row('CONCENTRATION').state, MANDATE_PANEL_STATES.SUSPECT);
+    assert.equal(row('CONCENTRATION').finding_id, 'H-01');
+    assert.equal(row('CONCENTRATION').classification, 'PREEXISTING_NONCONFORMING');
+    assert.deepEqual(row('CONCENTRATION').measurement.items.map((item) => [item.symbol, item.pct_nav]), [
+      ['CBRS', 93_520 / 167_242.68],
+      ['SPCX', 70_100 / 167_242.68],
+    ]);
+    assert.equal(row('CONCENTRATION').limit.value, 0.20);
+    assert.equal(row('RESERVE').measurement.value, 3_467.68 / 167_242.68);
+    assert.equal(row('RESERVE').limit.value, 0.20);
+    assert.equal(row('RESERVE').state, MANDATE_PANEL_STATES.BREACH);
+    assert.equal(row('DEPLOYMENT').measurement.value, 1 - (3_467.68 / 167_242.68));
+    assert.equal(row('DEPLOYMENT').limit.value, 0.65);
+    assert.equal(row('DEPLOYMENT').state, MANDATE_PANEL_STATES.BREACH);
+    assert.equal(row('DEPLOYMENT').visible_note, 'Approved draft 80% not activated.');
+    assert.equal(row('EXPIRATION').measurement.primary.expiration, '2026-08-28');
+    assert.equal(row('EXPIRATION').measurement.primary.value, 163_620);
+    assert.equal(row('EXPIRATION').measurement.primary.pct_nav, 163_620 / 167_242.68);
+    assert.equal(row('EXPIRATION').limit.value, 0.25);
+    assert.equal(row('EXPIRATION').state, MANDATE_PANEL_STATES.BREACH);
+    assert.equal(row('DATA').measurement.custody_age_ms, 30_000);
+    assert.equal(row('DATA').measurement.quote_age_ms, 12_000);
+    assert.equal(row('DATA').state, MANDATE_PANEL_STATES.WITHIN);
+    assert.equal(row('EVIDENCE').state, MANDATE_PANEL_STATES.NOT_MEASURED);
+    assert.equal(panel.positions_under_review.state, MANDATE_PANEL_STATES.NOT_MEASURED);
+    assert.equal(panel.positions_under_review.count, null);
+
+    assert.deepEqual(row('CONCENTRATION').measurement.items,
+      report.capital_committed.filter((item) => item.symbol !== 'CASH')
+        .map((item) => ({ symbol: item.symbol, value: item.value, pct_nav: item.pct_nav })));
+    assert.equal(row('RESERVE').measurement.value, report.risk_instrumentation.cash_reserve_pct);
+    assert.equal(row('DEPLOYMENT').measurement.value, report.risk_instrumentation.deployed_pct);
+    assert.equal(row('EXPIRATION').measurement.primary.pct_nav,
+      report.risk_instrumentation.expiration_ladder[0].pct);
+  });
+
+  test('distinguishes WITHIN, BREACH, NOT_MEASURED, STALE, and SUSPECT without treating absence as compliance', () => {
+    const base = {
+      asof: observedAt, now, nav: 100_000,
+      capitalCommitted: [{ symbol: 'ABC', value: 15_000, pct_nav: 0.15 }],
+      harvest: [{ expiration: '2026-09-18', expiration_capital: 10_000 }],
+      riskInstrumentation: {
+        cash_reserve_pct: 0.25, min_cash_reserve_pct: 0.20,
+        deployed_pct: 0.75, max_deployed_pct: 0.80,
+        expiration_limit_pct: 0.25, single_underlying_limit_pct: 0.20,
+        max_account_age_ms: 120_000, max_quote_age_ms: 60_000,
+        limits_version: 'test-constitution',
+      },
+      optionPositionCount: 1,
+      optionAnalyticsAsOf: '2026-08-27T19:42:18.000Z',
+    };
+    const clear = mandateStateFromPortfolio({ ...base, concentrationFindingOpen: false });
+    assert.equal(clear.rows.find((row) => row.id === 'CONCENTRATION').state, MANDATE_PANEL_STATES.WITHIN);
+    assert.equal(clear.rows.find((row) => row.id === 'RESERVE').state, MANDATE_PANEL_STATES.WITHIN);
+    assert.equal(clear.rows.find((row) => row.id === 'EVIDENCE').state, MANDATE_PANEL_STATES.NOT_MEASURED);
+    const suspect = mandateStateFromPortfolio(base);
+    assert.equal(suspect.rows.find((row) => row.id === 'CONCENTRATION').state, MANDATE_PANEL_STATES.SUSPECT);
+    const stale = mandateStateFromPortfolio({ ...base, now: Date.parse('2026-08-27T19:46:00.000Z') });
+    assert.equal(stale.rows.find((row) => row.id === 'DATA').state, MANDATE_PANEL_STATES.STALE);
+    assert.equal(stale.rows.find((row) => row.id === 'RESERVE').state, MANDATE_PANEL_STATES.STALE);
+    const breach = mandateStateFromPortfolio({ ...base,
+      riskInstrumentation: { ...base.riskInstrumentation, cash_reserve_pct: 0.10, deployed_pct: 0.90 } });
+    assert.equal(breach.rows.find((row) => row.id === 'RESERVE').state, MANDATE_PANEL_STATES.BREACH);
+    assert.equal(breach.rows.find((row) => row.id === 'DEPLOYMENT').state, MANDATE_PANEL_STATES.BREACH);
+    const absent = mandateStateFromPortfolio();
+    assert.ok(absent.rows.every((row) => row.state === MANDATE_PANEL_STATES.NOT_MEASURED));
+    assert.equal(absent.breach_count, 0);
+    const explicitNulls = mandateStateFromPortfolio({ asof: observedAt, now, nav: 100_000,
+      riskInstrumentation: { cash_reserve_pct: null, min_cash_reserve_pct: 0.20,
+        deployed_pct: null, max_deployed_pct: 0.65, expiration_limit_pct: null,
+        single_underlying_limit_pct: null, max_account_age_ms: null, max_quote_age_ms: null } });
+    for (const id of ['CONCENTRATION','RESERVE','DEPLOYMENT','EXPIRATION','DATA']) {
+      assert.equal(explicitNulls.rows.find((row) => row.id === id).state, MANDATE_PANEL_STATES.NOT_MEASURED,
+        `${id} must not coerce an explicit null into a measured zero`);
+    }
+  });
+
+  test('does not infer a review count and later accepts only the explicit canonical pass-through', () => {
+    const input = {
+      asof: observedAt, now, nav: 100_000,
+      harvest: [{ type: 'COVERED_CALL', expiration: '2026-09-18', expiration_capital: 10_000 }],
+      riskInstrumentation: { expiration_limit_pct: 0.25, single_underlying_limit_pct: 0.20,
+        max_account_age_ms: 120_000, max_quote_age_ms: 60_000 },
+    };
+    const unavailable = mandateStateFromPortfolio(input);
+    assert.equal(unavailable.positions_under_review.state, MANDATE_PANEL_STATES.NOT_MEASURED);
+    assert.equal(unavailable.positions_under_review.count, null);
+    for (const invalidCount of ['', '0', -1, 1.5, Number.NaN]) {
+      const invalid = mandateStateFromPortfolio({ ...input, positionsUnderReview: invalidCount });
+      assert.equal(invalid.positions_under_review.state, MANDATE_PANEL_STATES.NOT_MEASURED);
+      assert.equal(invalid.positions_under_review.count, null,
+        `invalid canonical count ${String(invalidCount)} must not become zero`);
+    }
+    const wired = mandateStateFromPortfolio({ ...input, positionsUnderReview: 2 });
+    assert.equal(wired.positions_under_review.count, 2);
+    assert.equal(wired.positions_under_review.source, 'portfolio.covered_call_reviews.length');
+    assert.equal(wired.unmeasured_count, unavailable.unmeasured_count - 1);
+  });
+
+  test('renders an empty measured book without fabricating review or evidence state', () => {
+    const panel = mandateStateFromPortfolio({
+      asof: observedAt, now, nav: 50_000, capitalCommitted: [], harvest: [],
+      riskInstrumentation: { cash_reserve_pct: 1, min_cash_reserve_pct: 0.20,
+        deployed_pct: 0, max_deployed_pct: 0.65, expiration_limit_pct: 0.25,
+        single_underlying_limit_pct: 0.20, max_account_age_ms: 120_000,
+        max_quote_age_ms: 60_000, limits_version: 'test-constitution' },
+      optionPositionCount: 0,
+    });
+    assert.equal(panel.rows.find((row) => row.id === 'CONCENTRATION').state, MANDATE_PANEL_STATES.WITHIN);
+    assert.equal(panel.rows.find((row) => row.id === 'EXPIRATION').measurement.primary.pct_nav, 0);
+    assert.equal(panel.positions_under_review.state, MANDATE_PANEL_STATES.NOT_MEASURED);
+    assert.equal(panel.positions_under_review.count, null);
   });
 });

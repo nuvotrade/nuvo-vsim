@@ -1,9 +1,192 @@
 const CURRENCY_ASSETS = new Set(['CURRENCY', 'CASH_EQUIVALENT']);
 export const PERFORMANCE_MARKET_TIME_ZONE = 'America/New_York';
 const IN_MANDATE_CALENDAR_STRATEGIES = new Set(['SHORT_CALL', 'SHORT_PUT']);
+export const MANDATE_PANEL_STATES = Object.freeze({
+  WITHIN: 'WITHIN',
+  BREACH: 'BREACH',
+  NOT_MEASURED: 'NOT_MEASURED',
+  STALE: 'STALE',
+  SUSPECT: 'SUSPECT',
+});
 
 const finite = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+const mandateNumber = (value) => value === null || value === undefined || value === '' ? null : finite(value);
 const cents = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+
+function ageMs(asof, now) {
+  const observed = Date.parse(asof ?? '');
+  const current = now instanceof Date ? now.getTime() : Number.isFinite(Number(now))
+    ? Number(now) : Date.parse(now ?? '');
+  return Number.isFinite(observed) && Number.isFinite(current) ? Math.max(0, current - observed) : null;
+}
+
+function mandateRow({ id, label, measurement = null, limit = null, breached = null,
+  state = null, classification = null, findingId = null, source, derivation, asof = null,
+  caveat = null, visibleNote = null }) {
+  const measured = measurement !== null;
+  return {
+    id,
+    label,
+    state: state ?? (measured ? breached ? MANDATE_PANEL_STATES.BREACH
+      : MANDATE_PANEL_STATES.WITHIN : MANDATE_PANEL_STATES.NOT_MEASURED),
+    breached: measured && typeof breached === 'boolean' ? breached : null,
+    measurement,
+    limit,
+    classification,
+    finding_id: findingId,
+    source,
+    derivation,
+    asof,
+    caveat,
+    visible_note: visibleNote,
+  };
+}
+
+export function mandateStateFromPortfolio({ asof = null, now = Date.now(), nav = null,
+  capitalCommitted = [], harvest = [], riskInstrumentation = {}, optionPositionCount = 0,
+  optionAnalyticsAsOf = null, positionsUnderReview = null, concentrationFindingOpen = true } = {}) {
+  const custodyAgeMs = ageMs(asof, now);
+  const quoteAgeMs = ageMs(optionAnalyticsAsOf, now);
+  const accountFreshnessMs = mandateNumber(riskInstrumentation.max_account_age_ms);
+  const quoteFreshnessMs = mandateNumber(riskInstrumentation.max_quote_age_ms);
+  const custodyStale = custodyAgeMs !== null && accountFreshnessMs !== null
+    ? custodyAgeMs > accountFreshnessMs : false;
+  const quotesRequired = Number(optionPositionCount) > 0;
+  const quotesUnmeasured = quotesRequired && quoteAgeMs === null;
+  const quotesStale = quotesRequired && quoteAgeMs !== null && quoteFreshnessMs !== null
+    ? quoteAgeMs > quoteFreshnessMs : false;
+  const dataMeasured = custodyAgeMs !== null && accountFreshnessMs !== null
+    && (!quotesRequired || (quoteAgeMs !== null && quoteFreshnessMs !== null));
+  const dataState = !dataMeasured || quotesUnmeasured ? MANDATE_PANEL_STATES.NOT_MEASURED
+    : custodyStale || quotesStale ? MANDATE_PANEL_STATES.STALE : MANDATE_PANEL_STATES.WITHIN;
+
+  const concentrationLimit = mandateNumber(riskInstrumentation.single_underlying_limit_pct);
+  const concentrationItems = capitalCommitted.filter((row) => row.symbol !== 'CASH')
+    .map((row) => ({ symbol: row.symbol, value: mandateNumber(row.value), pct_nav: mandateNumber(row.pct_nav) }));
+  const concentrationMeasured = mandateNumber(nav) > 0 && concentrationLimit !== null
+    && concentrationItems.every((row) => row.value !== null && row.pct_nav !== null);
+  const concentrationBreached = concentrationMeasured
+    ? concentrationItems.some((row) => row.pct_nav > concentrationLimit) : null;
+  const concentrationFindingApplies = concentrationMeasured && concentrationItems.length > 0
+    && concentrationFindingOpen;
+  const concentration = mandateRow({
+    id: 'CONCENTRATION', label: 'Concentration',
+    measurement: concentrationMeasured ? { kind: 'PER_UNDERLYING_PCT_NAV', items: concentrationItems } : null,
+    limit: concentrationLimit === null ? null : { kind: 'MAX_PCT_NAV', value: concentrationLimit },
+    breached: concentrationBreached,
+    state: concentrationFindingApplies ? MANDATE_PANEL_STATES.SUSPECT
+      : concentrationMeasured ? null : MANDATE_PANEL_STATES.NOT_MEASURED,
+    classification: concentrationBreached ? 'PREEXISTING_NONCONFORMING' : null,
+    findingId: concentrationFindingApplies ? 'H-01' : null,
+    source: 'portfolio.capital_committed',
+    derivation: 'share market value plus cash-secured-put assignment notional, grouped by underlying, divided by Schwab net liquidation',
+    asof,
+    caveat: concentrationFindingApplies
+      ? 'Dashboard and Governor concentration paths disagree by 2× for covered shares; value remains flagged until H-01 closes.'
+      : concentrationMeasured ? null
+        : 'Concentration cannot be asserted without NAV, the active cap, and complete per-underlying commitments.',
+  });
+
+  const reservePct = mandateNumber(riskInstrumentation.cash_reserve_pct);
+  const reserveLimit = mandateNumber(riskInstrumentation.min_cash_reserve_pct);
+  const reserveMeasured = reservePct !== null && reserveLimit !== null;
+  const reserveBreached = reserveMeasured ? reservePct < reserveLimit : null;
+  const reserve = mandateRow({
+    id: 'RESERVE', label: 'Reserve', measurement: reserveMeasured
+      ? { kind: 'PCT_NAV', value: reservePct } : null,
+    limit: reserveLimit === null ? null : { kind: 'MIN_PCT_NAV', value: reserveLimit },
+    breached: reserveBreached,
+    state: reserveMeasured && custodyStale ? MANDATE_PANEL_STATES.STALE : null,
+    classification: reserveBreached ? 'PREEXISTING_NONCONFORMING' : null,
+    source: 'portfolio.risk_instrumentation.cash_reserve_pct',
+    derivation: 'max(0, account cash) / Schwab net liquidation', asof,
+    caveat: 'Account cash is a derived NAV-minus-position-market-value plug; it is not verified settled cash and inherits mark quality.',
+  });
+
+  const deployedPct = mandateNumber(riskInstrumentation.deployed_pct);
+  const deployedLimit = mandateNumber(riskInstrumentation.max_deployed_pct);
+  const deploymentMeasured = deployedPct !== null && deployedLimit !== null;
+  const deploymentBreached = deploymentMeasured ? deployedPct > deployedLimit : null;
+  const deployment = mandateRow({
+    id: 'DEPLOYMENT', label: 'Deployment', measurement: deploymentMeasured
+      ? { kind: 'PCT_NAV', value: deployedPct } : null,
+    limit: deployedLimit === null ? null : { kind: 'MAX_PCT_NAV', value: deployedLimit },
+    breached: deploymentBreached,
+    state: deploymentMeasured && custodyStale ? MANDATE_PANEL_STATES.STALE : null,
+    classification: deploymentBreached ? 'PREEXISTING_NONCONFORMING' : null,
+    source: 'portfolio.risk_instrumentation.deployed_pct',
+    derivation: '1 - cash reserve percentage', asof,
+    caveat: 'The active runtime ceiling is displayed. The approved 80% draft is not activated.',
+    visibleNote: 'Approved draft 80% not activated.',
+  });
+
+  const expirationLimit = mandateNumber(riskInstrumentation.expiration_limit_pct);
+  const expirationMap = new Map();
+  for (const row of harvest) {
+    const expirationCapital = mandateNumber(row.expiration_capital);
+    if (!row.expiration || expirationCapital === null) continue;
+    expirationMap.set(row.expiration, (expirationMap.get(row.expiration) ?? 0) + expirationCapital);
+  }
+  const expirationItems = [...expirationMap.entries()].map(([expiration, value]) => ({
+    expiration, value, pct_nav: mandateNumber(nav) > 0 ? value / Number(nav) : null,
+  })).sort((a, b) => (b.pct_nav ?? -Infinity) - (a.pct_nav ?? -Infinity)
+    || String(a.expiration).localeCompare(String(b.expiration)));
+  const expirationMeasured = mandateNumber(nav) > 0 && expirationLimit !== null
+    && expirationItems.every((row) => row.pct_nav !== null);
+  const expirationBreached = expirationMeasured
+    ? expirationItems.some((row) => row.pct_nav > expirationLimit) : null;
+  const expiration = mandateRow({
+    id: 'EXPIRATION', label: 'Expiration', measurement: expirationMeasured
+      ? { kind: 'PER_EXPIRATION_PCT_NAV', items: expirationItems,
+        primary: expirationItems[0] ?? { expiration: null, value: 0, pct_nav: 0 } } : null,
+    limit: expirationLimit === null ? null : { kind: 'MAX_PCT_NAV', value: expirationLimit },
+    breached: expirationBreached,
+    state: expirationMeasured && custodyStale ? MANDATE_PANEL_STATES.STALE : null,
+    classification: expirationBreached ? 'PREEXISTING_NONCONFORMING' : null,
+    source: 'portfolio.harvest.expiration_capital grouped by exact expiration date',
+    derivation: 'short-option assignment or covered-share notional per exact expiration / Schwab net liquidation', asof,
+  });
+
+  const data = mandateRow({
+    id: 'DATA', label: 'Data', state: dataState,
+    measurement: dataMeasured ? { kind: 'FRESHNESS_AGE_MS', custody_age_ms: custodyAgeMs,
+      quote_age_ms: quotesRequired ? quoteAgeMs : null, quotes_required: quotesRequired } : null,
+    limit: accountFreshnessMs === null || (quotesRequired && quoteFreshnessMs === null) ? null
+      : { kind: 'MAX_AGE_MS', custody: accountFreshnessMs,
+        quotes: quotesRequired ? quoteFreshnessMs : null },
+    breached: null, source: 'custody.observedAt + oldest open-option quote timestamp',
+    derivation: 'current request time minus source timestamp; oldest required source determines state',
+    asof: [asof, optionAnalyticsAsOf].filter(Boolean).sort()[0] ?? null,
+    caveat: dataMeasured ? null : 'Freshness cannot be asserted until every required timestamp and threshold is present.',
+  });
+
+  const evidence = mandateRow({
+    id: 'EVIDENCE', label: 'Evidence', state: MANDATE_PANEL_STATES.NOT_MEASURED,
+    source: 'H-06 stream-health contract',
+    derivation: 'last successful seal compared with expected decision-stream cadence',
+    caveat: 'Chain count and validity do not establish liveness. Expected cadence is not wired until H-06.',
+  });
+  const rows = [concentration, reserve, deployment, expiration, data, evidence];
+  const reviewCountMeasured = Number.isInteger(positionsUnderReview) && positionsUnderReview >= 0;
+  const positionsUnderReviewState = !reviewCountMeasured ? {
+    state: MANDATE_PANEL_STATES.NOT_MEASURED, count: null,
+    source: 'portfolio.covered_call_reviews.length',
+    reason: 'COVERED_CALL_REVIEW_SOURCE_NOT_WIRED',
+  } : {
+    state: MANDATE_PANEL_STATES.WITHIN, count: positionsUnderReview,
+    source: 'portfolio.covered_call_reviews.length', reason: null,
+  };
+  return {
+    state_version: 'MANDATE_STATE_PANEL_V1',
+    asof,
+    limits_version: riskInstrumentation.limits_version ?? null,
+    breach_count: rows.filter((row) => row.breached === true).length,
+    unmeasured_count: rows.filter((row) => row.state === MANDATE_PANEL_STATES.NOT_MEASURED).length
+      + (positionsUnderReviewState.state === MANDATE_PANEL_STATES.NOT_MEASURED ? 1 : 0),
+    rows,
+    positions_under_review: positionsUnderReviewState,
+  };
+}
 const cleanSymbol = (value) => String(value ?? '').replaceAll(' ', '').toUpperCase();
 const iso = (value) => {
   const parsed = Date.parse(String(value ?? ''));
@@ -438,7 +621,9 @@ export function performanceFromBrokerRows(rows, {
   };
 }
 
-export function portfolioFromCustody(custody, optionAnalytics = new Map(), { limits = {} } = {}) {
+export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
+  limits = {}, now = Date.now(), positionsUnderReview = null,
+} = {}) {
   const account = custody?.account ?? {};
   const positions = custody?.positions ?? [];
   const openOrders = custody?.openOrders ?? [];
@@ -586,6 +771,45 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), { lim
   const positiveCash = cash === null ? null : Math.max(0, cash);
   const cashReservePct = nav > 0 && positiveCash !== null ? positiveCash / nav : null;
   const deployedPct = cashReservePct === null ? null : Math.max(0, 1 - cashReservePct);
+  const riskInstrumentation = {
+    cash_reserve_pct: cashReservePct,
+    min_cash_reserve_pct: finite(limits.minReservePct),
+    reserve_breached: cashReservePct !== null && finite(limits.minReservePct) !== null
+      ? cashReservePct < limits.minReservePct : false,
+    deployed_pct: deployedPct,
+    max_deployed_pct: finite(limits.maxDeployedPct),
+    deployed_breached: deployedPct !== null && finite(limits.maxDeployedPct) !== null
+      ? deployedPct > limits.maxDeployedPct : false,
+    expiration_limit_pct: finite(limits.maxExpirationPct),
+    single_underlying_limit_pct: finite(limits.maxSingleUnderlyingPct),
+    max_account_age_ms: finite(limits.maxAccountAgeMs),
+    max_quote_age_ms: finite(limits.maxQuoteAgeMs),
+    limits_version: limits.version ?? null,
+    short_option_contracts: totalShortContracts,
+    expiration_ladder: expirationBuckets,
+    custody_scope: {
+      source: 'SCHWAB_TRADER_API_ACCOUNTS_POSITIONS_PACKET',
+      packet_position_count: positions.length,
+      account_masks: (account.accounts ?? []).map((row) => row.accountMask).filter(Boolean),
+      product_surface: 'EQUITIES_AND_OPTIONS',
+      futures_verified: false,
+      note: 'Current brokerage packet covers equities and options. Closed futures activity remains preserved in the broker event ledger.',
+    },
+  };
+  const analyticsAsOfRows = options.map((position) => optionAnalytics.get(position.symbol)?.asof).filter(Boolean);
+  const optionAnalyticsAsOf = options.length > 0 && analyticsAsOfRows.length === options.length
+    ? analyticsAsOfRows.sort()[0] : null;
+  const mandateState = mandateStateFromPortfolio({
+    asof: custody?.observedAt ?? null,
+    now,
+    nav,
+    capitalCommitted,
+    harvest,
+    riskInstrumentation,
+    optionPositionCount: options.length,
+    optionAnalyticsAsOf,
+    positionsUnderReview,
+  });
   return {
     asof: custody?.observedAt ?? null,
     account: {
@@ -599,29 +823,8 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), { lim
     summary: { booked_premium: bookedPremium, income_theta_per_day: incomeTheta,
       net_theta_per_day: netTheta, open_pnl: openPnl,
       share_open_pnl: shareOpenPnl, option_open_pnl: optionOpenPnl },
-    risk_instrumentation: {
-      cash_reserve_pct: cashReservePct,
-      min_cash_reserve_pct: finite(limits.minReservePct),
-      reserve_breached: cashReservePct !== null && finite(limits.minReservePct) !== null
-        ? cashReservePct < limits.minReservePct : false,
-      deployed_pct: deployedPct,
-      max_deployed_pct: finite(limits.maxDeployedPct),
-      deployed_breached: deployedPct !== null && finite(limits.maxDeployedPct) !== null
-        ? deployedPct > limits.maxDeployedPct : false,
-      expiration_limit_pct: finite(limits.maxExpirationPct),
-      single_underlying_limit_pct: finite(limits.maxSingleUnderlyingPct),
-      limits_version: limits.version ?? null,
-      short_option_contracts: totalShortContracts,
-      expiration_ladder: expirationBuckets,
-      custody_scope: {
-        source: 'SCHWAB_TRADER_API_ACCOUNTS_POSITIONS_PACKET',
-        packet_position_count: positions.length,
-        account_masks: (account.accounts ?? []).map((row) => row.accountMask).filter(Boolean),
-        product_surface: 'EQUITIES_AND_OPTIONS',
-        futures_verified: false,
-        note: 'Current brokerage packet covers equities and options. Closed futures activity remains preserved in the broker event ledger.',
-      },
-    },
+    risk_instrumentation: riskInstrumentation,
+    mandate_state: mandateState,
     capital_committed: capitalCommitted,
     inventory,
     harvest,
