@@ -18,7 +18,16 @@ This decision removes manual/agent attribution from the autonomous compliance ca
 
 ### Initial funding — decided
 
-The dedicated autonomous account will start with **$50,000 cash**. Future funding rules remain a separate mandate decision.
+The dedicated autonomous account will start with **$50,000 settled cash transferred from account ••••4315**. It is not new capital. The transfer is deferred until both Principal conditions are satisfied:
+
+1. account ••••4315 holds no shares; and
+2. account ••••4315 has recovered to at least break-even under a precise, cash-flow-adjusted recovery metric approved before the recovery window is measured.
+
+“Break-even” is not yet mechanically defined. The mandate must name its starting date/value, treatment of deposits and withdrawals, included fees, and whether it measures the entire account or the canonical matched ledger. Until that definition is approved and reports `PASS`, the transfer is blocked.
+
+The transferred amount must be settled cash, not buying power, and may not leave ••••4315 with negative cash, margin debit, an unsettled transfer obligation, or collateral deficiency. The withdrawal is an external cash flow, not a trading loss. The autonomous account's opening HWM begins from its verified opening settled cash, while later contributions and withdrawals are flow-adjusted and cannot reset or cosmetically improve drawdown.
+
+Future funding rules remain a separate mandate decision.
 
 Funding and the per-contract cap jointly determine the admissible universe. If the Principal adopts the proposed 10% per-contract NAV cap, the maximum assignment or newly acquired share-lot notional is $5,000:
 
@@ -104,6 +113,7 @@ The agent may read these artifacts. It may not write, select, amend, activate, o
 5. **Drawdown ladder:** high-water-mark definition; warning, de-risk, halt, and independent-kill rungs; allowed actions at each rung.
 6. **Human-only powers:** mandate amendment, authority promotion, self-suspension clearance, account-scope changes, new products, and any weakening of collateral or survival limits.
 7. **Future funding:** whether contributions are prohibited, scheduled, or Principal-approved case by case; funding changes must not reset the HWM or conceal drawdown.
+8. **Legacy recovery metric:** exact break-even baseline and cash-flow treatment that authorizes the initial transfer from ••••4315.
 
 ### Engineering outputs after the decisions
 
@@ -239,9 +249,12 @@ The canary must specify:
 - idempotent outbox and broker-order correlation;
 - independent kill switch and one-click human pause;
 - automatic demotion on any integrity, calibration, governance, or reconciliation failure;
+- automatic suspension when any order, fill, position, transfer, or cash movement in the governed account cannot be linked to a sealed authorized workflow;
 - human-only resumption.
 
 The execution component should be a separate minimal authority boundary rather than adding broad Schwab mutation credentials to the dashboard Worker.
+
+Broker-level prevention of Principal-entered manual trades is not assumed. Unless Schwab confirms an enforceable account restriction, the system treats this as a detection boundary: every governed-account event must reconcile to a sealed proposal and execution record. Unmatched activity is `UNAUTHORIZED_BROKER_ACTIVITY`, withdraws new-exposure authority immediately, and requires human investigation and resumption.
 
 **Exit gate:** Principal explicitly activates Authority 3 for the canary scope and records the governing hashes, capital ceiling, start/end dates, and rollback procedure.
 
@@ -284,7 +297,7 @@ Profit alone cannot promote either tier. A profitable unauthorized action is a s
 
 Before choosing the universe or concentration limits:
 
-1. Confirm whether the $50,000 is new capital or transferred from ••••4315, and define the permitted future funding process.
+1. Define and pre-register the ••••4315 break-even metric that gates the conditional $50,000 transfer.
 2. After the account exists, verify whether the current Schwab authorization returns it from the account-number endpoint; do not assume token scope from account ownership alone.
 3. Decide whether Guardian observes both accounts for visibility while only the dedicated account feeds autonomous compliance and authority.
 4. Add permanent account-scope labels to Overview, Performance, System, evidence, and alerts.
@@ -299,5 +312,6 @@ Resolve the remaining Phase 1 Principal decisions in this order:
 5. drawdown ladder and resumption authority;
 6. Authority 3 ladder amendment for risk-reducing lifecycle actions;
 7. future funding process.
+8. legacy-account recovery metric.
 
 Only after those decisions should the draft governance artifacts be created. Until activation, the existing production constitution remains authoritative and the deployed system remains proposal-only.
