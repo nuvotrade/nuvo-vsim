@@ -2571,7 +2571,6 @@ export function liveDashboardScript() {
 
   async function runCashSecuredPut(button) {
     setCalculatorMode('cash-secured-put'); resetCspView();
-    if (!window.confirm('Run a fresh protected cash-secured-put calculation? This records shadow evidence but cannot place an order.')) return;
     const requestId = crypto.randomUUID(); calculatorState.cspRequestId = requestId;
     if (button) button.disabled = true;
     text(q('[data-vsim="csp-outcome"]'), 'Calculating cash-secured puts…');

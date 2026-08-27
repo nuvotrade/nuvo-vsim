@@ -157,6 +157,8 @@ describe('protected live dashboard', () => {
     assert.match(source, /function renderCoveredCall\(result\)/u);
     assert.match(source, /function renderCashSecuredPuts\(cycle\)/u);
     assert.match(source, /function runCashSecuredPut\(button\)/u);
+    assert.doesNotMatch(source, /Run a fresh protected cash-secured-put calculation/u,
+      'the primary read-only calculator action must not require a habitual confirmation');
     assert.match(source, /function renderCalculatorSymbols\(inventory\)/u);
     assert.match(source, /function resetCoveredCallView\(\)/u);
     assert.match(source, /function applyCoveredCallAvailability\(rows\)/u);
