@@ -21,6 +21,9 @@ import { CalibrationStore, CALIBRATION } from '../src/underwriter/probabilities.
 import { underwrite } from '../src/underwriter/underwrite.js';
 import { stressTest } from '../src/portfolio/stress.js';
 import { Rng } from '../src/math/random.js';
+import { AUTHORITY, validateAuthorityLevel } from '../src/constitution/authority.js';
+
+const TEST_AUTHORITY = validateAuthorityLevel(AUTHORITY.PROPOSE, { source: 'correctness test authority' });
 
 const P = (k, b, a, d, g) => ({
   strike: k, bid: b, ask: a, multiplier: 100, dte: 30, expiration: '2024-07-19',
@@ -253,7 +256,7 @@ describe('GAP: the evidence hash was a 64-bit checksum', () => {
 describe('GAP: evidence packages were not reconstructable', () => {
   const mk = (overrides = {}) => buildEvidence({
     cycleId: 'C1', now: 1000, decision: 'CSP', candidates: [],
-    modelVersion: 'm', codeVersion: 'c', limits: { version: 'v5' }, authorityLevel: 2,
+    modelVersion: 'm', codeVersion: 'c', limits: { version: 'v5' }, authorityLevel: TEST_AUTHORITY,
     ...overrides,
   });
 
@@ -316,7 +319,7 @@ describe('GAP: the evidence store was memory-only', () => {
   const tmpPath = () => `${process.env.TMPDIR ?? '/tmp'}/nuvo-evidence-${process.pid}-${seq++}.jsonl`;
   const mk = (i) => buildEvidence({
     cycleId: `C${i}`, now: 1000 + i, decision: 'CSP', candidates: [],
-    modelVersion: 'm', codeVersion: 'c', limits: { version: 'v5' }, authorityLevel: 2,
+    modelVersion: 'm', codeVersion: 'c', limits: { version: 'v5' }, authorityLevel: TEST_AUTHORITY,
   });
 
   test('the memory store reports itself as not durable', () => {

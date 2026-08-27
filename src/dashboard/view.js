@@ -8,7 +8,7 @@
  * engine actually used, so the screen cannot imply a decision rule the
  * system does not follow.
  */
-import { AUTHORITY_NAME } from '../constitution/authority.js';
+import { AUTHORITY_NAME, authorityValue } from '../constitution/authority.js';
 import { isNum } from '../math/stats.js';
 
 const pct = (v, d = 1) => (isNum(v) ? `${(v * 100).toFixed(d)}%` : '—');
@@ -82,7 +82,7 @@ export function buildView({ engine, cycle = null }) {
       thesisState: p.state,
     })),
     system: {
-      authority: `${engine.authorityLevel} (${AUTHORITY_NAME[engine.authorityLevel]})`,
+      authority: `${authorityValue(engine.authorityLevel)} (${AUTHORITY_NAME[authorityValue(engine.authorityLevel)]})`,
       dataHealth: cycle ? (cycle.outcome === 'REFUSED' ? 'REFUSED' : 'VERIFIED') : 'UNKNOWN',
       brokerHealth: led.QUARANTINED > 0 ? 'QUARANTINED' : 'OK',
       modelCalibration: sb.calibration.status,

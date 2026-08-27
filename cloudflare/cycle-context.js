@@ -1,4 +1,5 @@
 import { contentHash } from '../src/execution/order.js';
+import { authorityValue } from '../src/constitution/authority.js';
 
 const PERMITTED_ACTIONS = Object.freeze([
   'run_shadow_cycle', 'get_account_truth', 'get_market_state', 'get_cycle',
@@ -187,10 +188,10 @@ export function buildCycleContext({ result, summary, snapshotHash = null }) {
 }
 
 export function buildBlockedCycleContext({ summary, detail = {}, codeVersion, constitutionVersion,
-  authorityLevel = 1 }) {
+  authorityLevel }) {
   return {
     cycle_id: summary.cycleId,
-    authority_level: authorityLevel,
+    authority_level: authorityValue(authorityLevel),
     engine_version: codeVersion,
     model_version: 'nuvo-model-5.0.1-execution-cost-v2',
     constitution_version: constitutionVersion,

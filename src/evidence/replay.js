@@ -13,6 +13,7 @@
 import { DataProvider } from '../truth/providers/provider.js';
 import { BrokerAdapter } from '../execution/broker/adapter.js';
 import { runCycle } from '../pipeline/cycle.js';
+import { validateAuthorityLevel } from '../constitution/authority.js';
 import { DEFAULT_LIMITS } from '../constitution/limits.js';
 import { CalibrationStore } from '../underwriter/probabilities.js';
 import { CapitalLedger } from '../portfolio/capital_states.js';
@@ -150,7 +151,7 @@ export async function replay(pkg, { limits = null, rawInputs = null } = {}) {
     ledger,
     registry: restoredRegistry(es.strategyId, es.strategyState),
     calibrationStore,
-    authorityLevel: es.authorityLevel,
+    authorityLevel: validateAuthorityLevel(es.authorityLevel, { source: 'replayed evidence authority' }),
     positions: es.positions ?? [],
     reconcilePositions: es.reconcilePositions ?? [],
     reconcileAccount: es.reconcileAccount ?? null,

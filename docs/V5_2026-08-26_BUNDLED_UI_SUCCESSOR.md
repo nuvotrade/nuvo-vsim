@@ -55,6 +55,8 @@ The live Worker artifact contains neither `c8c17621.nuvo-vsim-v5-preview.pages.d
 - URL state for `pnlMonth`, `pnlScope`, `pnlFrom`, and `pnlTo` survived loading and filtered the shared ledger drill-down to seven Aug. 12 trades without changing lifetime KPIs.
 - A live proxied `POST /api/cash-secured-put/calculate` completed. After-hours blocked/stale data produced `NO DATA` with the explicit infrastructure/input-failure explanation; it did not misclassify the result as `NO CAPITAL` or `NO EDGE`.
 - The calculator POST did not append a sealed evidence package. The preserved and post-check chain head is still sequence 61, hash `163fd237cbcf143cb1311a353bbfb69370726b552ec60825f8115372b3563e8f`.
+
+**Correction recorded 2026-08-27:** the two preceding calculator conclusions were false. The POST returned HTTP 503 because `evidence_index` rejected Authority 2 under its Authority-1-only check constraint. The UI collapsed that persistence failure into a plausible `NO DATA` refusal. The unchanged chain head was evidence of a stalled decision stream, not expected refusal behavior. This check did not validate gate ordering. Authority-2 evidence and the `execution-cost-v2` stamp remain unverified until storage compatibility is corrected and a new record seals successfully.
 - Live version-123 request logs for the final bare-root and URL-state reloads showed successful responses with empty application log arrays and no `DESIGN_UNAVAILABLE` event.
 - The Worker footer reported `cd5a0ca8-685…`, matching the deployed version.
 

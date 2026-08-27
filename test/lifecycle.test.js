@@ -10,6 +10,7 @@ import { DEFAULT_LAMBDAS } from '../src/underwriter/ev.js';
 import { dteToT } from '../src/math/black_scholes.js';
 import { buildOrder, OrderBook, contentHash, fillQuality, ORDER_STATE } from '../src/execution/order.js';
 import { PaperBroker } from '../src/execution/broker/paper.js';
+import { AUTHORITY, validateAuthorityLevel } from '../src/constitution/authority.js';
 
 const put = {
   symbol: 'X240703P95', strike: 95, bid: 2.40, ask: 2.60, multiplier: 100,
@@ -188,7 +189,9 @@ describe('assignment runs a fresh decision (§11)', () => {
 describe('execution', () => {
   const now = Date.UTC(2024, 5, 3, 15, 0);
   const build = (contracts, at = now) => buildOrder({
-    candidate, sizing: { contracts }, authorityLevel: 3, limits: DEFAULT_LIMITS,
+    candidate, sizing: { contracts },
+    authorityLevel: validateAuthorityLevel(AUTHORITY.AUTO_ENTRY, { source: 'lifecycle test authority' }),
+    limits: DEFAULT_LIMITS,
     now: at, strategyId: 'VSIM-001', modelVersion: 'm1', codeVersion: 'c1',
   });
 

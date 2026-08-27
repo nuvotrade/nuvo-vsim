@@ -6,7 +6,9 @@
  */
 import { DEFAULT_LIMITS } from './constitution/limits.js';
 import { KillSwitchBoard, SWITCH } from './constitution/killswitch.js';
-import { AUTHORITY, can, evaluatePromotion, evaluateDemotion } from './constitution/authority.js';
+import {
+  authorityValue, can, evaluatePromotion, evaluateDemotion,
+} from './constitution/authority.js';
 import { CapitalLedger } from './portfolio/capital_states.js';
 import {
   CalibrationStore, calibrationTag, FORECAST_EVENT,
@@ -25,9 +27,11 @@ import {
 } from './evidence/package.js';
 
 export class NuvoEngine {
+  #authorityLevel;
+
   constructor({
     provider, broker, nav, limits = DEFAULT_LIMITS,
-    authorityLevel = AUTHORITY.SHADOW, symbols = [], approved = [],
+    authorityLevel, symbols = [], approved = [],
     clock = () => Date.now(), codeVersion = 'nuvo-5.0.0',
     modelVersion = 'nuvo-model-5.0.1-execution-cost-v2',
     evidenceStore = null, calibrationStore = null, accountMirror = null,
@@ -74,6 +78,13 @@ export class NuvoEngine {
     this.equityCurve = [nav];
     this.breaches = [];
     this.cycles = 0;
+  }
+
+  get authorityLevel() { return this.#authorityLevel; }
+
+  set authorityLevel(authority) {
+    authorityValue(authority);
+    this.#authorityLevel = authority;
   }
 
   get drawdownPct() {

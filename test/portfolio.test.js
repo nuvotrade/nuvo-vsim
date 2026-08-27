@@ -11,9 +11,11 @@ import {
 } from '../src/portfolio/sizing.js';
 import { stressTest, ruinProbability, STRESS_SCENARIOS } from '../src/portfolio/stress.js';
 import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
-import { AUTHORITY } from '../src/constitution/authority.js';
+import { AUTHORITY, validateAuthorityLevel } from '../src/constitution/authority.js';
 import { classify, gapFrequency, REGIME } from '../src/market/regime.js';
 import { Rng } from '../src/math/random.js';
+
+const authority = (level) => validateAuthorityLevel(level, { source: 'portfolio test authority' });
 
 describe('capital states', () => {
   test('every dollar is in exactly one state and the total is conserved', () => {
@@ -150,7 +152,7 @@ describe('simultaneous short-put assignment funding', () => {
       },
       positions: [], nav: 100_000, ledger, limits: DEFAULT_LIMITS,
       regime: { sizeMultiplier: 1 }, returnsBySymbol: { X: [] }, sectors: { X: 'TECH' },
-      authorityLevel: AUTHORITY.AUTO_ENTRY, settledCash: 3_468, spot: 100,
+      authorityLevel: authority(AUTHORITY.AUTO_ENTRY), settledCash: 3_468, spot: 100,
     });
     assert.equal(result.approved, false);
     assert.equal(result.violations[0].code, 'SIMULTANEOUS_ASSIGNMENT_UNFUNDED');
@@ -201,7 +203,7 @@ describe('sizing multipliers can only reduce', () => {
     const s = sizePosition({
       candidate, nav: 100_000, ledger, regime: { sizeMultiplier: 1 },
       clusterExposure: 0, clusterCorrelation: null, limits: DEFAULT_LIMITS,
-      authorityLevel: AUTHORITY.AUTO_ENTRY,
+      authorityLevel: authority(AUTHORITY.AUTO_ENTRY),
     });
     assert.equal(s.contracts, 0);
     assert.ok(s.zeroReason, 'a zero size must be explained');
@@ -218,7 +220,7 @@ describe('sizing multipliers can only reduce', () => {
     const s = sizePosition({
       candidate, nav: 100_000, ledger, regime: { sizeMultiplier: 1 },
       clusterExposure: 0, clusterCorrelation: null, limits: DEFAULT_LIMITS,
-      authorityLevel: AUTHORITY.AUTO_ENTRY, singleUnderlyingExposure: 19_000,
+      authorityLevel: authority(AUTHORITY.AUTO_ENTRY), singleUnderlyingExposure: 19_000,
       concentrationPerContract: 5000,
     });
     assert.equal(s.caps.bySingleName, 0);
@@ -237,7 +239,7 @@ describe('sizing multipliers can only reduce', () => {
     const s = sizePosition({
       candidate, nav: 100_000, ledger, regime: { sizeMultiplier: 1.25 },
       clusterExposure: 0, clusterCorrelation: null, limits: DEFAULT_LIMITS,
-      authorityLevel: AUTHORITY.RESEARCH_ONLY,
+      authorityLevel: authority(AUTHORITY.RESEARCH_ONLY),
     });
     assert.equal(s.contracts, 0);
     assert.match(s.zeroReason, /Authority/);

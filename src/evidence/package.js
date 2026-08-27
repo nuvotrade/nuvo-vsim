@@ -9,6 +9,7 @@
  * is no way to tell later whether NUVO chose well or simply chose first.
  */
 import { contentHash, stableStringify } from '../execution/order.js';
+import { authorityValue } from '../constitution/authority.js';
 
 // v2 adds the full engine/calibration/portfolio/config state required for a
 // faithful non-empty-book replay. Calling that v1 would make incompatible
@@ -35,7 +36,7 @@ export function buildEvidence({
     modelVersion,
     codeVersion,
     limitsVersion: limits?.version ?? null,
-    authorityLevel,
+    authorityLevel: authorityValue(authorityLevel),
     strategyId,
 
     /**

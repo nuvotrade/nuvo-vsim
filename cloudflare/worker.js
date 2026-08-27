@@ -5,7 +5,10 @@ import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js
 import { EvidenceStore } from '../src/evidence/store.js';
 import { buildEvidence, verifyEvidence, verifyFingerprint } from '../src/evidence/package.js';
 import { replay } from '../src/evidence/replay.js';
-import { AUTHORITY } from '../src/constitution/authority.js';
+import {
+  AUTHORITY, AuthorityConfigurationError, authorityAtLeast, authorityValue,
+  capAuthority, validateAuthorityLevel,
+} from '../src/constitution/authority.js';
 import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
 import { analyzeCoveredCallLifecycle } from '../src/lifecycle/covered_call_analysis.js';
 import { contentHash, ORDER_STATE } from '../src/execution/order.js';
@@ -43,8 +46,22 @@ const JSON_HEADERS = Object.freeze({
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 const nowIso = () => new Date().toISOString();
-const authorityLevel = (env) => Number(env.NUVO_AUTHORITY_LEVEL ?? AUTHORITY.SHADOW);
-const operationalAuthority = (env) => Math.min(authorityLevel(env), AUTHORITY.PROPOSE);
+const configuredAuthority = (env) => validateAuthorityLevel(env.NUVO_AUTHORITY_LEVEL, {
+  source: 'NUVO_AUTHORITY_LEVEL',
+});
+const operationalAuthority = (env) => capAuthority(configuredAuthority(env), AUTHORITY.PROPOSE);
+
+export function systemFault(error, stage = 'AUTHORITY_BOUNDARY') {
+  return {
+    ok: false,
+    outcome: 'SYSTEM_FAULT',
+    decision: null,
+    faultCode: error?.code ?? 'SYSTEM_FAULT',
+    faultStage: stage,
+    message: String(error?.message ?? error),
+    at: nowIso(),
+  };
+}
 
 function epochMs(value) {
   const numeric = Number(value);
@@ -57,7 +74,7 @@ function toolEnvelope(env, payload = {}, error = null) {
   return {
     ok: !error,
     cycle_id: payload.cycle_id ?? null,
-    authority_level: authorityLevel(env),
+    authority_level: authorityValue(configuredAuthority(env)),
     asof: payload.asof ?? nowIso(),
     ...payload,
     error: error ? {
@@ -82,9 +99,9 @@ function publicStatus(env) {
     ok: true,
     service: 'nuvo-vsim-v5-shadow',
     environment: env.NUVO_ENVIRONMENT ?? 'unknown',
-    authority: authorityLevel(env) >= AUTHORITY.PROPOSE
+    authority: authorityAtLeast(configuredAuthority(env), AUTHORITY.PROPOSE)
       ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW',
-    authority_level: authorityLevel(env),
+    authority_level: authorityValue(configuredAuthority(env)),
     broker_mode: 'READ_ONLY',
     broker_execution_mode: 'SHADOW_ONLY',
     mutation_routes: false,
@@ -524,7 +541,7 @@ function summaryOf(result, engine, connector) {
       : 'SHADOW_RECORDED',
     reasonCode: firstReasonCode(result, result.outcome === 'NO_TRADE' ? 'NO_TRADE' : null),
     reason: result.reason ?? result.reasons?.[0] ?? null,
-    authority: engine.authorityLevel >= AUTHORITY.PROPOSE
+    authority: authorityAtLeast(engine.authorityLevel, AUTHORITY.PROPOSE)
       ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW',
     mutationEligible: false,
     regime: result.regime ?? result.marketState?.regime?.regime ?? null,
@@ -615,7 +632,7 @@ async function recordBlocked(env, ownerId, cycleId, reason, detail = {}) {
     cycleId, at: Date.now(), outcome: 'REFUSED', decision: 'REFUSED',
     state: reason.includes('RECON') || reason.includes('MISMATCH') ? 'QUARANTINED' : 'REFUSED',
     reasonCode: reason, reason: detail.message ?? reason,
-    authority: operationalAuthority(env) >= AUTHORITY.PROPOSE
+    authority: authorityAtLeast(operationalAuthority(env), AUTHORITY.PROPOSE)
       ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW',
     mutationEligible: false, regime: null, regimeConfidence: null, trace: [],
     opportunities: [], selected: null,
@@ -708,7 +725,7 @@ export async function runShadowCycle(env, ownerId, {
         state: 'QUARANTINED',
         reasonCode: 'EVIDENCE/PROJECTION_INCOMPLETE',
         reason: 'Evidence sealed before its D1 summary/context projection completed; no second decision was run.',
-        authority: operationalAuthority(env) >= AUTHORITY.PROPOSE
+        authority: authorityAtLeast(operationalAuthority(env), AUTHORITY.PROPOSE)
           ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW', mutationEligible: false,
         regime: null, regimeConfidence: null, trace: [], opportunities: [], selected: null,
         evidence: {
@@ -1413,7 +1430,7 @@ async function reconciledSnapshot(env, ownerId) {
 }
 
 export async function triggerShadowCycle(env, ownerId, { source = 'MCP', idempotencyKey = null } = {}) {
-  if (authorityLevel(env) < AUTHORITY.SHADOW) {
+  if (!authorityAtLeast(configuredAuthority(env), AUTHORITY.SHADOW)) {
     return toolEnvelope(env, {}, { code: 'AUTHORITY_DENIED', message: 'Authority level does not permit shadow ranking.' });
   }
   const controls = await loadOperatorControls(env, ownerId);
@@ -1664,7 +1681,7 @@ async function listEvidenceTool(env, ownerId, limit) {
 }
 
 async function createTradeProposalTool(env, ownerId, { cycleId, candidateId }) {
-  if (authorityLevel(env) < AUTHORITY.PROPOSE) {
+  if (!authorityAtLeast(configuredAuthority(env), AUTHORITY.PROPOSE)) {
     return toolEnvelope(env, { cycle_id: cycleId }, {
       code: 'AUTHORITY_DENIED', message: 'Frozen ticket proposals require Authority 2.',
     });
@@ -1680,7 +1697,7 @@ async function createTradeProposalTool(env, ownerId, { cycleId, candidateId }) {
 }
 
 async function reviewTradeTicketTool(env, ownerId, input) {
-  if (authorityLevel(env) < AUTHORITY.PROPOSE) {
+  if (!authorityAtLeast(configuredAuthority(env), AUTHORITY.PROPOSE)) {
     return toolEnvelope(env, {}, { code: 'AUTHORITY_DENIED', message: 'Ticket review requires Authority 2.' });
   }
   const truth = await getAccountTruthTool(env, ownerId);
@@ -1716,7 +1733,7 @@ export function createMcpService(env, ownerId) {
     reviewTradeTicket: (input) => reviewTradeTicketTool(env, ownerId, input),
     authorityDenied: (tool, required, cycleId) => toolEnvelope(env, { cycle_id: cycleId }, {
       code: 'AUTHORITY_DENIED',
-      message: `${tool} requires authority level ${required}; current level is ${authorityLevel(env)}.`,
+      message: `${tool} requires authority level ${required}; current level is ${authorityValue(configuredAuthority(env))}.`,
     }),
   });
 }
@@ -3427,14 +3444,23 @@ function easternClock(value = Date.now()) {
 
 export default {
   async fetch(request, env, ctx) {
-    try { return await route(request, env, ctx); }
+    try {
+      configuredAuthority(env);
+      return await route(request, env, ctx);
+    }
     catch (error) {
       console.error('NUVO VSIM v5 shadow error', error);
+      if (error instanceof AuthorityConfigurationError) return json(systemFault(error), 503);
       return json({ error: 'FAIL_CLOSED', reason: error.message }, 503);
     }
   },
   async scheduled(controller, env, ctx) {
     ctx.waitUntil((async () => {
+      try { configuredAuthority(env); }
+      catch (error) {
+        console.error(JSON.stringify(systemFault(error)));
+        return;
+      }
       const owners = await env.DB.prepare(`SELECT owner_id FROM broker_connections
         WHERE status IN ('CONNECTED','DEGRADED') ORDER BY updated_at ASC`).all();
       const clock = easternClock(controller.scheduledTime);
@@ -3464,6 +3490,12 @@ export default {
     })());
   },
   async queue(batch, env) {
+    try { configuredAuthority(env); }
+    catch (error) {
+      console.error(JSON.stringify(systemFault(error)));
+      for (const message of batch.messages) message.retry();
+      return;
+    }
     for (const message of batch.messages) {
       const ownerId = String(message.body?.ownerId ?? '');
       const update = message.body?.update;

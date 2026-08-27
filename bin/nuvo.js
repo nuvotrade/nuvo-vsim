@@ -12,7 +12,9 @@
 import { NuvoEngine } from '../src/engine.js';
 import { SyntheticProvider } from '../src/truth/providers/synthetic.js';
 import { PaperBroker } from '../src/execution/broker/paper.js';
-import { AUTHORITY, AUTHORITY_NAME, PROMOTION_GATES } from '../src/constitution/authority.js';
+import {
+  AUTHORITY, AUTHORITY_NAME, PROMOTION_GATES, validateAuthorityLevel,
+} from '../src/constitution/authority.js';
 import { DEFAULT_LIMITS, LIMIT_BASIS } from '../src/constitution/limits.js';
 import { buildView, render } from '../src/dashboard/view.js';
 import { StrategyRegistry } from '../src/registry/strategy_registry.js';
@@ -46,7 +48,7 @@ function demoEngine({ ivMult = 1.30, nav = 250_000, authority = AUTHORITY.AUTO_E
   const broker = new PaperBroker({ cash: nav, seed: `${seed}-broker`, now: () => now });
   const engine = new NuvoEngine({
     provider, broker, nav, symbols: DEMO_SYMBOLS, approved: DEMO_SYMBOLS,
-    authorityLevel: authority, clock: () => now,
+    authorityLevel: validateAuthorityLevel(authority, { source: 'CLI authority' }), clock: () => now,
   });
   engine.registry.get('VSIM-001')
     .transition('VALIDATED', 'research gates cleared')

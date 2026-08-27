@@ -21,6 +21,96 @@ export const AUTHORITY_NAME = Object.freeze(
   Object.fromEntries(Object.entries(AUTHORITY).map(([k, v]) => [v, k])),
 );
 
+const VALIDATED_AUTHORITIES = new WeakSet();
+
+class ValidatedAuthority {
+  #level;
+
+  constructor(level) {
+    this.#level = level;
+    VALIDATED_AUTHORITIES.add(this);
+    Object.freeze(this);
+  }
+
+  valueOf() { return this.#level; }
+  toString() { return String(this.#level); }
+  toJSON() { return this.#level; }
+}
+
+export class AuthorityConfigurationError extends Error {
+  constructor(code, message, detail = {}) {
+    super(message);
+    this.name = 'AuthorityConfigurationError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+/**
+ * Create the opaque authority value required by every behavioral gate.
+ *
+ * Missing authority is a configuration fault, not implicit SHADOW consent.
+ * The private WeakSet means an ordinary number or lookalike object cannot be
+ * passed to a gate by convention: it is rejected at runtime.
+ */
+export function validateAuthorityLevel(raw, { source = 'authority' } = {}) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+    throw new AuthorityConfigurationError(
+      'AUTHORITY_CONFIG_MISSING',
+      `${source} must be configured explicitly.`,
+      { source },
+    );
+  }
+  const level = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(level)
+    || level < AUTHORITY.RESEARCH_ONLY || level > AUTHORITY.AUTO_PORTFOLIO) {
+    throw new AuthorityConfigurationError(
+      'AUTHORITY_CONFIG_INVALID',
+      `${source} must be an integer from ${AUTHORITY.RESEARCH_ONLY} through ${AUTHORITY.AUTO_PORTFOLIO}.`,
+      { source, received: String(raw) },
+    );
+  }
+  return new ValidatedAuthority(level);
+}
+
+export function isValidatedAuthority(value) {
+  return typeof value === 'object' && value !== null && VALIDATED_AUTHORITIES.has(value);
+}
+
+/** Unwrap only at serialization, storage, display, or arithmetic boundaries. */
+export function authorityValue(authority) {
+  if (!isValidatedAuthority(authority)) {
+    throw new AuthorityConfigurationError(
+      'AUTHORITY_VALUE_UNVALIDATED',
+      'A behavioral authority gate received an unvalidated value.',
+    );
+  }
+  return Number(authority);
+}
+
+export function capAuthority(authority, maximum) {
+  const level = authorityValue(authority);
+  if (!Number.isInteger(maximum)
+    || maximum < AUTHORITY.RESEARCH_ONLY || maximum > AUTHORITY.AUTO_PORTFOLIO) {
+    throw new AuthorityConfigurationError(
+      'AUTHORITY_CAP_INVALID', 'Authority cap must be a constitutional ladder level.',
+      { maximum },
+    );
+  }
+  return validateAuthorityLevel(Math.min(level, maximum), { source: 'operational authority cap' });
+}
+
+export function authorityAtLeast(authority, required) {
+  if (!Number.isInteger(required)
+    || required < AUTHORITY.RESEARCH_ONLY || required > AUTHORITY.AUTO_PORTFOLIO) {
+    throw new AuthorityConfigurationError(
+      'AUTHORITY_REQUIREMENT_INVALID', 'Required authority must be a constitutional ladder level.',
+      { required },
+    );
+  }
+  return authorityValue(authority) >= required;
+}
+
 /** What each tier is permitted to do. */
 export const CAPABILITIES = Object.freeze({
   0: { research: true, rank: false, propose: false, submit: false, manage: false },
@@ -76,17 +166,18 @@ export const CAPITAL_AUTHORITY_FRACTION = Object.freeze({
 });
 
 export function can(level, capability) {
-  return Boolean(CAPABILITIES[level]?.[capability]);
+  return Boolean(CAPABILITIES[authorityValue(level)]?.[capability]);
 }
 
 /** Assert a capability, returning a Violation instead of throwing. */
 export function requireCapability(level, capability) {
   if (can(level, capability)) return null;
+  const numericLevel = authorityValue(level);
   return violation(
     TIER.TRUTH,
     'AUTHORITY_INSUFFICIENT',
-    `Authority ${level} (${AUTHORITY_NAME[level]}) may not '${capability}'.`,
-    { level, capability, required: lowestLevelFor(capability) },
+    `Authority ${numericLevel} (${AUTHORITY_NAME[numericLevel]}) may not '${capability}'.`,
+    { level: numericLevel, capability, required: lowestLevelFor(capability) },
   );
 }
 
@@ -103,7 +194,8 @@ export function lowestLevelFor(capability) {
  * Promotion is one step at a time; skipping tiers is not a thing.
  */
 export function evaluatePromotion(currentLevel, evidence) {
-  const target = currentLevel + 1;
+  const current = authorityValue(currentLevel);
+  const target = current + 1;
   if (target > AUTHORITY.AUTO_PORTFOLIO) {
     return { eligible: false, target: null, failures: ['Already at maximum authority.'] };
   }
@@ -150,7 +242,12 @@ export function evaluatePromotion(currentLevel, evidence) {
       `profitFactor ${profitFactor} < ${gate.minProfitFactor}`);
   }
 
-  return { eligible: failures.length === 0, target, gate, failures };
+  return {
+    eligible: failures.length === 0,
+    target: validateAuthorityLevel(target, { source: 'promotion target' }),
+    gate,
+    failures,
+  };
 }
 
 /**
@@ -159,6 +256,7 @@ export function evaluatePromotion(currentLevel, evidence) {
  * through the same gates as the first time.
  */
 export function evaluateDemotion(currentLevel, evidence) {
+  const current = authorityValue(currentLevel);
   const reasons = [];
   if ((evidence.constitutionalBreaches ?? 0) > 0) reasons.push('constitutional breach recorded');
   if ((evidence.brierScore ?? 0) > 0.28) reasons.push(`brier score ${evidence.brierScore} indicates broken calibration`);
@@ -168,6 +266,10 @@ export function evaluateDemotion(currentLevel, evidence) {
   // A breach costs everything above PROPOSE; an integrity failure costs everything.
   const target = evidence.dataIntegrityFailure
     ? AUTHORITY.RESEARCH_ONLY
-    : Math.min(currentLevel, AUTHORITY.PROPOSE);
-  return { demote: target < currentLevel, target, reasons };
+    : Math.min(current, AUTHORITY.PROPOSE);
+  return {
+    demote: target < current,
+    target: validateAuthorityLevel(target, { source: 'demotion target' }),
+    reasons,
+  };
 }

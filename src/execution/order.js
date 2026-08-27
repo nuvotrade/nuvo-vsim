@@ -9,6 +9,7 @@
 import { isNum } from '../math/stats.js';
 import { sha256 } from '../math/sha256.js';
 import { TIER, violation } from '../constitution/hierarchy.js';
+import { authorityValue } from '../constitution/authority.js';
 
 export const ORDER_STATE = Object.freeze({
   DRAFT: 'DRAFT',
@@ -130,7 +131,7 @@ export function buildOrder({
       timeInForce: 'DAY',
       ladder: priceLadder({ structure: candidate.structure, side: 'OPEN' }),
       positionContractId: position?.id ?? null,
-      authorityLevel,
+      authorityLevel: authorityValue(authorityLevel),
       modelVersion,
       codeVersion,
       // What NUVO believed at submission — compared against the fill later

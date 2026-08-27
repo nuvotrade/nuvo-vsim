@@ -7,6 +7,9 @@ import { registerCatalogue } from '../src/registry/strategies/vsim_strategies.js
 import { EvidenceStore } from '../src/evidence/store.js';
 import { buildEvidence, sealOutcome, verifyEvidence } from '../src/evidence/package.js';
 import { Rng } from '../src/math/random.js';
+import { AUTHORITY, validateAuthorityLevel } from '../src/constitution/authority.js';
+
+const TEST_AUTHORITY = validateAuthorityLevel(AUTHORITY.PROPOSE, { source: 'research test authority' });
 
 const THRESHOLDS = { minExpectancy: 5, minProfitFactor: 1.15, maxDrawdownPct: 0.15, minTrades: 40 };
 const pass = { expectancy: 20, profitFactor: 1.6, maxDrawdownPct: 0.08, trades: 120 };
@@ -172,7 +175,7 @@ describe('strategies are killable (§24)', () => {
 describe('evidence chain', () => {
   const mk = (i) => buildEvidence({
     cycleId: `C${i}`, now: 1000 + i, decision: 'CSP', candidates: [],
-    modelVersion: 'm1', codeVersion: 'c1', limits: { version: 'v5' }, authorityLevel: 2,
+    modelVersion: 'm1', codeVersion: 'c1', limits: { version: 'v5' }, authorityLevel: TEST_AUTHORITY,
   });
 
   test('a package verifies against its own hash', () => {

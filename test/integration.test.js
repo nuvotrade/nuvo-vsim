@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { NuvoEngine } from '../src/engine.js';
 import { SyntheticProvider } from '../src/truth/providers/synthetic.js';
 import { PaperBroker } from '../src/execution/broker/paper.js';
-import { AUTHORITY } from '../src/constitution/authority.js';
+import { AUTHORITY, authorityValue, validateAuthorityLevel } from '../src/constitution/authority.js';
 import { SWITCH } from '../src/constitution/killswitch.js';
 import { OUTCOME } from '../src/pipeline/cycle.js';
 import { STRUCTURE } from '../src/structures/structure.js';
@@ -44,7 +44,7 @@ function build({
   const broker = new PaperBroker({ cash: nav, seed: `${seed}-broker`, now: () => NOW });
   const eng = new NuvoEngine({
     provider, broker, nav, symbols: SYMBOLS, approved: SYMBOLS,
-    authorityLevel: authority, clock: () => NOW,
+    authorityLevel: validateAuthorityLevel(authority, { source: 'integration test authority' }), clock: () => NOW,
     evidenceStore,
   });
   eng.registry.get('VSIM-001')
@@ -190,7 +190,7 @@ describe('authority gates behaviour, not just labels', () => {
     const { eng } = build({ ivMult: 1.45 });
     const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
     assert.equal(r.outcome, OUTCOME.ORDER);
-    eng.authorityLevel = AUTHORITY.SHADOW;
+    eng.authorityLevel = validateAuthorityLevel(AUTHORITY.SHADOW, { source: 'integration test demotion' });
     const s = await eng.submit(r);
     assert.equal(s.ok, false);
     assert.match(s.reason, /authority/i);
@@ -227,11 +227,11 @@ describe('authority gates behaviour, not just labels', () => {
 
   test('demotion beats promotion when a breach is on the record', () => {
     const { eng } = build();
-    eng.authorityLevel = AUTHORITY.AUTO_LIFECYCLE;
+    eng.authorityLevel = validateAuthorityLevel(AUTHORITY.AUTO_LIFECYCLE, { source: 'integration test promotion' });
     eng.breaches.push({ code: 'TEST', message: 'x' });
     const r = eng.reviewAuthority();
     assert.equal(r.direction, 'DEMOTION');
-    assert.ok(eng.authorityLevel < AUTHORITY.AUTO_LIFECYCLE);
+    assert.ok(authorityValue(eng.authorityLevel) < AUTHORITY.AUTO_LIFECYCLE);
   });
 
   test('paper and shadow observations cannot earn live authority', () => {
@@ -246,7 +246,7 @@ describe('authority gates behaviour, not just labels', () => {
     assert.equal(eng.authorityEvidence().liveObservations, 0);
     const review = eng.reviewAuthority();
     assert.equal(review.changed, false);
-    assert.equal(eng.authorityLevel, AUTHORITY.SHADOW);
+    assert.equal(authorityValue(eng.authorityLevel), AUTHORITY.SHADOW);
   });
 });
 

@@ -2,11 +2,13 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AUTHORITY, can, requireCapability, evaluatePromotion, evaluateDemotion,
-  CAPITAL_AUTHORITY_FRACTION,
+  CAPITAL_AUTHORITY_FRACTION, authorityValue, validateAuthorityLevel,
 } from '../src/constitution/authority.js';
 import { KillSwitchBoard, SWITCH } from '../src/constitution/killswitch.js';
 import { DEFAULT_LIMITS, amend } from '../src/constitution/limits.js';
 import { TIER, violation, governingTier, bySeverity } from '../src/constitution/hierarchy.js';
+
+const authority = (level) => validateAuthorityLevel(level, { source: 'test authority' });
 
 describe('hierarchy: TRUTH > SURVIVAL > EXPECTANCY > CAPITAL EFFICIENCY > INCOME', () => {
   test('tiers are strictly ordered', () => {
@@ -35,24 +37,24 @@ describe('hierarchy: TRUTH > SURVIVAL > EXPECTANCY > CAPITAL EFFICIENCY > INCOME
 
 describe('authority tiers', () => {
   test('research-only cannot rank, propose, or submit', () => {
-    assert.equal(can(AUTHORITY.RESEARCH_ONLY, 'rank'), false);
-    assert.equal(can(AUTHORITY.RESEARCH_ONLY, 'submit'), false);
+    assert.equal(can(authority(AUTHORITY.RESEARCH_ONLY), 'rank'), false);
+    assert.equal(can(authority(AUTHORITY.RESEARCH_ONLY), 'submit'), false);
   });
 
   test('shadow may rank but never submit', () => {
-    assert.equal(can(AUTHORITY.SHADOW, 'rank'), true);
-    assert.equal(can(AUTHORITY.SHADOW, 'submit'), false);
-    assert.match(String(requireCapability(AUTHORITY.SHADOW, 'submit')), /AUTHORITY_INSUFFICIENT/);
+    assert.equal(can(authority(AUTHORITY.SHADOW), 'rank'), true);
+    assert.equal(can(authority(AUTHORITY.SHADOW), 'submit'), false);
+    assert.match(String(requireCapability(authority(AUTHORITY.SHADOW), 'submit')), /AUTHORITY_INSUFFICIENT/);
   });
 
   test('propose builds orders but requires approval', () => {
-    assert.equal(can(AUTHORITY.PROPOSE, 'propose'), true);
-    assert.equal(can(AUTHORITY.PROPOSE, 'submit'), false);
+    assert.equal(can(authority(AUTHORITY.PROPOSE), 'propose'), true);
+    assert.equal(can(authority(AUTHORITY.PROPOSE), 'submit'), false);
   });
 
   test('only lifecycle authority manages positions autonomously', () => {
-    assert.equal(can(AUTHORITY.AUTO_ENTRY, 'manage'), false);
-    assert.equal(can(AUTHORITY.AUTO_LIFECYCLE, 'manage'), true);
+    assert.equal(can(authority(AUTHORITY.AUTO_ENTRY), 'manage'), false);
+    assert.equal(can(authority(AUTHORITY.AUTO_LIFECYCLE), 'manage'), true);
   });
 
   test('capital authority increases monotonically with tier', () => {
@@ -64,29 +66,29 @@ describe('authority tiers', () => {
   });
 
   test('shadow promotion requires an explicit Principal amendment, not an observation count', () => {
-    const evidenceAlone = evaluatePromotion(AUTHORITY.SHADOW, {
+    const evidenceAlone = evaluatePromotion(authority(AUTHORITY.SHADOW), {
       liveObservations: 10_000, brierScore: 0.01, calibrationSlope: 1,
     });
     assert.equal(evidenceAlone.eligible, false);
     assert.ok(evidenceAlone.failures.some((failure) => failure.includes('Principal')));
-    const amended = evaluatePromotion(AUTHORITY.SHADOW, {
+    const amended = evaluatePromotion(authority(AUTHORITY.SHADOW), {
       principalConstitutionAmendment: true,
     });
     assert.equal(amended.eligible, true);
-    assert.equal(amended.target, AUTHORITY.PROPOSE);
+    assert.equal(authorityValue(amended.target), AUTHORITY.PROPOSE);
   });
 
   test('promotion is one step at a time', () => {
-    const r = evaluatePromotion(AUTHORITY.SHADOW, {
+    const r = evaluatePromotion(authority(AUTHORITY.SHADOW), {
       principalConstitutionAmendment: true,
       liveObservations: 10_000, brierScore: 0.01, calibrationSlope: 1.0,
       executionEdgeRetained: 0.99, constitutionalBreaches: 0, maxDrawdownPct: 0.01, profitFactor: 9,
     });
-    assert.equal(r.target, AUTHORITY.PROPOSE, 'cannot leap past PROPOSE');
+    assert.equal(authorityValue(r.target), AUTHORITY.PROPOSE, 'cannot leap past PROPOSE');
   });
 
   test('autonomy demands proven execution, not just proven theory', () => {
-    const r = evaluatePromotion(AUTHORITY.PROPOSE, {
+    const r = evaluatePromotion(authority(AUTHORITY.PROPOSE), {
       liveObservations: 200, brierScore: 0.15, calibrationSlope: 0.95,
       executionEdgeRetained: 0.10, constitutionalBreaches: 0,
     });
@@ -95,14 +97,40 @@ describe('authority tiers', () => {
   });
 
   test('a single constitutional breach costs autonomy immediately', () => {
-    const d = evaluateDemotion(AUTHORITY.AUTO_LIFECYCLE, { constitutionalBreaches: 1 });
+    const d = evaluateDemotion(authority(AUTHORITY.AUTO_LIFECYCLE), { constitutionalBreaches: 1 });
     assert.equal(d.demote, true);
-    assert.equal(d.target, AUTHORITY.PROPOSE);
+    assert.equal(authorityValue(d.target), AUTHORITY.PROPOSE);
   });
 
   test('a data-integrity failure costs everything', () => {
-    const d = evaluateDemotion(AUTHORITY.AUTO_PORTFOLIO, { dataIntegrityFailure: true });
-    assert.equal(d.target, AUTHORITY.RESEARCH_ONLY);
+    const d = evaluateDemotion(authority(AUTHORITY.AUTO_PORTFOLIO), { dataIntegrityFailure: true });
+    assert.equal(authorityValue(d.target), AUTHORITY.RESEARCH_ONLY);
+  });
+
+  test('authority must be explicit, integral, and within the constitutional ladder', () => {
+    assert.throws(() => validateAuthorityLevel(undefined, { source: 'NUVO_AUTHORITY_LEVEL' }),
+      (error) => error.code === 'AUTHORITY_CONFIG_MISSING');
+    for (const invalid of ['', 'not-a-level', NaN, -1, 2.5, 6]) {
+      assert.throws(() => validateAuthorityLevel(invalid, { source: 'NUVO_AUTHORITY_LEVEL' }),
+        (error) => error.code === (invalid === '' ? 'AUTHORITY_CONFIG_MISSING' : 'AUTHORITY_CONFIG_INVALID'));
+    }
+  });
+
+  test('behavioral guards reject plain numbers as a system fault', () => {
+    assert.throws(() => can(AUTHORITY.AUTO_PORTFOLIO, 'submit'),
+      (error) => error.code === 'AUTHORITY_VALUE_UNVALIDATED');
+  });
+
+  test('an invalid authority cannot suppress automatic demotion', () => {
+    assert.throws(
+      () => evaluateDemotion(Number.NaN, { dataIntegrityFailure: true }),
+      (error) => error.code === 'AUTHORITY_VALUE_UNVALIDATED',
+    );
+    const demotion = evaluateDemotion(authority(AUTHORITY.AUTO_PORTFOLIO), {
+      dataIntegrityFailure: true,
+    });
+    assert.equal(demotion.demote, true);
+    assert.equal(authorityValue(demotion.target), AUTHORITY.RESEARCH_ONLY);
   });
 });
 

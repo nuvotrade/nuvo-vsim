@@ -23,7 +23,7 @@ import { buildOrder } from '../execution/order.js';
 import { createPositionContract } from '../lifecycle/contract.js';
 import { buildEvidence } from '../evidence/package.js';
 import { TIER, violation, governingTier, TIER_NAME } from '../constitution/hierarchy.js';
-import { can, CAPITAL_AUTHORITY_FRACTION } from '../constitution/authority.js';
+import { authorityValue, can, CAPITAL_AUTHORITY_FRACTION } from '../constitution/authority.js';
 import { SWITCH } from '../constitution/killswitch.js';
 import {
   lognormalTerminal, jumpDiffusionTerminal, studentTTerminal, ensembleTerminal,
@@ -228,7 +228,7 @@ export async function runCycle(ctx) {
       reconcilePositions: reconcilePositions ?? [],
       reconcileAccount,
       reconcileOpenOrders: reconcileOpenOrders ?? [],
-      nav, drawdownPct, authorityLevel, strategyId,
+      nav, drawdownPct, authorityLevel: authorityValue(authorityLevel), strategyId,
       approved: approved ?? [],
       limits,
       dteTargets, baseRiskPct, maxGovernanceAttempts,

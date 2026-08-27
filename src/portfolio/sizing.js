@@ -8,7 +8,7 @@
  * how good it is — authority over capital is earned, not assumed.
  */
 import { clamp, isNum } from '../math/stats.js';
-import { CAPITAL_AUTHORITY_FRACTION } from '../constitution/authority.js';
+import { authorityValue, CAPITAL_AUTHORITY_FRACTION } from '../constitution/authority.js';
 
 /**
  * Q — opportunity quality, from RAROC relative to the hurdle.
@@ -97,7 +97,7 @@ export function sizePosition({
     holdingsCount,
   });
 
-  const authorityFraction = CAPITAL_AUTHORITY_FRACTION[authorityLevel] ?? 0;
+  const authorityFraction = CAPITAL_AUTHORITY_FRACTION[authorityValue(authorityLevel)];
   const riskBudget = nav * baseRiskPct * Q * C * R * D;
 
   const perContractRisk = candidate.capital.economicCapital / Math.max(1, candidate.structure.contracts);
