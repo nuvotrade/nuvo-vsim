@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "artifactSetId": "VSIM-AMENDMENTS-1-2-ORIGINALS-2026-08-27",
+  "classification": "PRESERVATION_ONLY",
+  "governanceEffect": "NONE",
+  "baseCommit": "55052d32ab03c3eb46b8c8a8af52770b479428a5",
+  "transferContainer": {
+    "filename": "AMENDMENT_1_AND_2_ORIGINALS_2026-08-27.zip",
+    "sha256": "babd0998882c8670c34eb323f34c64b7f5146c39e5bbe00b882ed602cc78f4fe",
+    "sizeBytes": 22220,
+    "committed": false,
+    "role": "TRANSFER_CONTAINER_ONLY"
+  },
+  "artifacts": [
+    {
+      "filename": "AMENDMENT_1_LIVE_UNIVERSE_SCAN_2026-08-27.docx",
+      "sha256": "bff748201613d6a1cf1e57d3645324a6807f57541b577925ca7eb63b1024738f",
+      "sizeBytes": 13889,
+      "verificationStatus": "VERIFIED",
+      "byteHandling": "Extracted from transfer container and committed without opening or resaving"
+    },
+    {
+      "filename": "AMENDMENT_2_MIN_MARKET_CAP_4B_2026-08-27.docx",
+      "sha256": "2615a55b559d759a0ed053b775943eb95c137af9f2a2f2aaeb5775b4ecbf580b",
+      "sizeBytes": 13086,
+      "verificationStatus": "VERIFIED",
+      "byteHandling": "Extracted from transfer container and committed without opening or resaving"
+    }
+  ],
+  "verification": {
+    "method": "Independent SHA-256 recomputation of extracted binary bytes; transfer ZIP and DOCX container CRCs validated",
+    "openedOrResaved": false,
+    "result": "ALL_MATCH",
+    "findingId": "AMENDMENT_ARTIFACTS_NOT_INDEPENDENTLY_VERIFIABLE",
+    "findingDisposition": "RESOLVED",
+    "recurrenceRisk": "Canonical governance artifacts required manual transfer between isolated environments because they were not under version control"
+  },
+  "activation": {
+    "amendment4Signed": false,
+    "amendment4Activated": false,
+    "note": "This preservation record does not sign, activate, or amend any governance instrument."
+  }
+}
