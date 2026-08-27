@@ -1,0 +1,167 @@
+{
+  "packet": "PACKET_0_FREEZE_AND_VERIFICATION_MATRIX",
+  "status": "COMPLETE_READ_ONLY",
+  "freezeDate": "2026-08-27",
+  "authority": 2,
+  "runtimeChanged": false,
+  "deployed": false,
+  "source": {
+    "authoritativeRemote": "https://github.com/nuvotrade/nuvo-vsim",
+    "branch": "claude/nuvo-vsim-architecture-il96te",
+    "head": "5b47aa29a766d77706fe44568f1744855422c9b9",
+    "tag": "v5-2026-08-27-authority-storage-recovery",
+    "remoteTagObject": "e018013a830af9d929befd799a0621e9c17bd580",
+    "taggedCommit": "5b47aa29a766d77706fe44568f1744855422c9b9",
+    "localPathRole": "incidental_review_checkout"
+  },
+  "worker": {
+    "name": "nuvo-vsim-v5-shadow",
+    "versionId": "c909de83-308c-4a56-9336-5db2edf0b463",
+    "versionNumber": 126,
+    "sourceCommit": "b9474f218042497331e530424babcb1f23d7d3ab",
+    "artifactBytes": 1771781,
+    "artifactSha256": "7e9b775c59d7c84cf34e673162284fe1e702ae38445809b1c5a92bf13315067e",
+    "scriptEtag": "6333858ec976fac4f6c9651e2a57cee42830aadf2b98061236b7cadf241a9208",
+    "preservedLiveVsLocalByteMatch": true,
+    "limitsVersion": "constitution-v5.2.1",
+    "modelVersion": "nuvo-model-5.0.1-execution-cost-v2"
+  },
+  "tests": {
+    "command": "npm test",
+    "suites": 66,
+    "tests": 390,
+    "passed": 390,
+    "failed": 0,
+    "skipped": 0
+  },
+  "d1": {
+    "exportPath": "/Users/nuvo/Documents/Codex/2026-08-23/vsim-v5-checkpoints/2026-08-27-packet-0-freeze/d1-packet-0-freeze.sql",
+    "exportSha256": "e977b3fe20ada45b638a39b9d2b8b652f1f3fb19a38ba07735f09da0d65f8bc8",
+    "restoredSqliteSha256": "dc14916075208df87d9949d7ad3ab4d1f628eda54a180aadc060505df8c25620",
+    "integrityCheck": "ok",
+    "foreignKeyErrors": 0,
+    "evidenceCount": 74,
+    "cycleContextCount": 76,
+    "custodyLatestCount": 1,
+    "sequenceMin": 0,
+    "sequenceMax": 73,
+    "sequenceGaps": 0,
+    "chainLinkErrors": 0,
+    "authorityConstraints": {
+      "evidence_index": "BETWEEN 0 AND 5",
+      "cycle_context_index": "BETWEEN 0 AND 5"
+    },
+    "freezeHead": {
+      "sequence": 73,
+      "cycleId": "CY-ba629ba31c-1986497",
+      "evidenceHash": "bbe49c5b4d0de3f79d70fbc9ac959842d0f8822e1c94b81377cdf3aa0b4837d1",
+      "previousHash": "9ed88dbbe0a13e61b726d655bc81c3c75907dc5136b64f84c909141bf817720c",
+      "chainHash": "4347666d8097a63d2134a5b1dbbe0fa224b314e88ec8acd09dd821663a3438b9",
+      "decision": "REFUSED",
+      "createdAt": "2026-08-27T16:15:38.182Z"
+    },
+    "authority2RecoveryMilestone": {
+      "sequence": 62,
+      "chainHash": "d116cf612234caac69736f0c8fe03ce9f8377f6212b9be83d979989217d43fc7"
+    }
+  },
+  "r2": {
+    "listedObjectCount": 150,
+    "evidencePackages": 74,
+    "cyclePackages": 76,
+    "parseErrors": 0,
+    "fieldMismatches": 0,
+    "missingEvidencePackages": 0,
+    "orphanEvidencePackages": 0,
+    "missingCyclePackages": 0,
+    "orphanCyclePackages": 0
+  },
+  "historicalAsymmetry": {
+    "contextOnlyCount": 12,
+    "contextOnlyDisposition": "all_within_known_2026_08_26_authority_storage_outage",
+    "contextOnlyCycles": [
+      "CY-ba629ba31c-1986402",
+      "CY-ba629ba31c-1986403",
+      "CY-ba629ba31c-1986404",
+      "CY-ba629ba31c-1986407",
+      "CY-ba629ba31c-1986408",
+      "CY-ba629ba31c-1986409",
+      "CY-ba629ba31c-1986410",
+      "CY-ba629ba31c-1986411",
+      "CY-ba629ba31c-1986412",
+      "CY-ba629ba31c-1986413",
+      "CY-ba629ba31c-1986414",
+      "CY-ba629ba31c-1986415"
+    ],
+    "evidenceOnlyCount": 10,
+    "evidenceOnlyDisposition": "predates_cycle_context_indexing",
+    "postRecoveryUnexplainedGaps": 0
+  },
+  "postRecoveryEvidence": {
+    "sequences": "63-73",
+    "count": 11,
+    "allDecision": "REFUSED",
+    "from": "2026-08-27T13:45:39.792Z",
+    "to": "2026-08-27T16:15:38.182Z",
+    "reasonCounts": {
+      "FACT_UNVERIFIED:SCHWAB_HISTORY_SHORT:52": 10,
+      "CUSTODY_RISK_MAPPING_REQUIRED:CUSTODY_CHAIN_UNAVAILABLE:CBRS260828C00210000": 1
+    },
+    "classificationBaseline": "C-01",
+    "historyShortObservedDuringRth": true,
+    "historyShortConstantBarCount": 52,
+    "uiCauseMismatch": {
+      "recordedCause": "SCHWAB_HISTORY_SHORT:52",
+      "surfaceClaims": [
+        "market-data provider did not respond before the safety timeout",
+        "Timestamp missing"
+      ],
+      "supportedByRecord": false,
+      "status": "PROVENANCE_DEFECT_RECORDED_NOT_FIXED"
+    }
+  },
+  "cashProvenance": {
+    "observedAt": "2026-08-27T16:20:09.866Z",
+    "snapshotHash": "803f7d959d27039e5802dee1c35f5eee9249c4441f80f57886abbc3f629ab07e",
+    "cash": 3433.02,
+    "reportedCashBalance": 3433.02,
+    "withdrawableCash": 89318.34,
+    "buyingPower": 178636.68,
+    "nav": 164440.52,
+    "marginDebit": 0,
+    "governorInputNamed": "settledCash",
+    "actualDerivation": "nav_minus_positionMarketValue_when_finite_else_reportedCash",
+    "settlementStatusAuthoritative": false,
+    "status": "UNVERIFIED_MISNAMED",
+    "earlierBaseline": {
+      "nav": 167242.68,
+      "cash": 3468,
+      "impliedMarkedPositions": 163774.68
+    },
+    "freezeImpliedMarkedPositions": 161007.5,
+    "changes": {
+      "nav": -2802.16,
+      "impliedMarkedPositions": -2767.18,
+      "cashResidual": -34.98
+    },
+    "demonstratedProperty": "funding_input_is_residual_between_nav_and_summed_marked_positions"
+  },
+  "optionMarkObservation": {
+    "observedSeparatelyFromCashSnapshot": true,
+    "asOfApprox": "2026-08-27T09:21:00-07:00",
+    "staleBadge": false,
+    "CBRS260828C00210000": 0.08,
+    "SPCX260828C00143000": 1.02,
+    "contractsEach": 5,
+    "CBRSMarkedLiability": 40,
+    "SPCXMarkedLiability": 510,
+    "SPCXEntryCredit": 675,
+    "SPCXOpenOptionProfitBeforeFees": 165,
+    "purpose": "pre_expiry_setup_not_outcome_prediction"
+  },
+  "scope": {
+    "accountMask": "4315",
+    "mnq": "OBSERVED_FLOOR",
+    "packet3Started": false
+  }
+}

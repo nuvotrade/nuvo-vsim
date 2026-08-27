@@ -1,0 +1,26 @@
+Packet 0 pre-artifact worktree inventory
+Captured: 2026-08-27
+Branch: claude/nuvo-vsim-architecture-il96te
+HEAD: 5b47aa29a766d77706fe44568f1744855422c9b9
+
+ M cloudflare/worker.js
+ M src/engine.js
+ M test/authority_runtime.test.js
+ M test/integration.test.js
+ M test/production_adapters.test.js
+?? docs/ADAPTER_FAILURE_CLASSIFICATION_AUDIT.md
+?? docs/COPILOT_BASIS_VOCABULARY_REVIEW.md
+?? docs/COPILOT_C1_HOLD_CLOSE_SPECIFICATION.md
+?? docs/COPILOT_REVIEW_CASES_SPECIFICATION.md
+?? docs/DRAWDOWN_LADDER_DECISION_PACKAGE.md
+?? docs/FACTOR_GREEKS_BETA_DECISION_PACKAGE.md
+?? docs/INHERITED_BOOK_TRANSITION_EVIDENCE_TEMPLATE.md
+?? docs/LONG_OPTION_LEG_LINKAGE_AUDIT.md
+?? docs/MANDATE_COMPLETENESS_REVIEW.md
+?? docs/MNQ_OBSERVABILITY_AUDIT.md
+?? docs/RENEWAL_MODEL_SPECIFICATION.md
+?? docs/SMALL_ITEMS_REVIEW.md
+?? docs/STREAM_HEALTH_DECISION_PACKAGE.md
+?? src/system/
+
+Packet 0 did not alter, revert, or claim ownership of the pre-existing entries above.

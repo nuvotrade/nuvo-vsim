@@ -1,0 +1,14 @@
+Packet 0 test baseline
+Captured: 2026-08-27
+Working copy HEAD: 5b47aa29a766d77706fe44568f1744855422c9b9
+Command: npm test
+Underlying command: node --test test/*.test.js
+
+Suites: 66
+Tests: 390
+Passed: 390
+Failed: 0
+Skipped: 0
+Duration: approximately 6.85 seconds
+
+Result: PASS

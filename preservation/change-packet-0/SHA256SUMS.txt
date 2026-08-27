@@ -1,0 +1,5 @@
+1bb20081a4cd15fc62011662ca3569b1f0f684bff739876ae5e13bf156c194b2  docs/change-packets/PACKET_0_FREEZE_AND_VERIFICATION_MATRIX.md
+9cc1223a457e49dd7c82accdec7da2a15a4c99d97f3b23ddbabd659efe284026  preservation/change-packet-0/verification-matrix.json
+3eeebf5c0a1fb0a3ad6c4da06b50f6df2362e29435ee6b6eefa89e633ba9f0fb  preservation/change-packet-0/git-status.txt
+e64929154bebcdf37f11b4267ce21eef52fd8675a7da1adf810d4c9e82327832  preservation/change-packet-0/git-diff-stat.txt
+b93c5dca1630160458ab076e5a88f49ff59f720b3f944c122a4af3ec18f01075  preservation/change-packet-0/test-baseline.txt

@@ -1,0 +1,11 @@
+Packet 0 pre-artifact tracked diff summary
+Captured: 2026-08-27
+
+ cloudflare/worker.js             | 110 +++++++++++++++++++++++++++++++--------
+ src/engine.js                    |   9 +---
+ test/authority_runtime.test.js   |  73 +++++++++++++++++++++++++-
+ test/integration.test.js         |  17 ++++--
+ test/production_adapters.test.js |   5 ++
+ 5 files changed, 180 insertions(+), 34 deletions(-)
+
+This is a baseline inventory, not a Packet 0 diff.
