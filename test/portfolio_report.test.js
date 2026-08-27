@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
-  matchRealizedTrades, performanceFromBrokerRows, portfolioFromCustody, transactionFills,
+  COVERED_CALL_REVIEW_EXPIRY_DTE, matchRealizedTrades, performanceFromBrokerRows,
+  portfolioFromCustody, transactionFills,
 } from '../cloudflare/portfolio-report.js';
 
 function packet(overrides = {}) {
@@ -243,5 +244,88 @@ describe('canonical Schwab portfolio and performance reporting', () => {
     assert.ok(Math.abs(cbrs.distance_to_strike_pct - (22.96 / 187.04)) < 1e-12);
     assert.ok(cbrs.distance_to_strike_sigma > 1);
     assert.equal(cbrs.quote_freshness, 'LAST_MARKET_QUOTE');
+  });
+
+  test('builds fact-only covered-call reviews with exact accounting and no ranked action', () => {
+    const observedAt = '2026-08-27T20:00:00.000Z';
+    const optionSymbol = 'SPCX260828C00143000';
+    const report = portfolioFromCustody({
+      hash: 'custody-hash-1', observedAt,
+      account: { nav: 164_440.52, cash: 3_433.02, accounts: [{ accountMask: '4315' }] },
+      positions: [
+        { type: 'EQUITY', symbol: 'SPCX', quantity: 500, averagePrice: 145.18, marketValue: 70_500 },
+        { type: 'OPTION', symbol: optionSymbol, underlying: 'SPCX', right: 'call',
+          quantity: -5, multiplier: 100, averagePrice: 1.35, marketValue: -510,
+          strike: 143, expiration: '2026-08-28' },
+      ],
+      openOrders: [],
+    }, new Map([[optionSymbol, {
+      bid: 1, ask: 1.05, theta: -0.04, iv: 0.28, spot: 141,
+      dividendYield: 0.012, source: 'SCHWAB_MARKET_DATA_OPTION_QUOTE_REALTIME',
+      asof: observedAt, freshness: 'CURRENT',
+    }]]), { limits: {
+      version: 'constitution-test', maxSingleUnderlyingPct: 0.20,
+      maxExpirationPct: 0.25, minReservePct: 0.20, maxDeployedPct: 0.80,
+      riskFreeRate: 0.045,
+    } });
+
+    assert.equal(COVERED_CALL_REVIEW_EXPIRY_DTE, 2);
+    assert.equal(report.covered_call_reviews.length, 1);
+    const review = report.covered_call_reviews[0];
+    assert.equal(review.review_status, 'REVIEW_REQUIRED');
+    assert.equal(review.lifecycle_status, 'C1_UNSPECIFIED_NO_ACTION_RANKED');
+    assert.equal(review.custody_hash, 'custody-hash-1');
+    assert.deepEqual(review.reasons.map((reason) => reason.code), [
+      'EXPIRY_PROXIMITY', 'SHORT_CALL_BELOW_SHARE_BASIS', 'CONCENTRATION_BREACH',
+    ]);
+    assert.equal(review.reasons[2].classification, 'PREEXISTING_NONCONFORMING');
+    assert.equal(review.measurements.distance_to_strike_dollars.value, 2);
+    assert.equal(review.measurements.distance_to_strike_pct.value, 2 / 141);
+    assert.equal(review.measurements.theta_per_day.value, 20);
+    assert.equal(review.measurements.broker_average_price.value, 145.18);
+    assert.equal(review.measurements.strike_vs_broker_average.value, -2.18);
+    assert.equal(review.measurements.entry_credit.value, 675);
+    assert.equal(review.measurements.marked_liability.value, 510);
+    assert.equal(review.measurements.unrealized_option_pnl.value, 165);
+    assert.equal(review.measurements.btc_ask_per_share.value, 1.05);
+    assert.equal(review.measurements.btc_ask_notional.value, 525);
+    assert.equal(review.measurements.btc_estimated_fees.value, 4);
+    assert.equal(review.measurements.btc_total_estimate.value, 529);
+    assert.ok(Math.abs(review.measurements.risk_neutral_probability_otm.value
+      - 0.8320228299785722) < 1e-14);
+    assert.equal(review.measurements.risk_neutral_probability_otm.source, 'BLACK_SCHOLES_STRIKE_IV');
+    assert.match(review.measurements.risk_neutral_probability_otm.derivation, /1 - N\(d2\)/u);
+    assert.deepEqual(review.measurements.risk_neutral_probability_otm.inputs, {
+      spot: 141, strike: 143, strike_iv: 0.28, dte: 1,
+      risk_free_rate: 0.045, dividend_yield: 0.012,
+    });
+    assert.equal(review.approximation_note, 'European approximation; excludes early exercise.');
+    assert.doesNotMatch(JSON.stringify(review),
+      /\b(?:EXIT|ROLL|HOLD|POP|ACTION_REQUIRED|ACTION_RECOMMENDED|BEST ACTION|RECOMMEND|BUY TO CLOSE|SELL SHARES|CLOSE NOW)\b/iu);
+  });
+
+  test('omits risk-neutral probability without a verified dividend input and uses actual multipliers', () => {
+    const observedAt = '2026-08-27T20:00:00.000Z';
+    const optionSymbol = 'ADJ260828C00143000';
+    const report = portfolioFromCustody({
+      observedAt, account: { nav: 20_000, cash: 2_000 },
+      positions: [
+        { type: 'EQUITY', symbol: 'ADJ', quantity: 100, averagePrice: 140, marketValue: 14_100 },
+        { type: 'OPTION', symbol: optionSymbol, underlying: 'ADJ', right: 'call',
+          quantity: -2, multiplier: 10, averagePrice: 2.5, marketValue: -30,
+          strike: 143, expiration: '2026-08-28' },
+      ], openOrders: [],
+    }, new Map([[optionSymbol, {
+      ask: 2, theta: -0.02, iv: 0.28, spot: 141,
+      source: 'SCHWAB_MARKET_DATA_OPTION_QUOTE_REALTIME', asof: observedAt, freshness: 'CURRENT',
+    }]]), { limits: { maxSingleUnderlyingPct: 0.20, riskFreeRate: 0.045 } });
+
+    const review = report.covered_call_reviews[0];
+    assert.equal(review.measurements.btc_ask_notional.value, 40);
+    assert.equal(review.measurements.btc_estimated_fees.value, 1.6);
+    assert.equal(review.measurements.btc_total_estimate.value, 41.6);
+    assert.equal(review.measurements.risk_neutral_probability_otm.status, 'UNAVAILABLE');
+    assert.equal(review.measurements.risk_neutral_probability_otm.value, null);
+    assert.equal(review.measurements.risk_neutral_probability_otm.reason, 'DIVIDEND_YIELD_UNVERIFIED');
   });
 });

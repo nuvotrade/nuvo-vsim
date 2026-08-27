@@ -1,6 +1,10 @@
+import { dteToT, probItm } from '../src/math/black_scholes.js';
+import { DEFAULT_COSTS } from '../src/underwriter/costs.js';
+
 const CURRENCY_ASSETS = new Set(['CURRENCY', 'CASH_EQUIVALENT']);
 export const PERFORMANCE_MARKET_TIME_ZONE = 'America/New_York';
 const IN_MANDATE_CALENDAR_STRATEGIES = new Set(['SHORT_CALL', 'SHORT_PUT']);
+export const COVERED_CALL_REVIEW_EXPIRY_DTE = 2;
 
 const finite = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
 const cents = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
@@ -438,7 +442,9 @@ export function performanceFromBrokerRows(rows, {
   };
 }
 
-export function portfolioFromCustody(custody, optionAnalytics = new Map(), { limits = {} } = {}) {
+export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
+  limits = {}, costs = DEFAULT_COSTS,
+} = {}) {
   const account = custody?.account ?? {};
   const positions = custody?.positions ?? [];
   const openOrders = custody?.openOrders ?? [];
@@ -504,7 +510,7 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), { lim
       option_symbol: position.symbol,
       type: right === 'call' ? 'COVERED_CALL' : right === 'put' ? 'CASH_SECURED_PUT' : 'SHORT_OPTION',
       strike, expiration: position.expiration ?? null, dte,
-      quantity: qty, entry_credit: openingCredit, mark, market_value: finite(position.marketValue),
+      quantity: qty, multiplier, entry_credit: openingCredit, mark, market_value: finite(position.marketValue),
       unrealized_pnl: unrealized, theta_per_day: thetaPerDay,
       capital_committed: right === 'put' && finite(position.strike) !== null
         ? position.strike * qty * multiplier : null,
@@ -536,6 +542,129 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), { lim
     breached: symbol === 'CASH' ? false : nav > 0 && finite(limits.maxSingleUnderlyingPct) !== null
       ? value / nav > limits.maxSingleUnderlyingPct : false,
   })).sort((a, b) => b.value - a.value);
+  const concentrationBySymbol = new Map(capitalCommitted.map((row) => [row.symbol, row]));
+  const reviewMeasurement = ({ value = null, source, derivation, asof = null, reason = null,
+    inputs = null }) => ({
+    status: value === null ? 'UNAVAILABLE' : 'MEASURED',
+    value,
+    source,
+    derivation,
+    asof,
+    reason: value === null ? reason : null,
+    inputs,
+  });
+  const coveredCallReviews = harvest.filter((row) => row.type === 'COVERED_CALL').map((row) => {
+    const inventoryRow = inventory.find((item) => item.symbol === row.symbol) ?? null;
+    const concentration = concentrationBySymbol.get(row.symbol) ?? null;
+    const analytics = optionAnalytics.get(row.option_symbol) ?? {};
+    const quoteFresh = row.quote_freshness === 'CURRENT';
+    const riskFreeRate = finite(limits.riskFreeRate);
+    const dividendYield = finite(analytics.dividendYield);
+    const probabilityInputsReady = quoteFresh && row.underlying_spot > 0 && row.strike > 0
+      && finite(analytics.iv) > 0 && row.dte > 0 && riskFreeRate !== null && dividendYield !== null;
+    const probabilityItm = probabilityInputsReady ? probItm({
+      type: 'call', spot: row.underlying_spot, strike: row.strike,
+      vol: Number(analytics.iv), t: dteToT(row.dte), rate: riskFreeRate, yield: dividendYield,
+    }) : NaN;
+    const probabilityOtm = Number.isFinite(probabilityItm) ? 1 - probabilityItm : null;
+    const probabilityReason = !quoteFresh ? 'QUOTE_NOT_CURRENT'
+      : !(row.dte > 0) ? 'EXPIRY_TIME_UNAVAILABLE'
+        : dividendYield === null ? 'DIVIDEND_YIELD_UNVERIFIED'
+          : riskFreeRate === null ? 'RISK_FREE_RATE_UNVERIFIED'
+            : 'RISK_NEUTRAL_INPUTS_INCOMPLETE';
+    const ask = finite(analytics.ask);
+    const closeFees = cents(row.quantity * ((finite(costs?.commissionPerContract) ?? 0)
+      + (finite(costs?.exchangeFeePerContract) ?? 0)));
+    const buyToCloseNotional = ask !== null ? cents(ask * row.quantity * row.multiplier) : null;
+    const brokerAveragePrice = finite(inventoryRow?.average_price);
+    const strikeVsBrokerAverage = brokerAveragePrice !== null && row.strike !== null
+      ? cents(row.strike - brokerAveragePrice) : null;
+    const reasons = [];
+    if (row.dte !== null && row.dte <= COVERED_CALL_REVIEW_EXPIRY_DTE) reasons.push({
+      code: 'EXPIRY_PROXIMITY', measurement: row.dte,
+      threshold: COVERED_CALL_REVIEW_EXPIRY_DTE,
+      source: 'SCHWAB_CUSTODY_POSITION.expiration',
+      derivation: 'calendar DTE at custody observation; display-only review threshold',
+    });
+    if (brokerAveragePrice !== null && row.strike !== null && row.strike < brokerAveragePrice) reasons.push({
+      code: 'SHORT_CALL_BELOW_SHARE_BASIS', measurement: strikeVsBrokerAverage,
+      threshold: 0, source: 'SCHWAB_CUSTODY_POSITION.averagePrice + option strike',
+      derivation: 'strike - brokerAveragePrice; admission fact only, lifecycle action unspecified',
+    });
+    if (concentration?.breached) reasons.push({
+      code: 'CONCENTRATION_BREACH', classification: 'PREEXISTING_NONCONFORMING',
+      measurement: concentration.pct_nav, threshold: concentration.limit_pct,
+      source: 'portfolio.capital_committed',
+      derivation: 'underlying share market value / Schwab net liquidation',
+    });
+    return {
+      review_status: 'REVIEW_REQUIRED',
+      lifecycle_status: 'C1_UNSPECIFIED_NO_ACTION_RANKED',
+      symbol: row.symbol,
+      option_symbol: row.option_symbol,
+      expiration: row.expiration,
+      dte: row.dte,
+      strike: row.strike,
+      quantity: row.quantity,
+      custody_hash: custody?.hash ?? null,
+      custody_asof: custody?.observedAt ?? null,
+      reasons,
+      measurements: {
+        underlying_spot: reviewMeasurement({ value: row.underlying_spot,
+          source: finite(analytics.spot) !== null ? 'SCHWAB_OPTION_QUOTE.underlyingPrice' : 'SCHWAB_CUSTODY_EQUITY.marketValue/quantity',
+          derivation: finite(analytics.spot) !== null ? 'direct broker quote field' : 'equity market value divided by share quantity', asof: row.quote_asof }),
+        distance_to_strike_dollars: reviewMeasurement({ value: row.distance_to_strike_dollars,
+          source: row.distance_source, derivation: 'call strike - underlying spot', asof: row.quote_asof }),
+        distance_to_strike_pct: reviewMeasurement({ value: row.distance_to_strike_pct,
+          source: row.distance_source, derivation: '(call strike - underlying spot) / underlying spot', asof: row.quote_asof }),
+        distance_to_strike_sigma: reviewMeasurement({ value: row.distance_to_strike_sigma,
+          source: row.distance_source, derivation: '(call strike - underlying spot) / (spot × strike IV × sqrt(max(DTE,1)/365))', asof: row.quote_asof }),
+        theta_per_day: reviewMeasurement({ value: row.theta_per_day,
+          source: 'SCHWAB_OPTION_QUOTE.theta', derivation: 'broker long-contract theta × signed short quantity × multiplier', asof: row.quote_asof }),
+        broker_average_price: reviewMeasurement({ value: brokerAveragePrice,
+          source: 'SCHWAB_CUSTODY_EQUITY.averagePrice', derivation: 'direct broker field', asof: custody?.observedAt ?? null,
+          reason: 'BROKER_AVERAGE_PRICE_UNAVAILABLE' }),
+        strike_vs_broker_average: reviewMeasurement({ value: strikeVsBrokerAverage,
+          source: 'SCHWAB_CUSTODY_POSITION.averagePrice + option strike', derivation: 'call strike - broker average price', asof: custody?.observedAt ?? null,
+          reason: 'BROKER_AVERAGE_PRICE_UNAVAILABLE' }),
+        entry_credit: reviewMeasurement({ value: row.entry_credit,
+          source: 'SCHWAB_CUSTODY_OPTION.averagePrice', derivation: 'average opening credit/share × contracts × multiplier', asof: custody?.observedAt ?? null,
+          reason: 'OPTION_ENTRY_CREDIT_UNAVAILABLE' }),
+        marked_liability: reviewMeasurement({ value: finite(row.market_value) !== null ? Math.abs(row.market_value) : null,
+          source: 'SCHWAB_CUSTODY_OPTION.marketValue', derivation: 'absolute short-option marked market value', asof: custody?.observedAt ?? null,
+          reason: 'OPTION_MARKED_LIABILITY_UNAVAILABLE' }),
+        unrealized_option_pnl: reviewMeasurement({ value: row.unrealized_pnl,
+          source: 'SCHWAB_CUSTODY_OPTION.averagePrice + marketValue', derivation: 'entry credit + signed short-option market value; before fees', asof: custody?.observedAt ?? null,
+          reason: 'OPTION_UNREALIZED_PNL_UNAVAILABLE' }),
+        btc_ask_per_share: reviewMeasurement({ value: ask, source: analytics.source ?? 'SCHWAB_OPTION_QUOTE.ask',
+          derivation: 'direct executable ask quote per option share', asof: row.quote_asof,
+          reason: 'EXECUTABLE_ASK_UNAVAILABLE' }),
+        btc_ask_notional: reviewMeasurement({ value: buyToCloseNotional, source: analytics.source ?? 'SCHWAB_OPTION_QUOTE.ask',
+          derivation: 'ask/share × contracts × actual contract multiplier', asof: row.quote_asof,
+          reason: 'EXECUTABLE_ASK_UNAVAILABLE' }),
+        btc_estimated_fees: reviewMeasurement({ value: ask === null ? null : closeFees,
+          source: costs?.version ?? 'UNVERSIONED_EXECUTION_COST', derivation: 'contracts × (commission + exchange fee)',
+          reason: 'EXECUTABLE_ASK_UNAVAILABLE' }),
+        btc_total_estimate: reviewMeasurement({ value: buyToCloseNotional === null ? null : cents(buyToCloseNotional + closeFees),
+          source: `${analytics.source ?? 'SCHWAB_OPTION_QUOTE.ask'} + ${costs?.version ?? 'UNVERSIONED_EXECUTION_COST'}`,
+          derivation: 'ask notional + estimated close fees', asof: row.quote_asof,
+          reason: 'EXECUTABLE_ASK_UNAVAILABLE' }),
+        risk_neutral_probability_otm: reviewMeasurement({ value: probabilityOtm,
+          source: 'BLACK_SCHOLES_STRIKE_IV',
+          derivation: '1 - N(d2), using spot, strike IV, DTE, risk-free rate, and dividend yield; European approximation',
+          asof: row.quote_asof, reason: probabilityReason,
+          inputs: { spot: row.underlying_spot, strike: row.strike, strike_iv: finite(analytics.iv),
+            dte: row.dte, risk_free_rate: riskFreeRate, dividend_yield: dividendYield } }),
+      },
+      quote_freshness: row.quote_freshness,
+      quote_asof: row.quote_asof,
+      approximation_note: 'European approximation; excludes early exercise.',
+    };
+  }).sort((a, b) => {
+    const aSigma = Math.abs(finite(a.measurements.distance_to_strike_sigma.value) ?? Infinity);
+    const bSigma = Math.abs(finite(b.measurements.distance_to_strike_sigma.value) ?? Infinity);
+    return aSigma - bSigma || String(a.symbol).localeCompare(String(b.symbol));
+  });
   const bookedPremium = harvest.every((row) => row.entry_credit !== null)
     ? harvest.reduce((sum, row) => sum + row.entry_credit, 0) : null;
   const incomeTheta = harvest.every((row) => row.theta_per_day !== null)
@@ -625,5 +754,6 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), { lim
     capital_committed: capitalCommitted,
     inventory,
     harvest,
+    covered_call_reviews: coveredCallReviews,
   };
 }

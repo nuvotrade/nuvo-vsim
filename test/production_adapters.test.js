@@ -83,6 +83,9 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /data-vsim="reserve-gauge"/u);
     assert.match(rewriteSource, /data-vsim="concentration-cap"/u);
     assert.match(rewriteSource, /Distance to strike/u);
+    assert.match(rewriteSource, /Open covered-call review/u);
+    assert.match(rewriteSource, /data-vsim="covered-call-reviews"/u);
+    assert.match(rewriteSource, /C1 exists/u);
     assert.match(rewriteSource, /performance-unrealized-note/u);
     assert.doesNotMatch(rewriteSource, /<span>Withdrawable cash<\/span>/u);
     assert.ok(rewriteSource.indexOf('<h3>Expiration ladder<\/h3>')
@@ -144,6 +147,21 @@ describe('protected live dashboard', () => {
     assert.match(source, /expiration_ladder/u);
     assert.match(source, /quoteValue\(item, item\.mark, true\)/u);
     assert.match(source, /distance_to_strike_sigma/u);
+    assert.match(source, /covered_call_reviews/u);
+    assert.match(source, /REVIEW REQUIRED/u);
+    assert.match(source, /C1 UNSPECIFIED · NO ACTION RANKED/u);
+    assert.match(source, /Risk-neutral P\(OTM\)/u);
+    assert.match(source, /European approximation; excludes early exercise/u);
+    assert.match(source, /BTC ask estimate/u);
+    assert.match(source, /Sources and derivations/u);
+    const reviewSourceStart = source.indexOf("const reviewRoot = q('[data-vsim=\"covered-call-reviews\"]')");
+    const reviewSourceEnd = source.indexOf('\n  function activateView', reviewSourceStart);
+    assert.ok(reviewSourceStart >= 0 && reviewSourceEnd > reviewSourceStart,
+      'the covered-call review renderer must remain independently auditable');
+    const reviewSource = source.slice(reviewSourceStart, reviewSourceEnd);
+    assert.doesNotMatch(reviewSource,
+      /\b(?:EXIT|ROLL|HOLD|POP|ACTION_REQUIRED|ACTION_RECOMMENDED|BEST ACTION|RECOMMEND|BUY TO CLOSE|SELL SHARES|CLOSE NOW)\b/iu,
+      'the fact-only review surface must not invent or imply lifecycle directives');
     assert.match(source, /LAST_MARKET_QUOTE/u);
     assert.match(source, /stale-badge/u);
     assert.match(source, /performance-unrealized-note/u);
@@ -845,7 +863,7 @@ describe('Schwab production broker boundary', () => {
             bidPrice: 0.3, askPrice: 0.4, mark: 0.35, volatility: 18,
             underlyingPrice: 7705,
             delta: 0.02, gamma: 0.001, theta: -0.04, vega: 0.03,
-            openInterest: 500, totalVolume: 10, quoteTime: NOW - 500,
+            openInterest: 500, totalVolume: 10, quoteTime: NOW - 500, askTime: NOW - 100,
           },
         },
       });
@@ -862,6 +880,7 @@ describe('Schwab production broker boundary', () => {
     assert.equal(quote.value.iv, 0.18);
     assert.equal(quote.value.delta, 0.02);
     assert.equal(quote.value.underlyingPrice, 7705);
+    assert.equal(quote.asOf, NOW - 100, 'the executable ask timestamp must bound the BTC estimate');
     assert.equal(quote.source, 'SCHWAB_MARKET_DATA_OPTION_QUOTE_REALTIME');
   });
 

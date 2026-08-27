@@ -583,7 +583,8 @@ export class SchwabD1Client {
     const mid = bid > 0 && ask >= bid ? (bid + ask) / 2 : mark > 0 ? mark : last;
     const volatility = finite(quote.volatility ?? record.volatility);
     const iv = volatility > 3 ? volatility / 100 : volatility;
-    const asOf = Math.max(...[quote.quoteTime, quote.quoteTimeInLong, quote.tradeTime, quote.tradeTimeInLong]
+    const asOf = Math.max(...[quote.quoteTime, quote.quoteTimeInLong, quote.tradeTime, quote.tradeTimeInLong,
+      quote.bidTime, quote.bidTimeInLong, quote.askTime, quote.askTimeInLong]
       .map((value) => epochMs(value)).filter(Number.isFinite));
     const value = {
       symbol: compact,
