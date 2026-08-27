@@ -21,6 +21,7 @@
     "nuvo": "./bin/nuvo.js"
   },
   "scripts": {
+    "build:design-assets": "node scripts/build-design-assets.mjs",
     "test": "node --test test/*.test.js",
     "test:watch": "node --test --watch test/*.test.js",
     "cycle": "node bin/nuvo.js cycle",

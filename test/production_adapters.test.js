@@ -1,12 +1,19 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
 import { SchwabMarketProvider, sessionStatus } from '../src/truth/providers/schwab.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
-import { cycleIdFor, liveDashboardScript, rewriteDesignHtml, runShadowCycle } from '../cloudflare/worker.js';
+import {
+  cycleIdFor, dashboardHtml, designAsset, fullDashboard, liveDashboardScript,
+  rewriteDesignHtml, runShadowCycle, serveDashboard,
+} from '../cloudflare/worker.js';
+import {
+  BUNDLED_DESIGN_APP, BUNDLED_DESIGN_HTML, BUNDLED_DESIGN_SHA256, BUNDLED_DESIGN_STYLES,
+} from '../cloudflare/design-assets.js';
 import { availableContractDtes } from '../src/pipeline/cycle.js';
 import {
   aggregatePositions, historicalLedgerWindow, normalizePosition, normalizeTransactions,
@@ -17,6 +24,44 @@ import { D1R2EvidencePersistence } from '../cloudflare/evidence-persistence.js';
 const NOW = Date.UTC(2026, 7, 23, 18, 0, 0);
 
 describe('protected live dashboard', () => {
+  test('bundles the byte-verified reviewed design and preserves the fail-safe console', async () => {
+    const sources = {
+      BUNDLED_DESIGN_HTML: readFileSync(new URL('../cloudflare/design/index.html', import.meta.url)),
+      BUNDLED_DESIGN_STYLES: readFileSync(new URL('../cloudflare/design/styles.css', import.meta.url)),
+      BUNDLED_DESIGN_APP: readFileSync(new URL('../cloudflare/design/app.js', import.meta.url)),
+    };
+    assert.deepEqual(BUNDLED_DESIGN_SHA256, {
+      BUNDLED_DESIGN_HTML: '1630efa01047645b723ecc69452b919953bfc6230b2c44c83cc132b563d34fb6',
+      BUNDLED_DESIGN_STYLES: '0f42575c47f7883a223a578220e37623b0806db2a6a49d94c22b48e8c164bb48',
+      BUNDLED_DESIGN_APP: 'a851dac026ae4c444ff7f37225f926ff7c6fb7056a5354cee879480bc2e72970',
+    });
+    for (const [name, bytes] of Object.entries(sources)) {
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), BUNDLED_DESIGN_SHA256[name]);
+    }
+    assert.equal(BUNDLED_DESIGN_HTML, sources.BUNDLED_DESIGN_HTML.toString('utf8'));
+    assert.equal(BUNDLED_DESIGN_STYLES, sources.BUNDLED_DESIGN_STYLES.toString('utf8'));
+    assert.equal(BUNDLED_DESIGN_APP, sources.BUNDLED_DESIGN_APP.toString('utf8'));
+
+    const dashboard = await fullDashboard();
+    const html = await dashboard.text();
+    assert.match(html, /NUVO VSIM v5 — Live Shadow/u);
+    for (const view of ['overview', 'underwrite', 'performance', 'decisions', 'system']) {
+      assert.match(html, new RegExp(`data-view="${view}"`, 'u'));
+    }
+    assert.equal(await (await designAsset('styles.css')).text(), BUNDLED_DESIGN_STYLES);
+    assert.match(await (await designAsset('app.js')).text(), /live shadow/u);
+    assert.throws(() => fullDashboard(''), /DESIGN_UNAVAILABLE/u);
+
+    const errors = [];
+    const fallback = await serveDashboard(() => { throw new Error('TEST_RENDER_FAILURE'); },
+      (...args) => errors.push(args));
+    const fallbackHtml = await fallback.text();
+    assert.equal(errors.length, 1);
+    assert.match(fallbackHtml, /NUVO VSIM v5 — Shadow/u);
+    assert.match(fallbackHtml, /Operator controls/u);
+    assert.match(dashboardHtml(), /This is the protected v5 proposal system/u);
+  });
+
   test('rewrites the polished design to same-origin protected assets and live bindings', () => {
     const html = rewriteDesignHtml('<title>NUVO VSIM v5 — Shadow Preview</title><link rel="stylesheet" href="styles.css"></head><body><button class="nav-button" data-view="opportunities">Opportunities</button><button class="nav-button" data-view="evidence">Evidence</button><section class="view" id="evidence"></section><script src="app.js"></script></body>');
     assert.match(html, /NUVO VSIM v5 — Live Shadow/u);

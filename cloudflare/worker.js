@@ -30,6 +30,9 @@ import { performanceFromBrokerRows, portfolioFromCustody, realizedPnlCalendar } 
 import {
   calculateCoveredCallCandidates, COVERED_CALL_DTE_TARGETS,
 } from './covered-call-calculator.js';
+import {
+  BUNDLED_DESIGN_APP, BUNDLED_DESIGN_HTML, BUNDLED_DESIGN_STYLES,
+} from './design-assets.js';
 
 const JSON_HEADERS = Object.freeze({
   'content-type': 'application/json; charset=utf-8',
@@ -1732,7 +1735,7 @@ export async function executeShadowWorkflow(env, { ownerId, cycleId, source }, s
   }
 }
 
-function dashboardHtml() {
+export function dashboardHtml() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>NUVO VSIM v5 — Shadow</title><style>
   :root{color-scheme:dark;--bg:#07100e;--p:#0d1a16;--l:#22382f;--t:#e8f1ec;--m:#8ca096;--g:#60e2a8;--a:#f4ba61;--r:#f27676;font:14px Inter,system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#123328,#07100e 38%);color:var(--t)}header,main{max-width:1200px;margin:auto}header{padding:26px 24px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--l)}h1{margin:0;letter-spacing:.06em}h1 b{color:var(--g);font-size:.55em}.pill{padding:7px 10px;border:1px solid #725d34;color:var(--a);border-radius:99px;font-size:11px}main{padding:22px 24px 60px}.warning{border:1px solid #725d34;background:#2b2314;padding:12px 15px;border-radius:8px;color:#f4d6a5}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.card{background:linear-gradient(145deg,#10201b,#0a1512);border:1px solid var(--l);border-radius:10px;padding:18px}.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.13em;color:var(--m);margin:0 0 13px}.value{font-size:22px;font-weight:750}.sub{color:var(--m);font-size:11px;margin-top:7px}.wide{grid-column:1/-1}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{padding:12px;background:#08130f;border:1px solid var(--l);border-radius:7px}.metric span{display:block;color:var(--m);font-size:10px;text-transform:uppercase;letter-spacing:.1em}.metric b{display:block;font-size:19px;margin-top:5px}button,a.action{border:1px solid #315445;background:#10271f;color:var(--g);padding:9px 12px;border-radius:6px;cursor:pointer;text-decoration:none;font-weight:650;margin:5px 7px 0 0}button:disabled{opacity:.45;cursor:not-allowed}pre{white-space:pre-wrap;color:#c8d8cf;background:#07100e;padding:14px;border-radius:7px;max-height:320px;overflow:auto}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{text-align:left;border-bottom:1px solid var(--l);padding:9px 7px;font-variant-numeric:tabular-nums}th{color:var(--m);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.empty{color:var(--m);padding:12px 0}.ok{color:var(--g)}.bad{color:var(--r)}@media(max-width:760px){.grid,.metrics{grid-template-columns:1fr}.wide{grid-column:auto}.card{overflow-x:auto}}</style></head><body>
   <header><h1>NUVO VSIM <b>v5</b></h1><span class="pill">AUTHORITY 2 · PROPOSE ONLY</span></header><main><div class="warning">This is the protected v5 proposal system. It cannot submit, replace, or cancel a broker order. Execution remains locked.</div><section class="grid">
@@ -1757,10 +1760,6 @@ function dashboardHtml() {
   </script></body></html>`;
 }
 
-// Pin the reviewed visual assets to the immutable Pages deployment. The public
-// preview alias is retired because its example values could be mistaken for
-// live market and account data.
-const DESIGN_ORIGIN = 'https://c8c17621.nuvo-vsim-v5-preview.pages.dev';
 const DASHBOARD_HEADERS = Object.freeze({
   'content-type': 'text/html; charset=utf-8',
   'cache-control': 'private, no-store',
@@ -1837,11 +1836,11 @@ export function rewriteDesignHtml(source) {
     .replace('</body>', '<script src="/design/live.js"></script></body>');
 }
 
-async function designAsset(path) {
-  const upstream = await fetch(`${DESIGN_ORIGIN}/${path}`, { signal: AbortSignal.timeout(5_000) });
-  if (!upstream.ok) throw new Error('DESIGN_ASSET_UNAVAILABLE');
+export function designAsset(path) {
   const type = path.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8';
-  let source = await upstream.text();
+  let source = path === 'styles.css' ? BUNDLED_DESIGN_STYLES
+    : path === 'app.js' ? BUNDLED_DESIGN_APP : null;
+  if (source === null) throw new Error('DESIGN_ASSET_UNAVAILABLE');
   if (path.endsWith('.js')) source = source.replace(' · preview`', ' · live shadow`');
   return new Response(source, { headers: {
     'content-type': type,
@@ -1851,10 +1850,20 @@ async function designAsset(path) {
   } });
 }
 
-async function fullDashboard() {
-  const upstream = await fetch(`${DESIGN_ORIGIN}/`, { signal: AbortSignal.timeout(5_000) });
-  if (!upstream.ok) throw new Error('DESIGN_UNAVAILABLE');
-  return new Response(rewriteDesignHtml(await upstream.text()), { headers: DASHBOARD_HEADERS });
+export function fullDashboard(source = BUNDLED_DESIGN_HTML) {
+  if (!source) throw new Error('DESIGN_UNAVAILABLE');
+  return new Response(rewriteDesignHtml(source), { headers: DASHBOARD_HEADERS });
+}
+
+export async function serveDashboard(render = fullDashboard, reportError = console.error) {
+  try { return await render(); }
+  catch (error) {
+    reportError('Full dashboard unavailable; serving protected fail-safe console', error);
+    return new Response(dashboardHtml(), { headers: {
+      ...DASHBOARD_HEADERS,
+      'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    } });
+  }
 }
 
 export function liveDashboardScript() {
@@ -3228,14 +3237,7 @@ async function route(request, env, ctx) {
       'referrer-policy': 'no-referrer',
     } });
     if (url.pathname !== '/') return json({ error: 'NOT_FOUND' }, 404);
-    try { return await fullDashboard(); }
-    catch (error) {
-      console.error('Full dashboard unavailable; serving protected fail-safe console', error);
-      return new Response(dashboardHtml(), { headers: {
-        ...DASHBOARD_HEADERS,
-        'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-      } });
-    }
+    return serveDashboard();
   }
   if (!url.pathname.startsWith('/api/')) return json({ error: 'NOT_FOUND' }, 404);
 
