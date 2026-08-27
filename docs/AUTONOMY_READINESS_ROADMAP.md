@@ -16,6 +16,22 @@ The autonomous account begins from cash with no inherited positions. SPCX, CBRS,
 
 This decision removes manual/agent attribution from the autonomous compliance calculation: everything held in the dedicated account is governed by the active autonomous mandate by construction.
 
+### Initial funding — decided
+
+The dedicated autonomous account will start with **$50,000 cash**. Future funding rules remain a separate mandate decision.
+
+Funding and the per-contract cap jointly determine the admissible universe. If the Principal adopts the proposed 10% per-contract NAV cap, the maximum assignment or newly acquired share-lot notional is $5,000:
+
+```text
+maximum lot or assignment notional = $50,000 × 10% = $5,000
+maximum new CC share price          = $5,000 ÷ 100 = $50
+maximum CSP strike                  = $5,000 ÷ 100 = $50
+```
+
+A CSP underlying may trade above $50 if the eligible short strike is at or below $50; a newly purchased covered-call lot may not. These are admission constraints, not recommendations to lower liquidity or quality standards to fill the account.
+
+At the current proposed 65% maximum deployment, the dollar deployment ceiling would be $32,500. A 20% reserve requires at least $10,000 cash, while the tighter 65% deployment ceiling would ordinarily leave at least $17,500 undeployed. All figures remain provisional until the Principal approves the corresponding mandate limits.
+
 ## Operating standard
 
 The standard established during the 2026-08-26 V5 investigation is load-bearing:
@@ -87,6 +103,7 @@ The agent may read these artifacts. It may not write, select, amend, activate, o
 4. **Hard limits:** one value each for single underlying, expiration, deployed capital, reserve, per-contract NAV, factor/cluster, Greeks, and beta.
 5. **Drawdown ladder:** high-water-mark definition; warning, de-risk, halt, and independent-kill rungs; allowed actions at each rung.
 6. **Human-only powers:** mandate amendment, authority promotion, self-suspension clearance, account-scope changes, new products, and any weakening of collateral or survival limits.
+7. **Future funding:** whether contributions are prohibited, scheduled, or Principal-approved case by case; funding changes must not reset the HWM or conceal drawdown.
 
 ### Engineering outputs after the decisions
 
@@ -142,6 +159,7 @@ Build or complete:
 - Governance compliance scoreboard using the mandate version effective at decision time.
 - Visible reconciliation across custody, ledger, prediction, outcome, execution, and governance totals.
 - Data-quality scoreboard: stale/blocked duration, disagreement frequency, missing fields, source changes, and refusal correctness.
+- Operational-reliability scoreboard: total scheduled cycles, correctly classified refusals, incorrect refusal classifications, replay success, evidence-seal success, custody freshness, and escalation delivery.
 
 ### Promotion-counting rule
 
@@ -155,7 +173,16 @@ All forecasts remain preserved, but the Authority 3 promotion counter uses a nar
 - `NO DATA` and operational failures are scored on the data-quality board, not added to probability calibration `n`.
 - A sealed proposal is the preferred designated forecast. If the system counts a no-trade reference forecast, its selection rule must be fixed in the mandate before the measurement window opens.
 
-The proposed Phase 1 minimum for Authority 3 is **100 resolved promotion units**, preserving the existing engine gate while removing candidate-row inflation. It becomes pre-registered only when the Principal approves the mandate before the observation window opens. After activation, changing 100 is a Principal amendment and cannot occur after results are visible. The proposed execution minimum is **20 proposal-matched live executions**, matching the existing execution-scoreboard sufficiency floor; a numerical edge-retention average with fewer executions cannot promote authority. This also requires Principal approval in Phase 1.
+Correct refusals accumulate operational evidence even when they add zero to calibration `n`. A month with 400 correctly classified and replayable refusals can establish scheduler, truth-gate, evidence, and reason-code reliability; it cannot establish probability calibration or economic edge.
+
+The proposed Phase 1 minimum for Authority 3 is **100 resolved promotion units**, preserving the existing engine gate while removing candidate-row inflation. It becomes pre-registered only when the Principal approves the mandate before the observation window opens. After activation, changing 100 is a Principal amendment and cannot occur after results are visible.
+
+Execution evidence has two proposed gates:
+
+- **20 proposal-matched executions:** operational gate proving the frozen-ticket, human-submission, broker-match, and outcome path works. This does not claim execution cost is characterized.
+- **50 proposal-matched executions:** minimum statistical gate before Authority 3 review, with results grouped by `underlying × session date` and evaluated using a pre-registered lower confidence bound on edge retained, not the mean alone.
+
+The exact confidence method and threshold require Principal approval in Phase 1. Repeated fills from one market episode remain visible but may not manufacture apparent precision.
 
 **Exit gate:** automated checks can reconstruct every counted observation from raw input through outcome and show why excluded observations were excluded.
 
@@ -168,7 +195,8 @@ Run full scheduled cycles through multiple regimes. Record `NO DATA`, `NO EDGE`,
 Minimum readiness evidence should include:
 
 - at least 100 resolved promotion units under the Phase 3 counting rule;
-- at least 20 proposal-matched live executions before Authority 3 review;
+- at least 20 proposal-matched executions to qualify the path operationally;
+- at least 50 proposal-matched executions before Authority 3 review;
 - Brier score and calibration slope within the registered limits;
 - zero agent-created constitutional breaches;
 - zero unsealed or unreplayable decisions;
@@ -256,7 +284,7 @@ Profit alone cannot promote either tier. A profitable unauthorized action is a s
 
 Before choosing the universe or concentration limits:
 
-1. Determine the initial cash funding amount and permitted future funding process.
+1. Confirm whether the $50,000 is new capital or transferred from ••••4315, and define the permitted future funding process.
 2. After the account exists, verify whether the current Schwab authorization returns it from the account-number endpoint; do not assume token scope from account ownership alone.
 3. Decide whether Guardian observes both accounts for visibility while only the dedicated account feeds autonomous compliance and authority.
 4. Add permanent account-scope labels to Overview, Performance, System, evidence, and alerts.
@@ -264,12 +292,12 @@ Before choosing the universe or concentration limits:
 
 Resolve the remaining Phase 1 Principal decisions in this order:
 
-1. initial funding amount;
-2. automated products and manual-trading boundary;
-3. rule-based universe and one-lot affordability gate;
-4. DTE policy;
-5. portfolio and per-contract limits;
-6. drawdown ladder and resumption authority;
-7. Authority 3 ladder amendment for risk-reducing lifecycle actions.
+1. automated products and manual-trading boundary;
+2. per-contract cap and the resulting rule-based universe;
+3. DTE policy;
+4. remaining portfolio limits;
+5. drawdown ladder and resumption authority;
+6. Authority 3 ladder amendment for risk-reducing lifecycle actions;
+7. future funding process.
 
 Only after those decisions should the draft governance artifacts be created. Until activation, the existing production constitution remains authoritative and the deployed system remains proposal-only.
