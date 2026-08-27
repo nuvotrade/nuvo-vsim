@@ -6,6 +6,16 @@
 
 This document plans a path toward autonomous operation. It is not a mandate, an authority amendment, an execution authorization, or permission to change the live account. No phase advances because a date arrives. Each phase has evidence-based exit gates and requires an explicit Principal decision where stated.
 
+## Decisions recorded
+
+### Account boundary — decided
+
+Future autonomous activity will operate in a dedicated Schwab account. Account ••••4315 remains a manually governed legacy account and stays visible in the dashboard with an explicit `OUTSIDE AUTONOMOUS MANDATE` scope label.
+
+The autonomous account begins from cash with no inherited positions. SPCX, CBRS, and every other position already in ••••4315 remain manual-account obligations. They cannot be transferred into the autonomous account merely to make the legacy account look compliant.
+
+This decision removes manual/agent attribution from the autonomous compliance calculation: everything held in the dedicated account is governed by the active autonomous mandate by construction.
+
 ## Operating standard
 
 The standard established during the 2026-08-26 V5 investigation is load-bearing:
@@ -71,13 +81,12 @@ The agent may read these artifacts. It may not write, select, amend, activate, o
 
 ### Principal decisions
 
-1. **Account boundary:** dedicated autonomous account, or a shared account containing manual trades. A dedicated account is strongly preferred. In a shared account, manual positions still consume portfolio limits and must be structurally distinguishable from agent-originated positions.
-2. **Autonomous products:** recommended initial scope is covered calls and cash-secured puts only. Decide whether futures, 0DTE, long options, and spreads are prohibited only for the agent or prohibited in the governed account.
-3. **Universe:** fixed ticker list or rule-based admission. Recommended: rule-based admission with liquidity, chain completeness, event, leverage/inverse-product, and maximum one-lot percentage-of-NAV gates.
-4. **DTE policy:** decide eligible CSP and CC windows. The current 7-day concentration and the proposed 30–45-day cycle are materially different businesses.
-5. **Hard limits:** one value each for single underlying, expiration, deployed capital, reserve, per-contract NAV, factor/cluster, Greeks, and beta.
-6. **Drawdown ladder:** high-water-mark definition; warning, de-risk, halt, and independent-kill rungs; allowed actions at each rung.
-7. **Human-only powers:** mandate amendment, authority promotion, self-suspension clearance, account-scope changes, new products, and any weakening of collateral or survival limits.
+1. **Autonomous products:** recommended initial scope is covered calls and cash-secured puts only. Decide whether futures, 0DTE, long options, and spreads are prohibited only for the agent or prohibited in the governed account.
+2. **Universe:** fixed ticker list or rule-based admission. Recommended: rule-based admission with liquidity, chain completeness, event, leverage/inverse-product, and maximum one-lot percentage-of-NAV gates.
+3. **DTE policy:** decide eligible CSP and CC windows. The current 7-day concentration and the proposed 30–45-day cycle are materially different businesses.
+4. **Hard limits:** one value each for single underlying, expiration, deployed capital, reserve, per-contract NAV, factor/cluster, Greeks, and beta.
+5. **Drawdown ladder:** high-water-mark definition; warning, de-risk, halt, and independent-kill rungs; allowed actions at each rung.
+6. **Human-only powers:** mandate amendment, authority promotion, self-suspension clearance, account-scope changes, new products, and any weakening of collateral or survival limits.
 
 ### Engineering outputs after the decisions
 
@@ -92,7 +101,9 @@ The agent may read these artifacts. It may not write, select, amend, activate, o
 
 ## Phase 2 — inherited-book transition
 
-**Objective:** make existing noncompliance measurable without teaching the system that limits are advisory.
+**Objective:** keep the manual legacy book explicit without importing its nonconformity into the autonomous account.
+
+The dedicated autonomous account starts from cash and therefore has no inherited nonconformity. The transition policy below governs account ••••4315 as a manual-account wind-down and observation surface. It is not a waiver that allows the autonomous account to inherit those positions.
 
 The transition policy must distinguish:
 
@@ -115,6 +126,8 @@ Create a dated position-by-position transition plan with:
 
 **Exit gate:** the account is compliant, or every exception is explicitly time-bounded and manage-only. The agent cannot receive entry authority while it could worsen an inherited breach.
 
+For the dedicated account, the exit gate is stricter: opening custody contains cash only, no positions, no open orders, no margin debit, and a captured reconciliation baseline before the first governed shadow cycle.
+
 ## Phase 3 — durable observation and calibration
 
 **Objective:** make promotion evidence real rather than inferred.
@@ -130,7 +143,19 @@ Build or complete:
 - Visible reconciliation across custody, ledger, prediction, outcome, execution, and governance totals.
 - Data-quality scoreboard: stale/blocked duration, disagreement frequency, missing fields, source changes, and refusal correctness.
 
-An observation counts for promotion only when it is live, pre-registered, sealed before outcome, matched to one unambiguous event, and produced under the same model/mandate version or an explicitly comparable successor. Candidate rows from one option chain are not independent observations.
+### Promotion-counting rule
+
+All forecasts remain preserved, but the Authority 3 promotion counter uses a narrower unit:
+
+- One countable unit is one prospectively designated, sealed terminal forecast for a unique `underlying × expiration × terminal event`.
+- The first forecast designated under the registered sampling rule owns that unit. Later cycles, alternate strikes, and alternate structures sharing the same underlying, expiration, and terminal event are diagnostic records and add zero to promotion `n`.
+- Forty strikes from one option chain at one timestamp are one outcome cluster, never forty observations.
+- A model or mandate amendment cannot recount the same terminal outcome. The unit key excludes model and mandate hashes; those hashes remain provenance on the chosen forecast.
+- A unit counts only after the terminal event resolves unambiguously through expiry, assignment, exercise, cash settlement, or the registered terminal-price source.
+- `NO DATA` and operational failures are scored on the data-quality board, not added to probability calibration `n`.
+- A sealed proposal is the preferred designated forecast. If the system counts a no-trade reference forecast, its selection rule must be fixed in the mandate before the measurement window opens.
+
+The proposed Phase 1 minimum for Authority 3 is **100 resolved promotion units**, preserving the existing engine gate while removing candidate-row inflation. It becomes pre-registered only when the Principal approves the mandate before the observation window opens. After activation, changing 100 is a Principal amendment and cannot occur after results are visible. The proposed execution minimum is **20 proposal-matched live executions**, matching the existing execution-scoreboard sufficiency floor; a numerical edge-retention average with fewer executions cannot promote authority. This also requires Principal approval in Phase 1.
 
 **Exit gate:** automated checks can reconstruct every counted observation from raw input through outcome and show why excluded observations were excluded.
 
@@ -142,7 +167,8 @@ Run full scheduled cycles through multiple regimes. Record `NO DATA`, `NO EDGE`,
 
 Minimum readiness evidence should include:
 
-- the pre-registered observation count for the next authority tier;
+- at least 100 resolved promotion units under the Phase 3 counting rule;
+- at least 20 proposal-matched live executions before Authority 3 review;
 - Brier score and calibration slope within the registered limits;
 - zero agent-created constitutional breaches;
 - zero unsealed or unreplayable decisions;
@@ -226,13 +252,24 @@ Profit alone cannot promote either tier. A profitable unauthorized action is a s
 
 ## Next planning session
 
-Resolve the Phase 1 Principal decisions in this order:
+### Dedicated-account onboarding questions
 
-1. dedicated versus shared account;
+Before choosing the universe or concentration limits:
+
+1. Determine the initial cash funding amount and permitted future funding process.
+2. After the account exists, verify whether the current Schwab authorization returns it from the account-number endpoint; do not assume token scope from account ownership alone.
+3. Decide whether Guardian observes both accounts for visibility while only the dedicated account feeds autonomous compliance and authority.
+4. Add permanent account-scope labels to Overview, Performance, System, evidence, and alerts.
+5. Capture a cash-only baseline and confirm that no manual order or position can enter the governed account outside the agent proposal/execution path.
+
+Resolve the remaining Phase 1 Principal decisions in this order:
+
+1. initial funding amount;
 2. automated products and manual-trading boundary;
 3. rule-based universe and one-lot affordability gate;
 4. DTE policy;
 5. portfolio and per-contract limits;
-6. drawdown ladder and resumption authority.
+6. drawdown ladder and resumption authority;
+7. Authority 3 ladder amendment for risk-reducing lifecycle actions.
 
 Only after those decisions should the draft governance artifacts be created. Until activation, the existing production constitution remains authoritative and the deployed system remains proposal-only.
