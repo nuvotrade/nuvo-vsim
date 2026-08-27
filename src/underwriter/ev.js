@@ -12,6 +12,105 @@ import { isNum, mean, quantile, quantileSorted } from '../math/stats.js';
 import { structureCost, DEFAULT_COSTS } from './costs.js';
 import { mid } from '../structures/structure.js';
 
+export const DEFAULT_CSP_COLLATERAL_HURDLE_RATE = 0.085;
+
+/**
+ * Path-based wheel compatibility without pretending to know future quotes.
+ *
+ * On assignment paths, measure how many 14-DTE forward standard deviations
+ * the shares would need to recover before a call can be written at the
+ * post-assignment basis. Paths beyond the constitutional distance are
+ * classified as economically stranded. This is a geometry diagnostic, not
+ * a premium forecast.
+ */
+export function cspWheelCompatibility({
+  structure,
+  dist,
+  forwardVol,
+  ccDte = 14,
+  recoverySigmaThreshold = 1,
+}) {
+  if (structure?.kind !== 'CSP') {
+    return { measurable: true, applicable: false, basis: 'not-a-csp' };
+  }
+  const strike = structure.shortStrike;
+  const assignmentBasis = structure.breakeven;
+  const samples = dist?.samples;
+  if (![strike, assignmentBasis, forwardVol, ccDte, recoverySigmaThreshold].every(isNum)
+    || !Array.isArray(samples) || samples.length === 0 || strike <= 0
+    || assignmentBasis <= 0 || forwardVol <= 0 || ccDte <= 0
+    || recoverySigmaThreshold < 0) {
+    return {
+      measurable: false,
+      applicable: true,
+      basis: 'invalid-or-missing-paths-volatility-or-csp-terms',
+    };
+  }
+  const assignmentPaths = samples.filter((terminal) => isNum(terminal) && terminal < strike);
+  const tCc = ccDte / 365;
+  const recoveryDistances = assignmentPaths.map((terminal) => {
+    const recoveryNeeded = Math.max(0, assignmentBasis - terminal);
+    const forwardDollarSigma = Math.max(terminal, Number.EPSILON) * forwardVol * Math.sqrt(tCc);
+    return recoveryNeeded / forwardDollarSigma;
+  }).sort((a, b) => a - b);
+  const strandedPaths = recoveryDistances.filter((distance) => distance > recoverySigmaThreshold).length;
+  const assignmentPathCount = assignmentPaths.length;
+  const strandedFraction = assignmentPathCount > 0 ? strandedPaths / assignmentPathCount : 0;
+  return {
+    measurable: true,
+    applicable: true,
+    assignmentBasis,
+    assignmentPathCount,
+    totalPathCount: samples.length,
+    assignmentProbability: assignmentPathCount / samples.length,
+    strandedPathCount: strandedPaths,
+    strandedFraction,
+    wheelCompatibleFraction: 1 - strandedFraction,
+    recoverySigmaThreshold,
+    ccDte,
+    forwardVol,
+    recoveryDistanceSigmaP50: assignmentPathCount ? quantileSorted(recoveryDistances, 0.50) : 0,
+    recoveryDistanceSigmaP95: assignmentPathCount ? quantileSorted(recoveryDistances, 0.95) : 0,
+    // Sealed so the 1.0σ / 40% policy can be recalibrated later without
+    // rerunning or subtly changing the original ensemble.
+    recoveryDistanceSigmas: recoveryDistances,
+    basis: '(post-assignment basis - terminal spot) / (terminal spot x observed IV x sqrt(CC tenor))',
+    interpretation: 'Structural recovery-distance diagnostic; no future option quote or premium is forecast.',
+  };
+}
+
+/**
+ * A CSP must beat the return available while its full strike collateral is
+ * idle. This is charged inside NEV so both ranking and eligibility see the
+ * same economics; applying it after ranking can approve the right field but
+ * still select the wrong strike.
+ */
+export function collateralOpportunityCost({
+  structure,
+  annualRate = DEFAULT_CSP_COLLATERAL_HURDLE_RATE,
+}) {
+  if (structure?.kind !== 'CSP') {
+    return { value: 0, annualRate, collateral: 0, t: 0, basis: 'not-a-csp' };
+  }
+  const strike = structure.shortStrike;
+  const multiplier = structure.multiplier ?? 100;
+  const contracts = structure.contracts ?? 1;
+  const dte = structure.dte;
+  if (![strike, multiplier, contracts, dte, annualRate].every(isNum)
+    || strike <= 0 || multiplier <= 0 || contracts <= 0 || dte <= 0 || annualRate < 0) {
+    return { value: NaN, annualRate, collateral: NaN, t: NaN, basis: 'invalid-csp-terms' };
+  }
+  const collateral = strike * multiplier * contracts;
+  const t = dte / 365;
+  return {
+    value: annualRate * collateral * t,
+    annualRate,
+    collateral,
+    t,
+    basis: '(risk-free + required excess return) x full strike collateral x calendar time',
+  };
+}
+
 /**
  * Risk-aversion coefficients.
  *
@@ -114,6 +213,7 @@ export function evaluate({
   costs = DEFAULT_COSTS,
   lambdas = DEFAULT_LAMBDAS,
   pNeedExit = 0.35,
+  collateralHurdleRate = DEFAULT_CSP_COLLATERAL_HURDLE_RATE,
 }) {
   const { alpha } = lambdas;
   const stats = dist.payoffStats(structure.payoff, { alpha });
@@ -125,11 +225,15 @@ export function evaluate({
 
   const gap = gapRisk({ structure, dist, diffusionDist, alpha });
   const liq = liquidityRisk({ structure, pNeedExit });
+  const collateralOpportunity = collateralOpportunityCost({
+    structure, annualRate: collateralHurdleRate,
+  });
 
-  const nev = ev
+  const nevBeforeCollateral = ev
     - lambdas.lambdaCvar * stats.cvar
     - lambdas.lambdaGap * gap.value
     - lambdas.lambdaLiquidity * liq.value;
+  const nev = nevBeforeCollateral - collateralOpportunity.value;
 
   // Decompose the win/loss legs the way §3 states them, for the record.
   // Counted in one pass over the already-sorted array.
@@ -163,8 +267,10 @@ export function evaluate({
 
     gapRisk: gap,
     liquidityRisk: liq,
+    collateralOpportunity,
     lambdas,
 
+    nevBeforeCollateral,
     nev,
 
     /**

@@ -25,7 +25,9 @@
     "test:watch": "node --test --watch test/*.test.js",
     "cycle": "node bin/nuvo.js cycle",
     "research": "node bin/nuvo.js research",
-    "scoreboard": "node bin/nuvo.js scoreboard"
+    "scoreboard": "node bin/nuvo.js scoreboard",
+    "deploy:shadow": "wrangler deploy --config cloudflare/wrangler.jsonc",
+    "deploy:shadow:dry-run": "wrangler deploy --dry-run --config cloudflare/wrangler.jsonc"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",

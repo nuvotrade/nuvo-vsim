@@ -22,6 +22,15 @@ export function qualityMultiplier(raroc, hurdle) {
   return clamp(1 - Math.exp(-(ratio - 1) / 1.5), 0, 1);
 }
 
+/** CSP sizing uses the same net objective as CSP eligibility, not RAROC. */
+export function candidateQualityMultiplier(candidate) {
+  if (candidate?.structure?.kind !== 'CSP') {
+    return qualityMultiplier(candidate?.capital?.raroc, candidate?.hurdle);
+  }
+  if (!(candidate?.evaluation?.nev > 0)) return 0;
+  return clamp(candidate.evaluation.edgeRetention ?? 0.25, 0.05, 1);
+}
+
 /**
  * C — calibration confidence. Comes straight from the probability set,
  * which is UNCALIBRATED until live evidence accumulates.
@@ -75,8 +84,10 @@ export function sizePosition({
   authorityLevel,
   baseRiskPct = 0.02,
   holdingsCount = null,
+  singleUnderlyingExposure = 0,
+  concentrationPerContract = null,
 }) {
-  const Q = qualityMultiplier(candidate.capital.raroc, candidate.hurdle);
+  const Q = candidateQualityMultiplier(candidate);
   const C = confidenceMultiplier(candidate.probabilities?.confidence);
   const R = regimeMultiplier(regime);
   const D = diversificationMultiplier({
@@ -96,8 +107,12 @@ export function sizePosition({
 
   const byRisk = perContractRisk > 0 ? Math.floor(riskBudget / perContractRisk) : 0;
   const byCapital = perContractBp > 0 ? Math.floor(deployable / perContractBp) : Infinity;
-  const bySingleName = perContractBp > 0
-    ? Math.floor((nav * limits.maxSingleUnderlyingPct) / perContractBp)
+  const concentrationUnit = isNum(concentrationPerContract) && concentrationPerContract > 0
+    ? concentrationPerContract : perContractBp;
+  const singleNameRoom = Math.max(0,
+    nav * limits.maxSingleUnderlyingPct - Math.max(0, singleUnderlyingExposure));
+  const bySingleName = concentrationUnit > 0
+    ? Math.floor(singleNameRoom / concentrationUnit)
     : Infinity;
   const byTradeCvar = perContractRisk > 0
     ? Math.floor((nav * limits.maxSingleTradeCVaRPct) / perContractRisk)
@@ -130,7 +145,7 @@ export function sizePosition({
 
 function explainZero({ Q, C, R, D, authorityFraction, deployable }) {
   if (authorityFraction === 0) return 'Authority level does not permit capital deployment.';
-  if (Q === 0) return 'Opportunity quality is zero: RAROC does not exceed the regime hurdle.';
+  if (Q === 0) return 'Opportunity quality is zero: the applicable net objective did not clear its hurdle.';
   if (R === 0) return 'Regime multiplier is zero.';
   if (D === 0) return 'Correlated cluster is already at its constitutional limit.';
   if (deployable <= 0) return 'No deployable capital remains.';

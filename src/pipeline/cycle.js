@@ -447,7 +447,8 @@ export async function runCycle(ctx) {
   }
   step('ranking', true, {
     winner: selection.selected.structure.kind,
-    raroc: selection.selected.capital.raroc,
+    decisionMetric: selection.selected.capital.decisionMetric,
+    decisionValue: selection.selected.capital.decisionValue,
     comparison,
   });
 
@@ -485,15 +486,26 @@ export async function runCycle(ctx) {
       spot: underlyings[candidate.underlying]?.spot ?? null,
       beta: underlyings[candidate.underlying]?.quote?.beta ?? 1,
       closedTradePnl,
+      // Fully-collateralised means settled cash, never broker buying power.
+      settledCash: account.value.cash,
     });
     governanceAttempts.push({
       underlying: candidate.underlying,
       kind: candidate.structure.kind,
       shortStrike: candidate.structure.shortStrike,
-      raroc: candidate.capital.raroc,
+      decisionMetric: candidate.capital.decisionMetric,
+      decisionValue: candidate.capital.decisionValue,
       approved: g.approved,
       contracts: g.sizing.contracts,
+      reasonCodes: g.violations.map((item) => item.code),
       reasons: g.violations.map(String),
+      sizing: {
+        binding: g.sizing.binding,
+        deployable: g.sizing.deployable,
+        caps: g.sizing.caps,
+        zeroReason: g.sizing.zeroReason,
+      },
+      assignmentFunding: g.assignmentFunding ?? null,
     });
     if (g.approved) { selected = candidate; governance = g; break; }
   }

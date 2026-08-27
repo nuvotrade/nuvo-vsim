@@ -1,13 +1,17 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { cashSecuredPut, bullPutSpread, coveredCall, longShares, noTrade, realisticFill, STRUCTURE } from '../src/structures/structure.js';
-import { evaluate, conditionalLoss, DEFAULT_LAMBDAS, gapRisk } from '../src/underwriter/ev.js';
+import {
+  evaluate, conditionalLoss, cspWheelCompatibility, DEFAULT_LAMBDAS, gapRisk,
+  collateralOpportunityCost,
+} from '../src/underwriter/ev.js';
 import { capitalProfile, economicCapital, UNDEFINED_RISK_CAPITAL_FLOOR } from '../src/underwriter/capital.js';
 import { CalibrationStore, probabilitySet, marketProbability, modelProbability, CALIBRATION, confidenceFrom } from '../src/underwriter/probabilities.js';
 import { structureCost, DEFAULT_COSTS } from '../src/underwriter/costs.js';
 import { lognormalTerminal, jumpDiffusionTerminal } from '../src/math/distribution.js';
 import { dteToT, price } from '../src/math/black_scholes.js';
 import { Rng } from '../src/math/random.js';
+import { screenAndRefine, selectBest } from '../src/structures/optimizer.js';
 
 const DTE = 30;
 const T = dteToT(DTE);
@@ -85,6 +89,19 @@ describe('costs are charged before an edge is believed', () => {
 });
 
 describe('NEV penalises what an expectation cannot see', () => {
+  test('a CSP charges risk-free plus four percent on full strike collateral inside NEV', () => {
+    const s = cashSecuredPut({ underlying: 'X', put: mkPut(92, 0.40) });
+    const hurdle = collateralOpportunityCost({ structure: s, annualRate: 0.085 });
+    const e = evaluate({ structure: s, dist, diffusionDist: diffusion, collateralHurdleRate: 0.085 });
+    assert.ok(Math.abs(hurdle.collateral - 9200) < 1e-9);
+    assert.ok(Math.abs((e.nevBeforeCollateral - e.nev) - hurdle.value) < 1e-9);
+    assert.equal(e.collateralOpportunity.annualRate, 0.085);
+  });
+
+  test('the CSP collateral hurdle is not charged to a defined-risk spread', () => {
+    const s = bullPutSpread({ underlying: 'X', shortPut: mkPut(92, 0.40), longPut: mkPut(87, 0.44) });
+    assert.equal(collateralOpportunityCost({ structure: s, annualRate: 0.085 }).value, 0);
+  });
   test('NEV is always below EV when there is any tail', () => {
     const s = cashSecuredPut({ underlying: 'X', put: mkPut(92, 0.40) });
     const e = evaluate({ structure: s, dist, diffusionDist: diffusion });
@@ -131,17 +148,75 @@ describe('NEV penalises what an expectation cannot see', () => {
   });
 });
 
+describe('CSP selection and evidence use the same net objective', () => {
+  const candidate = ({ nev, dte, raroc, strike }) => ({
+    underlying: 'X', admissible: true, dte, score: raroc,
+    structure: { kind: STRUCTURE.CSP, shortStrike: strike, buyingPower: strike * 100, contracts: 1 },
+    evaluation: { nev }, capital: { raroc }, violations: [],
+  });
+
+  test('CSP-only ranking uses NEV per calendar day instead of annualized RAROC', () => {
+    const highGrossRatio = candidate({ nev: 20, dte: 20, raroc: 0.50, strike: 90 });
+    const higherNetDaily = candidate({ nev: 18, dte: 9, raroc: 0.20, strike: 91 });
+    const result = selectBest([highGrossRatio, higherNetDaily], {});
+    assert.equal(result.selected.structure.shortStrike, 91);
+  });
+
+  test('puts excluded before underwriting remain in the evidence ledger with a reason code', () => {
+    const result = screenAndRefine({
+      underlyingState: { spot: 100 },
+      chain: { underlying: 'X', contracts: [{ right: 'put', strike: 80, delta: -0.02, dte: 14, expiration: '2026-09-09' }] },
+      regime: { regime: 'NORMAL' }, limits: {}, allowedStructures: [STRUCTURE.CSP],
+      screenParams: { dist: null, diffusionDist: null }, fullParams: { dist: null, diffusionDist: null },
+    });
+    assert.equal(result.candidates.length, 0);
+    assert.equal(result.screenedOut[0].shortStrike, 80);
+    assert.equal(result.screenedOut[0].reasonCode, 'DELTA_OUT_OF_BAND');
+  });
+});
+
+describe('CSP wheel compatibility is a path geometry test', () => {
+  test('reports the conditional fraction of assignment paths needing excessive recovery', () => {
+    const result = cspWheelCompatibility({
+      structure: { kind: STRUCTURE.CSP, shortStrike: 100, breakeven: 95 },
+      dist: { samples: [99, 96, 94, 90, 80, 101] },
+      forwardVol: 0.20,
+      ccDte: 14,
+      recoverySigmaThreshold: 1,
+    });
+    assert.equal(result.assignmentPathCount, 5);
+    assert.equal(result.strandedPathCount, 2);
+    assert.equal(result.strandedFraction, 0.4);
+    assert.equal(result.wheelCompatibleFraction, 0.6);
+    assert.equal(result.forwardVol, 0.20);
+    assert.equal(result.ccDte, 14);
+    assert.equal(result.recoverySigmaThreshold, 1);
+    assert.equal(result.recoveryDistanceSigmas.length, 5);
+    assert.ok(result.recoveryDistanceSigmas.every(Number.isFinite));
+    assert.match(result.interpretation, /no future option quote/u);
+  });
+
+  test('fails measurement when the observed volatility needed for recovery distance is absent', () => {
+    const result = cspWheelCompatibility({
+      structure: { kind: STRUCTURE.CSP, shortStrike: 100, breakeven: 95 },
+      dist: { samples: [90] },
+      forwardVol: null,
+    });
+    assert.equal(result.measurable, false);
+  });
+});
+
 describe('economic capital resists the deep-wing pathology', () => {
-  test('RAROC does not explode as strikes go further out of the money', () => {
-    const rarocs = [];
+  test('CSP profiles do not compute or expose the retired ROC/RAROC metrics', () => {
     for (const K of [95, 90, 85, 80, 75, 70, 65]) {
       const s = cashSecuredPut({ underlying: 'X', put: mkPut(K, 0.30 + (100 - K) / 100 * 0.9) });
       const e = evaluate({ structure: s, dist, diffusionDist: diffusion });
       const c = capitalProfile({ evaluation: e, structure: s, dte: DTE, dist });
-      rarocs.push(c.raroc);
-    }
-    for (const r of rarocs) {
-      assert.ok(r < 3.0, `RAROC ${r} is implausible; the capital denominator has collapsed`);
+      assert.equal(Object.hasOwn(c, 'raroc'), false);
+      assert.equal(Object.hasOwn(c, 'roc'), false);
+      assert.equal(c.decisionMetric, 'NEV_PER_CALENDAR_DAY');
+      assert.equal(c.decisionValue, e.nev / DTE);
+      assert.ok(c.economicCapital > 0);
     }
   });
 
@@ -159,13 +234,13 @@ describe('economic capital resists the deep-wing pathology', () => {
     assert.ok(economicCapital({ evaluation: e, structure: s, dist }) <= s.maxLoss + 1e-6);
   });
 
-  test('RAROC is annualised so tenors are comparable', () => {
-    const s = cashSecuredPut({ underlying: 'X', put: mkPut(92, 0.36) });
+  test('RAROC remains available for non-CSP structures only', () => {
+    const s = bullPutSpread({ underlying: 'X', shortPut: mkPut(92, 0.40), longPut: mkPut(87, 0.44) });
     const e = evaluate({ structure: s, dist, diffusionDist: diffusion });
     const short = capitalProfile({ evaluation: e, structure: s, dte: 7, dist });
     const long = capitalProfile({ evaluation: e, structure: s, dte: 45, dist });
-    assert.ok(Math.abs(short.annualisationFactor ?? 0) !== Math.abs(long.annualisationFactor ?? 0)
-      || short.raroc !== long.raroc, 'identical NEV over different tenors must not rank equally');
+    assert.ok(short.raroc !== long.raroc, 'non-CSP annualised returns remain tenor-sensitive');
+    assert.equal(short.decisionMetric, 'RAROC');
   });
 });
 

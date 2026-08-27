@@ -159,6 +159,8 @@ describe('limits', () => {
 
   test('key survival limits hold their stated values', () => {
     assert.equal(DEFAULT_LIMITS.maxClusterPct, 0.25, 'no correlated cluster > 25% of capital');
+    assert.equal(DEFAULT_LIMITS.maxSingleUnderlyingPct, 0.20, 'Principal mandate single-name cap');
+    assert.equal(DEFAULT_LIMITS.maxExpirationPct, 0.25, 'Principal mandate per-expiration cap');
     assert.equal(DEFAULT_LIMITS.harvestProfitPct, 0.75, 'harvest at 75% of premium');
     assert.equal(DEFAULT_LIMITS.reassessAdverseSigma, 0.5);
     assert.equal(DEFAULT_LIMITS.minDte, 7);

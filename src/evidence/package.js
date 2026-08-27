@@ -266,10 +266,18 @@ function summariseCandidate(c) {
     cvar: c.evaluation?.cvar,
     gapRisk: c.evaluation?.gapRisk?.value,
     liquidityRisk: c.evaluation?.liquidityRisk?.value,
+    collateralOpportunityCost: c.evaluation?.collateralOpportunity?.value ?? 0,
+    collateralHurdleRate: c.evaluation?.collateralOpportunity?.annualRate ?? null,
+    nevBeforeCollateral: c.evaluation?.nevBeforeCollateral ?? c.evaluation?.nev,
     nevPerDay: Number.isFinite(c.evaluation?.nev) && Number.isFinite(c.dte) && c.dte > 0
       ? c.evaluation.nev / c.dte : null,
-    raroc: c.capital?.raroc,
-    roc: c.capital?.roc,
+    wheelCompatibility: c.wheelCompatibility ?? null,
+    decisionMetric: c.capital?.decisionMetric ?? null,
+    decisionValue: c.capital?.decisionValue ?? null,
+    ...(c.structure?.kind === 'CSP' ? {} : {
+      raroc: c.capital?.raroc,
+      roc: c.capital?.roc,
+    }),
     economicCapital: c.capital?.economicCapital,
     probabilities: c.probabilities ? {
       pMarket: c.probabilities.pMarket,

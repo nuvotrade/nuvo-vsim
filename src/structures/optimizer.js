@@ -141,8 +141,9 @@ export function enumerateCandidates({
 export function screenAndRefine({
   screenParams, fullParams, refineTop = 20, ...common
 }) {
+  const preFilter = preFilterRejections(common);
   const screened = enumerateCandidates({ ...common, ...screenParams });
-  if (!screened.length) return { candidates: [], screened: [] };
+  if (!screened.length) return { candidates: [], screened: [], screenedOut: preFilter, screenedCount: 0 };
 
   // Rank the coarse pass by NEV. Admissibility is decided in the refined
   // pass only — a candidate must not be rejected on a noisy estimate.
@@ -159,17 +160,49 @@ export function screenAndRefine({
   return {
     candidates: refined,
     // Everything the screen saw and dropped, kept for the record.
-    screenedOut: ordered.slice(refineTop).map((c) => ({
+    screenedOut: [
+      ...preFilter,
+      ...ordered.slice(refineTop).map((c) => ({
       underlying: c.underlying,
       kind: c.structure.kind,
       shortStrike: c.structure.shortStrike,
       longStrike: c.structure.longStrike ?? null,
       dte: c.dte,
       screenNev: c.evaluation.nev,
+      reasonCode: 'BELOW_REFINEMENT_SHORTLIST',
       reason: 'Ranked below the refinement shortlist on the coarse screen.',
-    })),
+      })),
+    ],
     screenedCount: screened.length,
   };
+}
+
+/** Record option rows excluded before underwriting so NO TRADE stays auditable. */
+function preFilterRejections({ chain, deltaBand = [0.05, 0.45], allowedStructures = null }) {
+  const allowed = allowedStructures ? new Set(allowedStructures) : null;
+  if (allowed && !allowed.has(STRUCTURE.CSP)) return [];
+  const [dLo, dHi] = deltaBand;
+  return (chain?.contracts ?? [])
+    .filter((contract) => contract.right === 'put')
+    .flatMap((contract) => {
+      const absDelta = isNum(contract.delta) ? Math.abs(contract.delta) : null;
+      if (absDelta !== null && absDelta >= dLo && absDelta <= dHi) return [];
+      const reasonCode = absDelta === null ? 'DELTA_UNAVAILABLE' : 'DELTA_OUT_OF_BAND';
+      return [{
+        underlying: chain.underlying,
+        kind: STRUCTURE.CSP,
+        shortStrike: contract.strike ?? null,
+        longStrike: null,
+        expiration: contract.expiration ?? null,
+        dte: contract.dte ?? null,
+        delta: contract.delta ?? null,
+        screenNev: null,
+        reasonCode,
+        reason: absDelta === null
+          ? 'Rejected before underwriting because option delta was unavailable.'
+          : `Rejected before underwriting because absolute delta ${absDelta.toFixed(3)} is outside ${dLo.toFixed(2)}-${dHi.toFixed(2)}.`,
+      }];
+    });
 }
 
 export const candidateKey = (c) => [
@@ -190,11 +223,19 @@ export const candidateKey = (c) => [
  */
 export function selectBest(candidates, { gamma = 0.01, limits, reason } = {}) {
   const admissible = candidates.filter((c) => c.admissible);
+  const cspOnly = admissible.length > 0
+    && admissible.every((candidate) => candidate.structure.kind === STRUCTURE.CSP);
   const ranked = admissible
     .map((c) => ({ ...c, utility: utility(c, { gamma, dte: c.dte }) }))
     .sort((a, b) => {
-      // Primary key is RAROC (§20). Utility breaks ties, because two
-      // candidates can share a RAROC while consuming very different capital.
+      if (cspOnly) {
+        const aPerDay = a.dte > 0 ? a.evaluation.nev / a.dte : -Infinity;
+        const bPerDay = b.dte > 0 ? b.evaluation.nev / b.dte : -Infinity;
+        if (bPerDay !== aPerDay) return bPerDay - aPerDay;
+      }
+      // Non-CSP structures retain their constitutional RAROC decision
+      // score. CSPs never reach this fallback: the CSP-only path above uses
+      // NEV per calendar day after the embedded collateral hurdle.
       if (b.score !== a.score) return b.score - a.score;
       return b.utility - a.utility;
     });
@@ -243,11 +284,13 @@ export function structureComparison(candidates) {
       nev: c.evaluation.nev,
       ev: c.evaluation.ev,
       cvar: c.evaluation.cvar,
-      raroc: c.capital.raroc,
+      ...(c.structure.kind === STRUCTURE.CSP ? {} : { raroc: c.capital.raroc }),
+      decisionMetric: c.capital.decisionMetric,
+      decisionValue: c.capital.decisionValue,
       buyingPower: c.structure.buyingPower,
       economicCapital: c.capital.economicCapital,
       shortStrike: c.structure.shortStrike,
       blockedBy: c.violations[0]?.message ?? null,
     }))
-    .sort((a, b) => (b.raroc ?? -Infinity) - (a.raroc ?? -Infinity));
+    .sort((a, b) => (b.decisionValue ?? -Infinity) - (a.decisionValue ?? -Infinity));
 }

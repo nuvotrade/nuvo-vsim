@@ -26,7 +26,10 @@ import {
   handleTelegramWebhook, processTelegramUpdate, telegramAssistantStatus,
 } from './telegram-assistant.js';
 import { freezeTradeProposal, reviewTradeTicket } from './proposal-approval.js';
-import { performanceFromBrokerRows, portfolioFromCustody } from './portfolio-report.js';
+import { performanceFromBrokerRows, portfolioFromCustody, realizedPnlCalendar } from './portfolio-report.js';
+import {
+  calculateCoveredCallCandidates, COVERED_CALL_DTE_TARGETS,
+} from './covered-call-calculator.js';
 
 const JSON_HEADERS = Object.freeze({
   'content-type': 'application/json; charset=utf-8',
@@ -90,7 +93,10 @@ function publicStatus(env) {
 
 function requireSameOrigin(request, env) {
   const origin = request.headers.get('origin');
-  if (!origin || origin !== env.PUBLIC_ORIGIN) throw new Error('ORIGIN_NOT_ALLOWED');
+  const requestOrigin = new URL(request.url).origin;
+  if (!origin || (origin !== env.PUBLIC_ORIGIN && origin !== requestOrigin)) {
+    throw new Error('ORIGIN_NOT_ALLOWED');
+  }
 }
 
 async function audit(env, ownerId, type, detail = {}) {
@@ -423,33 +429,87 @@ async function captureBaseline(env, ownerId) {
 
 function summaryOf(result, engine, connector) {
   const ranked = result.ranked ?? [...(result.candidates ?? [])].sort((a, b) =>
-    (b.capital?.raroc ?? -Infinity) - (a.capital?.raroc ?? -Infinity));
-  const opportunities = ranked.slice(0, 10).map((candidate) => ({
-    underlying: candidate.underlying,
-    structure: candidate.structure?.kind ?? null,
-    shortStrike: candidate.structure?.shortStrike ?? null,
-    longStrike: candidate.structure?.longStrike ?? null,
-    expiration: candidate.structure?.expiration ?? null,
-    dte: candidate.dte ?? null,
-    nev: candidate.evaluation?.nev ?? null,
-    raroc: candidate.capital?.raroc ?? null,
-    cvar: candidate.evaluation?.cvar ?? null,
-    gapRisk: candidate.evaluation?.gapRisk?.value ?? null,
-    liquidityRisk: candidate.evaluation?.liquidityRisk?.value ?? null,
-    economicCapital: candidate.capital?.economicCapital ?? null,
-    nevPerDay: Number.isFinite(candidate.evaluation?.nev) && Number.isFinite(candidate.dte) && candidate.dte > 0
-      ? candidate.evaluation.nev / candidate.dte : null,
-    pMarket: candidate.probabilities?.pMarket ?? null,
-    pModel: candidate.probabilities?.pModel ?? null,
-    pCal: candidate.probabilities?.calibration === 'UNCALIBRATED'
-      ? null : candidate.probabilities?.pCal ?? null,
-    pCalStatus: candidate.probabilities?.calibration === 'UNCALIBRATED' ? 'UNCALIBRATED' : 'ACTIVE',
-    probabilityOfProfitModel: candidate.success?.p_model ?? null,
-    probabilityOfProfitMarket: candidate.success?.p_market ?? null,
-    breakeven: candidate.success?.breakeven ?? null,
-    admissible: Boolean(candidate.admissible),
-    rejection: candidate.admissible ? null : candidate.violations?.map(String)?.[0] ?? null,
-  }));
+    (b.capital?.decisionValue ?? -Infinity) - (a.capital?.decisionValue ?? -Infinity));
+  const opportunityOf = (candidate) => {
+    const attempt = (result.governanceAttempts ?? []).find((row) =>
+      row.underlying === candidate.underlying && row.kind === candidate.structure?.kind
+      && row.shortStrike === candidate.structure?.shortStrike);
+    const baseContracts = Number(candidate.structure?.contracts ?? 1);
+    const approvedContracts = Number(attempt?.contracts ?? 0);
+    const sizeScale = attempt?.approved && baseContracts > 0 ? approvedContracts / baseContracts : null;
+    const wheel = candidate.wheelCompatibility
+      ? Object.fromEntries(Object.entries(candidate.wheelCompatibility)
+        .filter(([key]) => key !== 'recoveryDistanceSigmas'))
+      : null;
+    return {
+      underlying: candidate.underlying,
+      structure: candidate.structure?.kind ?? null,
+      contracts: candidate.structure?.contracts ?? null,
+      approvedContracts: attempt?.approved ? approvedContracts : 0,
+      governorApproved: Boolean(attempt?.approved),
+      governorStatus: attempt ? (attempt.approved ? 'APPROVED' : 'DECLINED') : 'NOT_EVALUATED',
+      governorReasonCodes: attempt?.reasonCodes ?? [],
+      governorReasons: attempt?.reasons ?? [],
+      governorSizing: attempt?.sizing ?? null,
+      shortStrike: candidate.structure?.shortStrike ?? null,
+      longStrike: candidate.structure?.longStrike ?? null,
+      expiration: candidate.structure?.expiration ?? null,
+      dte: candidate.dte ?? null,
+      nev: candidate.evaluation?.nev ?? null,
+      sizedNev: sizeScale === null ? null : candidate.evaluation?.nev * sizeScale,
+      decisionMetric: candidate.capital?.decisionMetric ?? null,
+      decisionValue: candidate.capital?.decisionValue ?? null,
+      ...(candidate.structure?.kind === 'CSP' ? {} : { raroc: candidate.capital?.raroc ?? null }),
+      cvar: candidate.evaluation?.cvar ?? null,
+      gapRisk: candidate.evaluation?.gapRisk?.value ?? null,
+      liquidityRisk: candidate.evaluation?.liquidityRisk?.value ?? null,
+      collateralOpportunityCost: candidate.evaluation?.collateralOpportunity?.value ?? null,
+      collateralHurdleRate: candidate.evaluation?.collateralOpportunity?.annualRate ?? null,
+      wheelCompatibleFraction: candidate.wheelCompatibility?.wheelCompatibleFraction ?? null,
+      strandedAssignmentFraction: candidate.wheelCompatibility?.strandedFraction ?? null,
+      wheelCompatibility: wheel,
+      entryCredit: candidate.structure?.credit ?? null,
+      sizedEntryCredit: sizeScale === null ? null : candidate.structure?.credit * sizeScale,
+      buyingPower: candidate.structure?.buyingPower ?? null,
+      sizedBuyingPower: sizeScale === null ? null : candidate.structure?.buyingPower * sizeScale,
+      economicCapital: candidate.capital?.economicCapital ?? null,
+      nevPerDay: Number.isFinite(candidate.evaluation?.nev) && Number.isFinite(candidate.dte) && candidate.dte > 0
+        ? candidate.evaluation.nev / candidate.dte : null,
+      pMarket: candidate.probabilities?.pMarket ?? null,
+      pModel: candidate.probabilities?.pModel ?? null,
+      pCal: candidate.probabilities?.calibration === 'UNCALIBRATED'
+        ? null : candidate.probabilities?.pCal ?? null,
+      pCalStatus: candidate.probabilities?.calibration === 'UNCALIBRATED' ? 'UNCALIBRATED' : 'ACTIVE',
+      probabilityOfProfitModel: candidate.success?.p_model ?? null,
+      probabilityOfProfitMarket: candidate.success?.p_market ?? null,
+      breakeven: candidate.success?.breakeven ?? null,
+      admissible: Boolean(candidate.admissible),
+      underwritingEligibleBeforeCapital: Boolean(candidate.admissible),
+      rejection: candidate.admissible ? null : candidate.violations?.map(String)?.[0] ?? null,
+      assignmentFunding: attempt?.assignmentFunding ?? null,
+    };
+  };
+  const opportunities = ranked.slice(0, 10).map(opportunityOf);
+  const cspOpportunities = ranked
+    .filter((candidate) => candidate.structure?.kind === 'CSP')
+    .slice(0, 20).map(opportunityOf);
+  const allCspCandidates = [...(result.candidates ?? [])]
+    .filter((candidate) => candidate.structure?.kind === 'CSP')
+    .sort((a, b) => (b.capital?.decisionValue ?? -Infinity)
+      - (a.capital?.decisionValue ?? -Infinity));
+  const unconstrainedWinner = allCspCandidates[0] ?? null;
+  const unconstrainedWinnerView = unconstrainedWinner ? opportunityOf(unconstrainedWinner) : null;
+  const cspShadowLog = {
+    status: !unconstrainedWinner
+      ? 'NO_CANDIDATE'
+      : !unconstrainedWinner.admissible
+        ? 'NO_EDGE'
+        : unconstrainedWinnerView.governorApproved ? 'CAPITAL_APPROVED' : 'NO_CAPITAL',
+    capitalConstraintAppliedAfterUnderwriting: true,
+    winner: unconstrainedWinnerView,
+    preFilterRejections: (result.screenedOut ?? [])
+      .filter((row) => row.kind === 'CSP'),
+  };
   return {
     cycleId: result.cycleId,
     at: result.evidence?.at ?? Date.now(),
@@ -468,6 +528,8 @@ function summaryOf(result, engine, connector) {
     regimeConfidence: result.marketState?.regime?.coverage ?? null,
     trace: result.trace ?? [],
     opportunities,
+    cspOpportunities,
+    cspShadowLog,
     selected: result.selected ? opportunities.find((item) => item.underlying === result.selected.underlying
       && item.shortStrike === result.selected.structure?.shortStrike) ?? null : null,
     evidence: result.evidence ? {
@@ -744,10 +806,13 @@ export async function runShadowCycle(env, ownerId, {
     }
     const strategy = engine.registry.get('VSIM-001');
     if (strategy?.state === 'RESEARCH') strategy.transition('VALIDATED', 'Architecture and correctness suite passed').transition('SHADOW', 'Real-market shadow observation');
+    const structureAllowlist = source === 'CSP_CALCULATOR'
+      ? ['CSP']
+      : String(env.NUVO_ALLOWED_STRUCTURES ?? 'CSP')
+        .split(',').map((value) => value.trim()).filter(Boolean);
     const result = await engine.cycle({
       cycleId,
-      structureAllowlist: String(env.NUVO_ALLOWED_STRUCTURES ?? 'CSP')
-        .split(',').map((value) => value.trim()).filter(Boolean),
+      structureAllowlist,
       holdings,
       dteTargets,
       screenSamples: Number(env.NUVO_SCREEN_SAMPLES ?? 1500),
@@ -837,31 +902,165 @@ async function apiStatus(env, ownerId) {
 async function portfolioDashboard(env, ownerId) {
   const custody = await loadLatestCustody(env, ownerId);
   if (!custody) throw new Error('SCHWAB_CUSTODY_SYNC_REQUIRED');
-  const shortOptions = (custody.positions ?? []).filter((position) =>
-    position.type === 'OPTION' && Number(position.quantity) < 0);
+  const optionPositions = (custody.positions ?? []).filter((position) => position.type === 'OPTION');
   const analytics = new Map();
-  if (shortOptions.length) {
-    const provider = marketProvider(env, ownerId);
-    const quotes = await Promise.all(shortOptions.map(async (position) => {
-      const quote = await provider.optionQuote(position.symbol);
-      return { symbol: position.symbol, quote };
+  const missingAnalytics = [];
+  if (optionPositions.length) {
+    const client = new SchwabD1Client(env);
+    const maxAgeMs = Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000);
+    const now = Date.now();
+    const quotes = await Promise.all(optionPositions.map(async (position) => {
+      try {
+        const quote = await client.marketOptionQuote(ownerId, position.symbol);
+        return { symbol: position.symbol, quote };
+      } catch (error) {
+        return { symbol: position.symbol, error: error.message };
+      }
     }));
-    for (const { symbol, quote } of quotes) {
-      if (!quote?.error && quote?.value) analytics.set(symbol, {
+    for (const { symbol, quote, error } of quotes) {
+      if (quote?.value) analytics.set(symbol, {
         theta: quote.value.theta,
+        iv: quote.value.iv,
+        spot: quote.value.underlyingPrice,
         asof: Number.isFinite(quote.asOf) ? new Date(quote.asOf).toISOString() : null,
+        freshness: Number.isFinite(quote.asOf) && now - quote.asOf <= maxAgeMs ? 'CURRENT' : 'LAST_MARKET_QUOTE',
       });
+      else missingAnalytics.push({ symbol, error: error || 'SCHWAB_OPTION_QUOTE_UNAVAILABLE' });
     }
   }
-  const report = portfolioFromCustody(custody, analytics);
+  const report = portfolioFromCustody(custody, analytics, { limits: DEFAULT_LIMITS });
+  const analyticsRows = [...analytics.values()];
+  const lastMarketQuotes = analyticsRows.filter((row) => row.freshness === 'LAST_MARKET_QUOTE').length;
+  const analyticsAsOf = analyticsRows.length && analyticsRows.every((row) => row.asof)
+    ? analyticsRows.map((row) => row.asof).sort()[0] : null;
   return {
     ...report,
     source: 'SCHWAB_READ_ONLY_CUSTODY',
-    option_analytics_source: shortOptions.length
-      ? (analytics.size === shortOptions.length ? 'SCHWAB_REALTIME_COMPLETE' : 'SCHWAB_REALTIME_PARTIAL')
-      : 'NO_OPEN_SHORT_OPTIONS',
-    missing_option_analytics: shortOptions.filter((position) => !analytics.has(position.symbol))
-      .map((position) => position.symbol),
+    option_analytics_source: optionPositions.length
+      ? (analytics.size === optionPositions.length ? 'SCHWAB_LATEST_AVAILABLE_COMPLETE' : 'SCHWAB_LATEST_AVAILABLE_PARTIAL')
+      : 'NO_OPEN_OPTIONS',
+    option_analytics_freshness: lastMarketQuotes ? 'LAST_MARKET_QUOTE' : 'CURRENT',
+    option_analytics_asof: analyticsAsOf,
+    option_positions: optionPositions.length,
+    short_option_positions: optionPositions.filter((position) => Number(position.quantity) < 0).length,
+    missing_option_analytics: missingAnalytics,
+  };
+}
+
+function blockedCoveredCall(symbol, reasonCode, reason, detail = {}) {
+  return {
+    ok: false,
+    outcome: 'NO_ELIGIBLE_COVERED_CALL',
+    symbol,
+    reason_code: reasonCode,
+    reason,
+    target_dtes: COVERED_CALL_DTE_TARGETS,
+    execution: 'READ_ONLY_CALCULATION_NO_ORDER_ROUTE',
+    user_action_required: false,
+    ...detail,
+  };
+}
+
+async function coveredCallDashboard(env, ownerId, rawSymbol) {
+  const symbol = String(rawSymbol ?? '').trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9.]{0,9}$/u.test(symbol)) {
+    return blockedCoveredCall(symbol || null, 'SYMBOL_INVALID', 'Choose a ticker from the ownership book.');
+  }
+  const [snapshot, baseline, controls] = await Promise.all([
+    reconciledSnapshot(env, ownerId), loadBaseline(env, ownerId), loadOperatorControls(env, ownerId),
+  ]);
+  if (controls.independentKill) return blockedCoveredCall(symbol,
+    'CONSTITUTION/INDEPENDENT_KILL_SWITCH',
+    'The independent safety switch is active. No new covered call may be evaluated.');
+  if (controls.globalPause) return blockedCoveredCall(symbol, 'CONSTITUTION/GLOBAL_PAUSE',
+    'New-trade evaluation is paused.');
+  const reconciliation = accountReconciliation(baseline, snapshot);
+  if (reconciliation.status !== 'CAPTURED') return blockedCoveredCall(symbol,
+    `RECON/${reconciliation.status}`, 'Current Schwab custody does not match the captured reconciliation checkpoint.',
+    { diagnostics: { reconciliation } });
+  const encumberingOrders = (snapshot.openOrders ?? []).filter((order) => {
+    const orderSymbol = String(order?.underlying ?? order?.underlyingSymbol ?? order?.symbol ?? '')
+      .toUpperCase().replaceAll(' ', '');
+    return !orderSymbol || orderSymbol === symbol || orderSymbol.startsWith(symbol);
+  });
+  if (encumberingOrders.length) return blockedCoveredCall(symbol,
+    'CUSTODY/OPEN_ORDERS_PRESENT',
+    'Working broker orders may already encumber shares. VSIM will not allocate the same shares twice.',
+    { diagnostics: { encumbering_order_count: encumberingOrders.length } });
+
+  const equity = (snapshot.positions ?? []).find((position) => position.type === 'EQUITY'
+    && String(position.symbol).toUpperCase() === symbol && Number(position.quantity) > 0);
+  if (!equity) return blockedCoveredCall(symbol, 'CUSTODY/SHARES_NOT_OWNED',
+    'No owned shares for this ticker were found in current Schwab custody.');
+  const shortCallContracts = (snapshot.positions ?? []).filter((position) => position.type === 'OPTION'
+    && String(position.right).toLowerCase() === 'call'
+    && String(position.underlying).toUpperCase() === symbol && Number(position.quantity) < 0)
+    .reduce((sum, position) => sum + Math.abs(Number(position.quantity)), 0);
+  const availableContracts = Math.max(0, Math.floor(Number(equity.quantity) / 100) - shortCallContracts);
+  if (availableContracts < 1) return blockedCoveredCall(symbol, 'CUSTODY/NO_UNENCUMBERED_WHOLE_LOT',
+    'Every whole 100-share lot is already covered or fewer than 100 shares are available.', {
+      shares: Number(equity.quantity), existing_short_calls: shortCallContracts,
+    });
+  if (!(Number(equity.averagePrice) > 0)) return blockedCoveredCall(symbol,
+    'CUSTODY/AVERAGE_SHARE_PRICE_UNAVAILABLE',
+    'Average share price is required because a covered-call strike may never be at or below cost basis.');
+
+  const provider = marketProvider(env, ownerId);
+  const session = await provider.marketState();
+  if (session.error) return blockedCoveredCall(symbol, 'TRUTH/MARKET_SESSION_UNVERIFIED',
+    'The live options session could not be verified. VSIM will retry automatically when market truth is valid.',
+    { diagnostics: { market_error: session.error } });
+  if (String(session.value?.status).toUpperCase() !== 'OPEN') return blockedCoveredCall(symbol,
+    'TRUTH/SESSION_NOT_RTH',
+    `The options market is ${String(session.value?.status ?? 'closed').toLowerCase()}. Recalculation becomes available automatically during regular trading hours.`);
+  const [chain, events, history] = await Promise.all([
+    provider.optionChain(symbol, { expirations: COVERED_CALL_DTE_TARGETS }),
+    provider.events(symbol),
+    provider.history(symbol, { lookback: 400, minBars: 121 }),
+  ]);
+  if (chain.error) return blockedCoveredCall(symbol, 'TRUTH/EXECUTABLE_CHAIN_UNAVAILABLE',
+    'Fresh, complete executable quotes for the 7-, 14-, and 21-DTE targets are unavailable. No strike was selected.',
+    { diagnostics: { chain_error: chain.error } });
+  if (events.error) return blockedCoveredCall(symbol, 'TRUTH/EVENT_CLEARANCE_UNAVAILABLE',
+    'The earnings and corporate-action calendar could not be verified. No strike was selected.',
+    { diagnostics: { event_error: events.error } });
+  if (history.error) return blockedCoveredCall(symbol, 'TRUTH/FORECAST_HISTORY_UNAVAILABLE',
+    'At least 121 verified daily bars are required for independent covered-call valuation. No fallback volatility was used.',
+    { diagnostics: { history_error: history.error } });
+
+  const calculation = calculateCoveredCallCandidates({
+    symbol,
+    shares: Number(equity.quantity),
+    averagePrice: Number(equity.averagePrice),
+    availableContracts,
+    spot: chain.value?.spot,
+    contracts: chain.value?.contracts,
+    historyBars: history.value,
+    events: events.value,
+    now: Date.now(),
+    seed: `covered-call-entry:${symbol}:${chain.asOf}`,
+  });
+  return {
+    ...calculation,
+    reason: calculation.ok
+      ? 'Best eligible strike by incremental modeled value per day versus continuing to hold the shares uncovered.'
+      : calculation.reason_code === 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES'
+        ? 'Every eligible call surrendered at least as much modeled upside as its executable premium paid. Holding the shares uncovered is preferred.'
+        : 'No liquid call strictly above both average share price and the current market passed every gate.',
+    target_dtes: COVERED_CALL_DTE_TARGETS,
+    execution: 'READ_ONLY_CALCULATION_NO_ORDER_ROUTE',
+    mutation_eligible: false,
+    user_action_required: calculation.ok,
+    asof: chain.asOf ? new Date(chain.asOf).toISOString() : null,
+    source: chain.source,
+    diagnostics: {
+      reconciliation: reconciliation.status,
+      market_session: session.value.status,
+      existing_short_calls: shortCallContracts,
+      chain_contracts_evaluated: chain.value?.contracts?.length ?? 0,
+      verified_events: events.value?.length ?? 0,
+      history_sessions: history.value?.length ?? 0,
+    },
   };
 }
 
@@ -897,6 +1096,30 @@ async function performanceDashboard(env, ownerId) {
       note: complete
         ? 'Every imported Schwab transaction packet was evaluated and all closures have an imported opening lot.'
         : 'Totals include only matched Schwab lifecycles. Unmatched closures are excluded from realized P&L.',
+    },
+    raw_packets: 'PROTECTED_NOT_EXPOSED',
+  };
+}
+
+async function performanceCalendarDashboard(env, ownerId, { month, scope }) {
+  const [rows, ledgerStatus] = await Promise.all([
+    env.DB.prepare(`SELECT transaction_id,raw_json,occurred_at FROM broker_events
+      WHERE owner_id=? AND transaction_id IS NOT NULL AND transaction_leg_id IS NULL
+      AND raw_json IS NOT NULL ORDER BY occurred_at ASC LIMIT 10000`).bind(ownerId).all(),
+    new SchwabD1Client(env).ledgerStatus(ownerId),
+  ]);
+  const report = performanceFromBrokerRows(rows.results ?? []);
+  const calendar = realizedPnlCalendar(report.trades, { month, scope });
+  const importedCount = Number(ledgerStatus.transaction_count ?? 0);
+  const rowCount = (rows.results ?? []).length;
+  return {
+    ...calendar,
+    history: {
+      status: Boolean(ledgerStatus.complete) && report.summary.history_complete && rowCount >= importedCount
+        ? 'COMPLETE_TO_CONFIGURED_HISTORY_FLOOR' : 'PARTIAL',
+      imported_transactions: importedCount,
+      evaluated_packets: rowCount,
+      unmatched_closures: report.summary.unmatched_closures,
     },
     raw_packets: 'PROTECTED_NOT_EXPOSED',
   };
@@ -1221,7 +1444,8 @@ export async function triggerShadowCycle(env, ownerId, { source = 'MCP', idempot
     }, { code: summary.reasonCode, message: summary.reason });
   }
 
-  const operatorSource = source === 'OPERATOR' || source === 'TELEGRAM_PROPOSAL';
+  const operatorSource = source === 'OPERATOR' || source === 'TELEGRAM_PROPOSAL'
+    || source === 'CSP_CALCULATOR';
   const cycleId = cycleIdFor({
     ownerId,
     source: operatorSource ? 'OPERATOR' : 'SCHEDULED',
@@ -1548,36 +1772,68 @@ const DASHBOARD_HEADERS = Object.freeze({
 
 export function rewriteDesignHtml(source) {
   const portfolio = `<section class="portfolio-ledger" aria-label="Current Schwab portfolio books">
-    <article class="panel"><div class="panel-head"><div><p class="kicker">Current portfolio · Schwab custody</p><h3>Portfolio economics</h3></div><span class="readonly-tag">READ ONLY</span></div>
+    <article class="panel expiration-panel"><div class="panel-head"><div><p class="kicker">Open short-option capital by time to expiry</p><h3>Expiration ladder</h3></div><span data-vsim="custody-scope" class="as-of">—</span></div><div class="expiration-ladder" data-vsim="expiration-ladder"></div><div class="panel-note" data-vsim="expiration-note">W1–W4 use current V5 custody and the configured expiration concentration limit.</div></article>
+    <article class="panel"><div class="panel-head"><div><p class="kicker">Open-position economics · Schwab custody</p><h3>Portfolio economics</h3></div><span class="readonly-tag">READ ONLY</span></div>
       <div class="desk-metrics">
         <div><span>Booked premium</span><strong data-vsim="booked-premium">—</strong><small>open short-option entry credit</small></div>
-        <div><span>Income θ / day</span><strong data-vsim="income-theta">—</strong><small>live option theta exposure</small></div>
-        <div><span>Net θ / day</span><strong data-vsim="net-theta">—</strong><small>current portfolio theta</small></div>
-        <div><span>Open P&amp;L</span><strong data-vsim="open-pnl">—</strong><small>shares + open options</small></div>
+        <div><span>Income θ / day</span><strong data-vsim="income-theta">—</strong><small data-vsim="income-theta-note">short-option time decay</small></div>
+        <div data-vsim="net-theta-card"><span>Net θ / day</span><strong data-vsim="net-theta">—</strong><small data-vsim="net-theta-note">all open option positions</small></div>
+        <div><span>Open P&amp;L</span><strong data-vsim="open-pnl">—</strong><small data-vsim="open-pnl-note">shares + open options</small></div>
         <div><span>Margin debit</span><strong data-vsim="margin-debit">—</strong><small>financing in use</small></div>
-        <div><span>Buying power</span><strong data-vsim="buying-power">—</strong><small>informational · never cash</small></div>
+        <div><span>Realized premium · MTD</span><strong data-vsim="mtd-realized-premium">—</strong><small data-vsim="mtd-realized-premium-note">closed covered calls + CSPs only</small></div>
       </div>
     </article>
-    <article class="panel"><div class="panel-head"><div><p class="kicker">Current market value and assignment collateral</p><h3>Capital committed by ticker</h3></div><span data-vsim="portfolio-asof" class="as-of">—</span></div><div class="commitment-bars" data-vsim="commitments"></div></article>
-    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Current shares from Schwab custody</p><h3>Inventory / ownership book</h3></div><span data-vsim="inventory-count" class="count">0 positions</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Qty</th><th>Average price</th><th>Mark</th><th>Market value</th><th>Open P&amp;L</th><th>Portfolio weight</th><th>CC capacity</th></tr></thead><tbody data-vsim="inventory-body"></tbody></table></div></article>
-    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Open short options from Schwab custody</p><h3>Income / harvest book</h3></div><span data-vsim="harvest-count" class="count">0 active</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Type</th><th>Strike</th><th>Expiration</th><th>Qty</th><th>Entry credit</th><th>Mark</th><th>Open P&amp;L</th><th>θ / day</th><th>Capital committed</th><th>Quote</th></tr></thead><tbody data-vsim="harvest-body"></tbody></table></div><div class="panel-note">Option analytics are shown only when the Schwab real-time quote passes the freshness and completeness checks.</div></article>
-    <article class="panel"><div class="panel-head"><div><p class="kicker">Option-adjusted current state</p><h3>Current portfolio</h3></div></div><div class="desk-metrics account-grid">
-      <div><span>Net liquidation</span><strong data-vsim="portfolio-nav">—</strong><small>Schwab account equity</small></div><div><span>Signed cash</span><strong data-vsim="portfolio-cash">—</strong><small>negative means margin borrowing</small></div><div><span>Gross positions</span><strong data-vsim="gross-positions">—</strong><small>absolute market value</small></div><div><span>Positions</span><strong data-vsim="position-count">—</strong><small>current custody</small></div><div><span>Open contracts</span><strong data-vsim="open-contracts">—</strong><small>short option contracts</small></div><div><span>Withdrawable cash</span><strong data-vsim="withdrawable-cash">—</strong><small>not buying power</small></div>
-    </div></article>
+    <article class="panel capital-guardrails"><div class="panel-head"><div><p class="kicker">Constitutional capital utilization</p><h3>Deployment and cash reserve</h3></div><span class="readonly-tag">SETTLED UNBORROWED CASH</span></div><div class="risk-gauges"><div class="risk-gauge" data-vsim="deployed-gauge"></div><div class="risk-gauge" data-vsim="reserve-gauge"></div></div><div class="panel-note">Buying power and withdrawal capacity are excluded from the reserve calculation.</div></article>
+    <article class="panel"><div class="panel-head"><div><p class="kicker">Current market value and assignment collateral</p><h3>Capital committed by ticker</h3></div><span data-vsim="concentration-cap" class="as-of">—</span></div><div class="commitment-bars" data-vsim="commitments"></div></article>
+    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Current shares from Schwab custody</p><h3>Inventory / ownership book</h3></div><span data-vsim="inventory-count" class="count">0 positions</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Qty</th><th>Average price</th><th>Mark</th><th>Market value</th><th>Open P&amp;L</th><th>Portfolio weight</th><th>Available CCs</th><th>Directive</th></tr></thead><tbody data-vsim="inventory-body"></tbody></table></div><div class="panel-note">SELL CC appears only when Schwab proves at least one unencumbered 100-share lot, no working order is present, and average share price is known.</div></article>
+    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Open short options from Schwab custody</p><h3>Income / harvest book</h3></div><span data-vsim="harvest-count" class="count">0 active</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Type</th><th>Strike</th><th>Expiration</th><th>Qty</th><th>Entry credit</th><th>Mark</th><th>Open P&amp;L</th><th>θ / day</th><th>Distance to strike</th><th>Capital committed</th><th>Quote</th></tr></thead><tbody data-vsim="harvest-body"></tbody></table></div><div class="panel-note">Distance is OTM cushion: percent of spot · dollars/share · strike-IV sigma. Stale quote-derived values remain visible but are explicitly muted and badged.</div></article>
   </section>`;
-  const records = `<section class="view" id="records" aria-labelledby="records-title"><div class="page-heading"><div><p class="kicker">Canonical append-only Schwab ledger</p><h2 id="records-title">Records</h2></div><span class="readonly-tag">BROKER TRUTH</span></div><div class="desk-metrics record-metrics"><div><span>Matched closed trades</span><strong data-vsim="closed-trades">—</strong><small>complete broker lifecycles</small></div><div><span>Realized P&amp;L</span><strong data-vsim="records-realized">—</strong><small>fees included</small></div><div><span>Imported transactions</span><strong data-vsim="imported-transactions">—</strong><small>append-only packets</small></div><div><span>History status</span><strong data-vsim="history-status">—</strong><small data-vsim="history-note">—</small></div></div><article class="panel table-panel"><div class="panel-head"><div><p class="kicker">FIFO matched from raw Schwab packets</p><h3>Closed trade performance</h3></div></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div></article><article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Every ingested order, execution, cash, assignment and transfer event</p><h3>Broker activity</h3></div></div><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div><div class="panel-note">Raw Schwab packets remain protected. Realized P&amp;L excludes any close whose opening lot is outside imported history.</div></article></section>`;
-  const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Every total derives from the canonical Schwab ledger</p><h2 id="performance-title">Performance</h2></div><span data-vsim="performance-asof" class="as-of">—</span></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L</span><strong data-vsim="performance-realized">—</strong><small>matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small>latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small>realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small>gross wins ÷ gross losses</small></div></div><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles</p><h3>Cumulative realized P&amp;L</h3></div></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss"></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Realized attribution</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Realized attribution</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
+  const underwrite = `<section class="view" id="underwrite" aria-labelledby="underwrite-title"><div class="page-heading"><div><p class="kicker">One underwriting workspace · read-only</p><h2 id="underwrite-title">Underwrite</h2></div><span class="readonly-tag">NO ORDER ROUTE</span></div><div class="underwrite-tabs" role="tablist" aria-label="Underwriting mode"><button type="button" class="underwrite-tab active" role="tab" aria-selected="true" data-underwrite-mode="scan">Scan opportunities</button><button type="button" class="underwrite-tab" role="tab" aria-selected="false" data-underwrite-mode="manual">Specify manually</button></div><div class="underwrite-pane active" data-underwrite-pane="scan"></div><div class="underwrite-pane" data-underwrite-pane="manual" hidden></div></section>`;
+  const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Lifetime results and canonical Schwab ledger drill-down</p><h2 id="performance-title">Performance</h2></div><button type="button" class="as-of history-link" data-jump-system-history>History integrity →</button></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L · Lifetime</span><strong data-vsim="performance-realized">—</strong><small data-vsim="performance-realized-note">Lifetime · matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small data-vsim="performance-unrealized-note">latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small data-vsim="performance-total-note">realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small data-vsim="profit-factor-note">Lifetime · gross wins ÷ gross losses</small></div><div><span>Matched trades</span><strong data-vsim="closed-trades">—</strong><small data-vsim="closed-trades-note">Lifetime ledger denominator</small></div></div><article class="panel pnl-calendar-panel"><div class="panel-head pnl-calendar-head"><div><p class="kicker" data-vsim="pnl-calendar-subtitle">Realized daily P&amp;L · all closed lifecycles · Schwab ledger</p><h3>Realized P&amp;L calendar</h3></div><div class="pnl-calendar-tools"><span data-vsim="pnl-calendar-reconciliation" class="readonly-tag">CHECKING</span><div class="pnl-calendar-nav"><button type="button" aria-label="Previous month" data-pnl-calendar-shift="-1">‹</button><strong data-vsim="pnl-calendar-month">—</strong><button type="button" aria-label="Next month" data-pnl-calendar-shift="1">›</button></div></div></div><div class="pnl-calendar-scopes" role="group" aria-label="Realized P&amp;L strategy scope"><button type="button" class="chip active" data-pnl-calendar-scope="ALL">All strategies</button><button type="button" class="chip" data-pnl-calendar-scope="IN_MANDATE">CC + CSP only</button></div><div class="pnl-calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span></div><div class="pnl-calendar-grid" data-vsim="pnl-calendar-grid"></div><div class="pnl-calendar-footer"><div><span>Profit</span><strong data-vsim="pnl-calendar-profit">—</strong></div><div><span>Loss</span><strong data-vsim="pnl-calendar-loss">—</strong></div><div><span data-vsim="pnl-calendar-net-label">MONTH TOTAL</span><strong data-vsim="pnl-calendar-net">—</strong></div></div><p class="panel-note" data-vsim="pnl-calendar-note">New York market date · NYSE full-day closures · early-close sessions count as trading days.</p></article><article class="panel mandate-panel"><div class="panel-head"><div><p class="kicker">Historical strategy-leg view</p><h3>Mandate lens</h3></div><span class="readonly-tag">DRILL DOWN TO VERIFY STRUCTURES</span></div><div class="desk-metrics mandate-metrics"><div><span>Mandate-compatible legs</span><strong data-vsim="mandate-pnl">—</strong><small data-vsim="mandate-trades">—</small></div><div><span>Compatible profit factor</span><strong data-vsim="mandate-profit-factor">—</strong><small>SHARES · SHORT_CALL · SHORT_PUT</small></div><div><span>Structure review</span><strong data-vsim="review-pnl">—</strong><small data-vsim="review-trades">—</small></div><div><span>Review profit factor</span><strong data-vsim="review-profit-factor">—</strong><small>inspect long legs and futures</small></div></div><p class="panel-note" data-vsim="mandate-note">Historical option legs require ledger review before they can be classified as standalone or part of a spread.</p></article><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles · drag to filter ledger dates</p><h3>Cumulative realized P&amp;L</h3></div><span data-vsim="performance-asof" class="as-of">—</span></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss. Drag horizontally to filter the ledger by date."></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><article class="panel table-panel performance-ledger"><div class="panel-head"><div><p class="kicker">Canonical append-only Schwab ledger</p><h3>Closed trade drill-down</h3></div><span data-vsim="filtered-trade-count" class="count">—</span></div><div class="ledger-filters"><span data-vsim="ledger-filter-summary">All matched trades</span><label>From <input type="date" data-performance-from></label><label>To <input type="date" data-performance-to></label><button type="button" class="chip" data-clear-performance-filter>Clear filters</button></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Strategy</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div><div class="panel-note">Click attribution rows or drag the cumulative curve to filter. Raw broker packets remain protected; this table shows FIFO-matched lifecycles.</div></article><details class="panel broker-activity"><summary>Broker activity · imported orders, executions, cash, assignment and transfer events</summary><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div></details><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
+  const calculators = `<section class="view" id="calculators" aria-labelledby="calculators-title">
+    <div class="page-heading"><div><p class="kicker">Read-only underwriting · no order route</p><h2 id="calculators-title">Options calculators</h2></div></div>
+    <div class="calculator-tabs" role="tablist" aria-label="Options calculator type"><button type="button" class="calculator-tab active" role="tab" aria-selected="true" data-calculator="covered-call">Covered calls</button><button type="button" class="calculator-tab" role="tab" aria-selected="false" data-calculator="cash-secured-put">Cash-secured puts</button></div>
+    <div class="calculator-pane active" data-calculator-pane="covered-call">
+      <article class="panel calculator-selector cc-status" data-vsim="cc-status"><div class="panel-head"><div><h3>Covered call</h3><p class="sub" data-vsim="cc-outcome">Choose an owned ticker</p></div><span class="readonly-tag" data-vsim="cc-badge">READY</span></div><div class="calculator-symbols" data-vsim="cc-symbols"><span class="cc-unavailable">Loading owned positions…</span></div><p data-vsim="cc-reason" class="cc-reason">VSIM will re-check custody, the market session, and fresh option quotes before calculating.</p><div class="calculator-rules"><span>Strike must exceed your average share price.</span><span>Evaluates 7 / 14 / 21 DTE.</span><span data-vsim="cc-symbol-count">Loading custody…</span></div></article>
+      <div class="calculator-results" data-vsim="cc-results" hidden>
+        <article class="panel cc-recommendation" data-vsim="cc-recommendation" hidden><div class="panel-head"><div><p class="kicker">Best eligible covered call</p><h3><span data-vsim="cc-ticker">—</span> · Sell <span data-vsim="cc-contracts">—</span> call contract(s)</h3></div><span class="regime">READ ONLY</span></div><div class="desk-metrics cc-metrics"><div><span>Strike</span><strong data-vsim="cc-strike">—</strong><small data-vsim="cc-expiration">—</small></div><div><span>Net premium</span><strong data-vsim="cc-premium">—</strong><small>executable bid less fees</small></div><div><span>Premium ROC</span><strong data-vsim="cc-roc">—</strong><small data-vsim="cc-annualized-roc">—</small></div><div><span>Expire OTM</span><strong data-vsim="cc-otm">—</strong><small>market-implied</small></div><div><span>Touch risk</span><strong data-vsim="cc-touch">—</strong><small>market-implied</small></div><div><span>Called-away return</span><strong data-vsim="cc-callaway">—</strong><small>gain + premium vs cost</small></div></div><p class="cc-decision-impact" data-vsim="cc-impact">—</p></article>
+        <article class="panel"><div class="panel-head"><div><h3>7 / 14 / 21 DTE comparison</h3></div><span data-vsim="cc-asof" class="as-of">—</span></div><div class="cc-tenors" data-vsim="cc-tenors"></div></article>
+        <article class="panel table-panel" data-vsim="cc-candidate-panel" hidden><div class="panel-head"><div><h3>Eligible candidates</h3></div><span class="count" data-vsim="cc-eligible-count">—</span></div><div class="table-wrap"><table><thead><tr><th>Rank</th><th>Expiry (DTE)</th><th>Strike</th><th>Bid</th><th>NEV / day</th><th>vs hold</th></tr></thead><tbody data-vsim="cc-candidates"></tbody></table></div></article>
+        <details class="vsim-diagnostics"><summary>Diagnostics and evidence</summary><pre data-vsim="cc-diagnostics">No calculation loaded.</pre></details>
+      </div>
+    </div>
+    <div class="calculator-pane" data-calculator-pane="cash-secured-put" hidden>
+      <article class="panel csp-status" data-vsim="csp-status"><div class="panel-head"><div><h3>Cash-secured put</h3><p class="sub" data-vsim="csp-outcome">Ready for a fresh calculation</p></div><span class="readonly-tag" data-vsim="csp-badge">READY</span></div><p class="cc-reason" data-vsim="csp-reason">Uses fresh market data, unborrowed cash, assignment-notional concentration, and constitutional portfolio limits.</p><button type="button" class="cc-directive csp-run" data-csp-calculate>RUN CALCULATION</button><div class="calculator-rules"><span>Cash remains the default.</span><span>Collateral hurdle is charged inside NEV.</span></div></article>
+      <div class="calculator-results" data-vsim="csp-results" hidden>
+        <article class="panel csp-recommendation" data-vsim="csp-recommendation" hidden><div class="panel-head"><div><p class="kicker">Best eligible cash-secured put</p><h3><span data-vsim="csp-ticker">—</span> · <span data-vsim="csp-expiry-strike">—</span></h3></div><span class="regime">READ ONLY</span></div><div class="desk-metrics cc-metrics"><div><span>Entry credit</span><strong data-vsim="csp-credit">—</strong><small>modeled executable fill</small></div><div><span>Cash required</span><strong data-vsim="csp-cash">—</strong><small>settled cash · no buying power</small></div><div><span>Breakeven</span><strong data-vsim="csp-breakeven">—</strong><small>strike less credit/share</small></div><div><span>NEV / day</span><strong data-vsim="csp-nev-day">—</strong><small>ranking and eligibility metric</small></div><div><span>Wheel-ready paths</span><strong data-vsim="csp-wheel-ready">—</strong><small>assignment paths within recovery limit</small></div><div><span>Profit probability</span><strong data-vsim="csp-pop">—</strong><small>independent model estimate</small></div></div><p class="cc-decision-impact" data-vsim="csp-impact">—</p></article>
+        <article class="panel table-panel" data-vsim="csp-candidate-panel" hidden><div class="panel-head"><div><h3>Evaluated candidates</h3></div><span data-vsim="csp-asof" class="as-of">—</span></div><div class="table-wrap"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Expiry (DTE)</th><th>Strike</th><th>NEV / day</th><th>Decision</th></tr></thead><tbody data-vsim="csp-candidates"></tbody></table></div></article>
+        <details class="vsim-diagnostics"><summary>Diagnostics and evidence</summary><pre data-vsim="csp-diagnostics">No calculation loaded.</pre></details>
+      </div>
+    </div>
+  </section>`;
   const additions = `<style>
-    .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th{white-space:nowrap}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}}
+    .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th,#calculators table td,#calculators table th{white-space:nowrap}.cc-directive,.cc-back{appearance:none;border:1px solid rgba(61,222,169,.55);border-radius:4px;background:rgba(35,196,143,.1);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:7px 10px;cursor:pointer}.cc-directive:hover,.cc-back:hover{background:rgba(35,196,143,.2)}.cc-unavailable{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.cc-status[data-state="blocked"],.csp-status[data-state="blocked"]{border-color:rgba(242,118,118,.38)}.cc-status[data-state="ready"],.csp-status[data-state="ready"]{border-color:rgba(96,226,168,.38)}.cc-reason,.cc-decision-impact{color:var(--text);line-height:1.55}.cc-rule{margin-top:12px;padding:11px 13px;border-left:2px solid var(--amber);background:rgba(244,186,97,.06);color:var(--amber);font-size:11px}.cc-tenors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.cc-tenor{padding:13px;border:1px solid var(--line);border-radius:5px;background:rgba(7,23,20,.42)}.cc-tenor strong,.cc-tenor span,.cc-tenor small{display:block}.cc-tenor strong{color:var(--green);font-size:16px}.cc-tenor span{margin:5px 0;color:var(--text);font-size:11px}.cc-tenor small{color:var(--muted);font-size:9px}.cc-metrics{margin-top:8px}.cc-decision-impact{margin:14px 0 0;color:var(--green)}.calculator-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.calculator-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.calculator-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.calculator-pane{display:grid;gap:12px}.calculator-pane[hidden]{display:none}.calculator-selector{margin-bottom:0}.calculator-symbols{display:flex;flex-wrap:wrap;gap:8px}.calculator-symbol{display:grid;grid-template-columns:auto auto;gap:3px 14px;align-items:center;text-align:left}.calculator-symbol b{color:var(--text)}.calculator-symbol small{grid-column:1/-1;color:var(--muted);font-size:8px}.calculator-symbol[data-actionable="false"]{border-color:var(--line);color:var(--amber);background:rgba(244,186,97,.05)}.csp-run{margin-top:12px}.csp-recommendation{border-color:rgba(96,226,168,.38)}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}.cc-tenors{grid-template-columns:1fr}.calculator-tabs{overflow:auto}.calculator-symbol{width:100%}}
+    .underwrite-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.underwrite-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.underwrite-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.underwrite-pane[hidden]{display:none}.underwrite-pane>.page-heading{display:none}.history-link{appearance:none;background:transparent;border:0;color:var(--green);cursor:pointer}.mandate-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}.attribution-row{width:100%;appearance:none;border:0;padding:4px;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:4px}.attribution-row:hover,.attribution-row.active{background:rgba(35,196,143,.1);outline:1px solid rgba(61,222,169,.25)}.performance-chart{touch-action:none;cursor:crosshair}.performance-chart .range-selection{fill:rgba(96,226,168,.14);stroke:#60e2a8;stroke-width:1}.performance-ledger{margin-top:16px}.ledger-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:12px;color:var(--muted);font-size:10px}.ledger-filters>span{margin-right:auto;color:var(--text)}.ledger-filters label{display:flex;align-items:center;gap:6px}.ledger-filters input{color:var(--text);background:#071712;border:1px solid var(--line);border-radius:4px;padding:6px;font:10px var(--mono);color-scheme:dark}.broker-activity{margin-top:16px}.broker-activity summary{cursor:pointer;color:var(--text);font-weight:700}.performance-ledger td,.performance-ledger th,.broker-activity td,.broker-activity th{white-space:nowrap}.system-history{scroll-margin-top:20px}@media(max-width:680px){.mandate-metrics{grid-template-columns:1fr 1fr}.ledger-filters>span{width:100%;margin-right:0}}
+    .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}}
+  </style>`;
+  const operationalStyles = `<style>
+    #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
+  </style>`;
+  const calculatorStyles = `<style>
+    .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}
+  </style>`;
+  const calendarStyles = `<style>
+    .pnl-calendar-panel{margin-bottom:16px}.pnl-calendar-head{align-items:center}.pnl-calendar-tools{display:flex;align-items:center;gap:10px}.pnl-calendar-reconciliation.reconciled{color:var(--green);border-color:rgba(96,226,168,.45);background:rgba(96,226,168,.07)}.pnl-calendar-reconciliation.drift{color:var(--red);border-color:rgba(242,118,118,.55);background:rgba(242,118,118,.08)}.pnl-calendar-nav{display:grid;grid-template-columns:34px minmax(140px,auto) 34px;gap:10px;align-items:center;text-align:center}.pnl-calendar-nav button{appearance:none;width:34px;height:34px;border:1px solid var(--line);border-radius:5px;background:#091510;color:var(--text);font-size:20px;cursor:pointer}.pnl-calendar-nav button:disabled{opacity:.28;cursor:not-allowed}.pnl-calendar-nav strong{font-size:15px}.pnl-calendar-scopes{display:flex;gap:7px;margin:4px 0 14px}.pnl-calendar-scopes .chip.active{color:var(--green);border-color:rgba(96,226,168,.5);background:rgba(35,196,143,.1)}.pnl-calendar-weekdays,.pnl-calendar-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.pnl-calendar-weekdays{margin-bottom:7px}.pnl-calendar-weekdays span{text-align:center;color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.13em;text-transform:uppercase}.pnl-calendar-day{position:relative;min-height:84px;padding:10px;border:1px solid var(--line);border-radius:6px;background:rgba(8,21,17,.56);color:var(--text);text-align:left;font:inherit;font-variant-numeric:tabular-nums}.pnl-calendar-day button{font:inherit}.pnl-calendar-day .day-number{display:block;color:var(--muted);font:9px/1.2 var(--mono)}.pnl-calendar-day strong{display:block;margin-top:17px;font:700 clamp(11px,1.2vw,16px)/1.15 var(--mono)}.pnl-calendar-day small{display:block;margin-top:5px;color:var(--muted);font-size:8px}.pnl-calendar-day.actionable{cursor:pointer}.pnl-calendar-day.actionable:hover,.pnl-calendar-day.active{outline:1px solid var(--green);outline-offset:1px}.pnl-calendar-day.positive strong{color:var(--green)}.pnl-calendar-day.negative strong{color:var(--red)}.pnl-calendar-day.zero strong{color:var(--muted)}.pnl-calendar-day.non-trading{border-color:transparent;background:transparent}.pnl-calendar-day.non-trading .day-number{opacity:.45}.pnl-calendar-footer{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:16px;padding-top:15px;border-top:1px solid var(--line)}.pnl-calendar-footer span{display:block;color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.11em;text-transform:uppercase}.pnl-calendar-footer strong{display:block;margin-top:7px;font:700 18px/1.2 var(--mono);font-variant-numeric:tabular-nums}.pnl-calendar-footer>div:first-child strong{color:var(--green)}.pnl-calendar-footer>div:nth-child(2) strong{color:var(--red)}@media(max-width:680px){.pnl-calendar-head{align-items:flex-start}.pnl-calendar-nav{grid-template-columns:30px minmax(105px,auto) 30px}.pnl-calendar-nav button{width:30px;height:30px}.pnl-calendar-weekdays,.pnl-calendar-grid{gap:4px}.pnl-calendar-day{min-height:70px;padding:7px 5px}.pnl-calendar-day strong{margin-top:13px;font-size:10px}.pnl-calendar-day small{font-size:7px}.pnl-calendar-footer{gap:8px}.pnl-calendar-footer strong{font-size:13px}}
   </style>`;
   return source
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
-    .replace('</head>', additions + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
-    .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="records">Records</button><button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="evidence">Evidence</button>')
+    .replace('</head>', additions + operationalStyles + calculatorStyles + calendarStyles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
+    .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button>')
     .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
-    .replace('      <section class="view" id="evidence"', records + performance + '\n      <section class="view" id="evidence"')
+    .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + '\n      <section class="view" id="decisions"')
     .replace('</body>', '<script src="/design/live.js"></script></body>');
 }
 
@@ -1608,6 +1864,7 @@ export function liveDashboardScript() {
   const qa = (selector, root = document) => [...root.querySelectorAll(selector)];
   const present = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
   const money = value => present(value) ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(Number(value)) : '—';
+  const moneyExact = value => present(value) ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value)) : '—';
   const number = value => present(value) ? Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—';
   const percent = value => present(value) ? (Number(value) * 100).toFixed(1) + '%' : '—';
   const when = value => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) : 'Not available';
@@ -1617,6 +1874,159 @@ export function liveDashboardScript() {
   const api = async (path, options) => { const response = await fetch(path, options); const body = await response.json(); if (!response.ok) throw new Error(body.error || body.reason || ('HTTP ' + response.status)); return body; };
   const connectorOk = status => status === 'CONNECTED' || status === 'LIVE_READ_ONLY';
   const structure = value => ({ CSP: 'Cash-secured put', BULL_PUT_SPREAD: 'Bull put spread', CASH_SECURED_PUT: 'Cash-secured put' }[value] || value || '—');
+  const marketDateKey = value => {
+    if (/^\d{4}-\d{2}-\d{2}$/u.test(String(value || ''))) return String(value);
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return null;
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York',
+      year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+    const get = type => parts.find(part => part.type === type)?.value;
+    return get('year') + '-' + get('month') + '-' + get('day');
+  };
+  const initialPerformanceParams = new URLSearchParams(window.location.search);
+  const requestedCalendarMonth = initialPerformanceParams.get('pnlMonth');
+  const requestedScope = initialPerformanceParams.get('pnlScope');
+  const calculatorState = {
+    mode: 'covered-call', coveredCallSymbol: null, coveredCallRequestId: null,
+    coveredCallInventory: [], cspCycleId: null, cspRequestId: null,
+  };
+  const performanceState = {
+    report: null, ledger: null, calendar: null, calendarRequestId: 0,
+    ticker: initialPerformanceParams.get('pnlTicker'),
+    strategy: initialPerformanceParams.get('pnlStrategy'),
+    from: initialPerformanceParams.get('pnlFrom'), to: initialPerformanceParams.get('pnlTo'),
+    scope: requestedScope === 'IN_MANDATE' ? 'IN_MANDATE' : 'ALL',
+    month: /^\d{4}-\d{2}$/u.test(String(requestedCalendarMonth || ''))
+      ? requestedCalendarMonth : marketDateKey(new Date()).slice(0, 7),
+  };
+  let underwriteMode = 'scan';
+
+  const marketSourceName = value => {
+    const source = String(value || '').toUpperCase();
+    if (source.includes('SCHWAB')) return 'Schwab market data';
+    if (source.includes('MASSIVE') || source.includes('POLYGON')) return 'Massive / Polygon market data';
+    return 'Market-data provider';
+  };
+
+  const marketFailureText = (value, symbol) => {
+    const code = String(value || '').toUpperCase();
+    const prefix = symbol ? symbol + ' ' : '';
+    if (/QUOTE.*STALE|STALE.*QUOTE/u.test(code)) return prefix + 'underlying quote is older than the allowed freshness window.';
+    if (/CHAIN.*STALE|STALE.*CHAIN/u.test(code)) return prefix + 'option chain is older than the allowed freshness window.';
+    if (/QUOTE.*MISSING|MISSING.*QUOTE|QUOTE.*UNAVAILABLE/u.test(code)) return prefix + 'underlying quote is missing.';
+    if (/CHAIN.*MISSING|MISSING.*CHAIN|CHAIN.*UNAVAILABLE/u.test(code)) return prefix + 'option chain is missing.';
+    if (/GREEK/u.test(code)) return prefix + 'option chain is missing required pricing Greeks.';
+    if (/EVENT/u.test(code)) return prefix + 'corporate-event calendar could not be verified.';
+    if (/SESSION/u.test(code)) return 'The market-session feed could not be verified.';
+    if (/TIMEOUT/u.test(code)) return 'The market-data provider did not respond before the safety timeout.';
+    return 'At least one required market input failed freshness or completeness checks.';
+  };
+
+  function marketReadiness(status) {
+    const market = status.marketCheck || null;
+    const marketState = market && market.marketState || {};
+    const symbols = market && Array.isArray(market.symbols) ? market.symbols : [];
+    const failed = symbols.find(row => row && (row.ok === false || (row.errors && row.errors.length))) || null;
+    const rawCode = marketState.error || (failed && failed.errors && failed.errors[0]) || null;
+    const session = String(marketState.status || '').toUpperCase();
+    const source = marketSourceName(market && (market.source || market.provider));
+    const symbol = failed && failed.symbol || null;
+    const rawUpper = String(rawCode || '').toUpperCase();
+    const affectedInput = /CHAIN|GREEK/u.test(rawUpper) ? 'Option chain'
+      : /EVENT/u.test(rawUpper) ? 'Event calendar'
+        : /SESSION/u.test(rawUpper) ? 'Market session' : 'Underlying quote';
+    const affectedAsOf = failed && (/CHAIN|GREEK/u.test(rawUpper) ? failed.chainAsOf : failed.quoteAsOf);
+    const baselineReady = ['CAPTURED', 'RECONCILED_CHECKPOINT'].includes(String(status.baseline && status.baseline.status || '').toUpperCase());
+    const controls = status.controls || {};
+    const diagnostics = {
+      market_check: market,
+      schwab_status: status.schwab || null,
+      reconciliation_checkpoint: status.baseline || null,
+      operator_controls: controls,
+    };
+
+    if (controls.independentKill) return {
+      state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
+      headline: 'New trade evaluation is blocked by the safety switch.',
+      summary: 'VSIM will not underwrite new exposure while the independent kill switch is active.',
+      blockerShort: 'Safety switch active', blocker: 'The independent kill switch is active.',
+      source: 'Constitutional control plane', sourceAsOf: controls.updatedAt ? when(controls.updatedAt) : 'Active now',
+      nextShort: 'MANUAL CLEAR', next: 'Evaluation resumes only after the cause is verified and the switch is explicitly cleared.',
+      userAction: 'Review required', diagnostics,
+    };
+    if (controls.globalPause) return {
+      state: 'waiting', badge: 'PAUSED', glyph: 'Ⅱ', allowed: 'NO',
+      headline: 'New trade evaluation is paused.',
+      summary: 'Scheduled and manual opportunity scans remain stopped; existing positions are unaffected.',
+      blockerShort: 'Global pause active', blocker: 'The global cycle pause is active.',
+      source: 'Operator control plane', sourceAsOf: controls.updatedAt ? when(controls.updatedAt) : 'Active now',
+      nextShort: 'MANUAL RESUME', next: 'Evaluation resumes after the pause reason is reviewed and cycles are explicitly resumed.',
+      userAction: 'Review required', diagnostics,
+    };
+    if (!connectorOk(status.schwab && status.schwab.status)) return {
+      state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
+      headline: 'New trade evaluation is blocked.',
+      summary: 'VSIM cannot verify the live Schwab account and will fail closed before underwriting.',
+      blockerShort: 'Schwab unavailable', blocker: 'The Schwab read-only connection is not currently verified.',
+      source: 'Schwab custody connection', sourceAsOf: when(status.schwab && status.schwab.lastSuccessfulSyncAt),
+      nextShort: 'AUTO RECHECK', next: 'The next cycle will recheck the connection. Reconnect Schwab if it remains unavailable.',
+      userAction: 'Only if persistent', diagnostics,
+    };
+    if (!baselineReady) return {
+      state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
+      headline: 'New trade evaluation is blocked.',
+      summary: 'VSIM cannot compare a new decision with a verified account checkpoint, so underwriting will not start.',
+      blockerShort: 'Checkpoint required', blocker: 'The Schwab reconciliation checkpoint is missing or no longer matches current custody.',
+      source: 'Schwab account checkpoint', sourceAsOf: when(status.baseline && status.baseline.observedAt),
+      nextShort: 'REFRESH NEEDED', next: 'Refresh and reconcile the read-only account checkpoint before the next scan.',
+      userAction: 'Checkpoint required', diagnostics,
+    };
+    if (!market) return {
+      state: 'waiting', badge: 'NOT CHECKED', glyph: '…', allowed: 'NO',
+      headline: 'Live market inputs have not been verified yet.',
+      summary: 'VSIM has no current basis for evaluating a new trade and will fail closed until verification completes.',
+      blockerShort: 'Verification pending', blocker: 'Quotes, option chains, session state, and events have not been checked.',
+      source, sourceAsOf: 'No verified timestamp',
+      nextShort: 'AUTO VERIFY', next: 'The next scheduled or manual scan will verify every required market input first.',
+      userAction: 'None', diagnostics,
+    };
+    if (!market.ok || rawCode) {
+      const blocker = marketFailureText(rawCode, symbol);
+      return {
+        state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
+        headline: 'New trade evaluation is blocked by invalid market data.',
+        summary: blocker + ' VSIM will not score or rank new trades from this input.',
+        blockerShort: symbol ? affectedInput + ' · ' + symbol : 'Market input invalid', blocker,
+        source: source + (symbol ? ' · ' + symbol : '') + ' · ' + affectedInput,
+        sourceAsOf: affectedAsOf ? when(affectedAsOf) : 'Timestamp missing',
+        nextShort: 'AUTO RECHECK', next: 'The next scheduled cycle will fetch fresh data and resume evaluation automatically after every check passes.',
+        userAction: 'None unless persistent', diagnostics,
+      };
+    }
+    if (session !== 'OPEN') {
+      const sessionText = session === 'PRE' ? 'Regular trading hours have not opened.'
+        : session === 'POST' ? 'Regular trading hours have ended.' : 'The market is closed.';
+      return {
+        state: 'waiting', badge: 'WAITING', glyph: '◷', allowed: 'NO',
+        headline: 'Market data is valid, but new trade evaluation is waiting for regular hours.',
+        summary: sessionText + ' This is a timing gate, not a system failure or investment rejection.',
+        blockerShort: 'Outside regular hours', blocker: sessionText,
+        source: source + ' · market session', sourceAsOf: marketState.asOf ? when(marketState.asOf) : when(market.checkedAt),
+        nextShort: 'AUTO RESUME', next: 'VSIM will recheck automatically and may evaluate once regular trading hours open with fresh data.',
+        userAction: 'None', diagnostics,
+      };
+    }
+    const contractCount = symbols.reduce((sum, row) => sum + Number(row.contractCount || 0), 0);
+    return {
+      state: 'ready', badge: 'READY', glyph: '✓', allowed: 'YES',
+      headline: 'Market and account inputs are valid for a new trade evaluation.',
+      summary: 'VSIM may underwrite current candidates now. Portfolio, risk, and constitutional gates still decide whether any proposal survives.',
+      blockerShort: 'Nothing', blocker: 'No market-data or account-readiness blocker is active.',
+      source: source, sourceAsOf: when(market.checkedAt),
+      nextShort: 'EVALUATE', next: number(contractCount) + ' live contracts across ' + number(symbols.length) + ' underlyings are available to the next scan.',
+      userAction: 'None', diagnostics,
+    };
+  }
 
   function scrubPreviewLanguage() {
     text(q('.header-status strong'), 'Protected shadow');
@@ -1626,6 +2036,71 @@ export function liveDashboardScript() {
     text(q('.authority-pill strong'), '2 · PROPOSE ONLY');
     text(q('footer span:first-child'), 'NUVO VSIM v5 · Protected live shadow');
     text(q('footer span:nth-child(2)'), 'Schwab read-only custody and market data · no broker mutation');
+  }
+
+  function setUnderwriteMode(mode) {
+    underwriteMode = mode === 'manual' ? 'manual' : 'scan';
+    qa('[data-underwrite-mode]').forEach(button => {
+      const active = button.dataset.underwriteMode === underwriteMode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    qa('[data-underwrite-pane]').forEach(pane => {
+      const active = pane.dataset.underwritePane === underwriteMode;
+      pane.classList.toggle('active', active); pane.hidden = !active;
+    });
+  }
+
+  function composeConsolidatedViews() {
+    const underwriteView = q('#underwrite');
+    const opportunitiesView = q('#opportunities');
+    const calculatorsView = q('#calculators');
+    const scanPane = q('[data-underwrite-pane="scan"]', underwriteView);
+    const manualPane = q('[data-underwrite-pane="manual"]', underwriteView);
+    if (scanPane && opportunitiesView) {
+      while (opportunitiesView.firstChild) scanPane.append(opportunitiesView.firstChild);
+      opportunitiesView.remove();
+    }
+    if (manualPane && calculatorsView) {
+      while (calculatorsView.firstChild) manualPane.append(calculatorsView.firstChild);
+      calculatorsView.remove();
+    }
+    const decisions = q('#decisions');
+    if (decisions) {
+      const heading = q('.page-heading h2', decisions);
+      if (heading) heading.textContent = 'Decisions';
+    }
+    setUnderwriteMode('scan');
+  }
+
+  function relocateTopOpportunities() {
+    const overview = q('#overview');
+    const opportunitiesView = q('#underwrite [data-underwrite-pane="scan"]');
+    if (!overview || !opportunitiesView) return;
+    const detailed = q('.table-panel.detailed', opportunitiesView);
+    if (!detailed) return;
+    const panel = Array.from(overview.children).find(node => {
+      const heading = node.matches('article.table-panel') && q('h3', node);
+      return heading && heading.textContent.trim().toLowerCase() === 'top opportunities';
+    });
+    if (!panel) return;
+    panel.classList.add('top-opportunities-panel');
+    opportunitiesView.insertBefore(panel, detailed);
+  }
+
+  function relocateOverviewEvidencePanels() {
+    const overview = q('#overview');
+    const evidenceView = q('#decisions');
+    if (!overview || !evidenceView) return;
+    const layout = q('.evidence-layout', evidenceView);
+    if (!layout) return;
+    const panels = Array.from(overview.children).find(node =>
+      node.matches('.two-column') && q('.environment-panel', node) && q('.decision-panel', node));
+    if (!panels) return;
+    panels.classList.add('evidence-operational-panels');
+    const redundantJump = q('[data-jump="evidence"]', panels);
+    if (redundantJump) redundantJump.remove();
+    evidenceView.insertBefore(panels, layout);
   }
 
   function renderRows(tbody, rows, cells) {
@@ -1650,7 +2125,8 @@ export function liveDashboardScript() {
     rows.forEach(item => {
       const row = make('tr');
       cells.forEach(formatter => { const cell = make('td'); const value = formatter(item);
-        cell.textContent = value; if (typeof value === 'string' && value.startsWith('-$')) cell.className = 'negative';
+        if (value instanceof Node) cell.append(value); else cell.textContent = value;
+        if (typeof value === 'string' && value.startsWith('-$')) cell.className = 'negative';
         row.append(cell); });
       tbody.append(row);
     });
@@ -1664,95 +2140,704 @@ export function liveDashboardScript() {
     if (present(value)) node.classList.toggle('negative', Number(value) < 0);
   }
 
-  function renderPortfolio(portfolio) {
+  function resetCoveredCallView() {
+    calculatorState.coveredCallSymbol = null; calculatorState.coveredCallRequestId = null;
+    const results = q('[data-vsim="cc-results"]'); if (results) results.hidden = true;
+    const recommendation = q('[data-vsim="cc-recommendation"]'); if (recommendation) recommendation.hidden = true;
+    const candidates = q('[data-vsim="cc-candidate-panel"]'); if (candidates) candidates.hidden = true;
+    clear(q('[data-vsim="cc-tenors"]')); clear(q('[data-vsim="cc-candidates"]'));
+    text(q('[data-vsim="cc-outcome"]'), 'Choose an owned ticker');
+    text(q('[data-vsim="cc-badge"]'), 'READY');
+    text(q('[data-vsim="cc-reason"]'), 'VSIM will re-check custody, the market session, and fresh option quotes before calculating.');
+    applyCoveredCallAvailability(calculatorState.coveredCallInventory);
+  }
+
+  function resetCspView() {
+    calculatorState.cspCycleId = null; calculatorState.cspRequestId = null;
+    const results = q('[data-vsim="csp-results"]'); if (results) results.hidden = true;
+    const recommendation = q('[data-vsim="csp-recommendation"]'); if (recommendation) recommendation.hidden = true;
+    const candidates = q('[data-vsim="csp-candidate-panel"]'); if (candidates) candidates.hidden = true;
+    clear(q('[data-vsim="csp-candidates"]'));
+    text(q('[data-vsim="csp-outcome"]'), 'Ready for a fresh calculation');
+    text(q('[data-vsim="csp-badge"]'), 'READY');
+    text(q('[data-vsim="csp-reason"]'), 'Uses fresh market data, unborrowed cash, assignment-notional concentration, and constitutional portfolio limits.');
+  }
+
+  function setCalculatorMode(mode) {
+    if (calculatorState.mode !== mode) {
+      if (mode === 'covered-call') resetCoveredCallView(); else resetCspView();
+      calculatorState.mode = mode;
+    }
+    qa('[data-calculator]').forEach(button => {
+      const active = button.dataset.calculator === mode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    qa('[data-calculator-pane]').forEach(pane => {
+      const active = pane.dataset.calculatorPane === mode;
+      pane.classList.toggle('active', active); pane.hidden = !active;
+    });
+  }
+
+  function applyCoveredCallAvailability(rows) {
+    if (rows.length > 0 && !rows.some(item => Boolean(item.covered_call_actionable))) {
+      text(q('[data-vsim="cc-outcome"]'), 'NO AVAILABLE COVERED-CALL LOT');
+      text(q('[data-vsim="cc-badge"]'), 'BLOCKED');
+      text(q('[data-vsim="cc-reason"]'), 'Every owned whole lot is already encumbered by an open covered call. No new call can be initiated until shares are released.');
+    }
+  }
+
+  function renderCalculatorSymbols(inventory) {
+    const root = q('[data-vsim="cc-symbols"]'); clear(root);
+    const rows = inventory || [];
+    calculatorState.coveredCallInventory = rows;
+    text(q('[data-vsim="cc-symbol-count"]'), rows.length + ' owned ticker' + (rows.length === 1 ? '' : 's'));
+    if (!rows.length) {
+      root.append(make('span', 'No owned equity positions are available to inspect.', 'cc-unavailable'));
+      return;
+    }
+    let actionableCount = 0;
+    rows.forEach(item => {
+      const actionable = Boolean(item.covered_call_actionable);
+      if (actionable) actionableCount += 1;
+      const button = make('button', undefined, 'cc-directive calculator-symbol');
+      button.type = 'button'; button.dataset.actionable = String(actionable); button.disabled = !actionable;
+      if (actionable) button.dataset.ccSymbol = item.symbol;
+      const openCalls = Number(item.covered_call_open_contracts || 0);
+      const unavailable = number(item.covered_call_capacity) + ' available · '
+        + number(item.covered_call_encumbered_shares || 0) + ' encumbered by '
+        + number(openCalls) + ' open call' + (openCalls === 1 ? '' : 's');
+      button.setAttribute('aria-label', actionable ? 'Calculate covered calls for ' + item.symbol : item.symbol + ' ' + unavailable);
+      button.append(make('b', item.symbol || '—'), make('span', actionable ? 'RUN' : '0 AVAILABLE'),
+        make('small', actionable
+          ? number(item.covered_call_capacity) + ' contract(s) available · average price ' + moneyExact(item.average_price)
+          : unavailable));
+      root.append(button);
+    });
+    if (actionableCount === 0) applyCoveredCallAvailability(rows);
+  }
+
+  function renderPortfolio(portfolio, performance) {
     const account = portfolio.account || {}; const summary = portfolio.summary || {};
+    const risk = portfolio.risk_instrumentation || {};
+    const quotesStale = portfolio.option_analytics_freshness === 'LAST_MARKET_QUOTE';
+    const staleMetric = (name, stale) => {
+      const node = q('[data-vsim="' + name + '"]');
+      if (node) node.classList.toggle('stale-value', Boolean(stale));
+    };
     setValue('booked-premium', summary.booked_premium, money);
     setValue('income-theta', summary.income_theta_per_day, money);
     setValue('net-theta', summary.net_theta_per_day, money);
+    const hasLongOptionLeg = Number(portfolio.option_positions || 0) > Number(portfolio.short_option_positions || 0);
+    const netThetaCard = q('[data-vsim="net-theta-card"]');
+    if (netThetaCard) {
+      netThetaCard.hidden = !hasLongOptionLeg;
+      netThetaCard.parentElement?.classList.toggle('five-metrics', !hasLongOptionLeg);
+    }
+    const thetaComplete = portfolio.option_analytics_source === 'SCHWAB_LATEST_AVAILABLE_COMPLETE';
+    const thetaAsOf = portfolio.option_analytics_asof ? when(portfolio.option_analytics_asof) : 'No verified quote';
+    text(q('[data-vsim="income-theta-note"]'), thetaComplete
+      ? number(portfolio.short_option_positions) + ' short-option position'
+        + (Number(portfolio.short_option_positions) === 1 ? '' : 's') + ' · '
+        + (quotesStale ? 'STALE LAST QUOTE ' : 'quote ') + thetaAsOf
+      : 'Unavailable · one or more option Greeks are missing');
+    text(q('[data-vsim="net-theta-note"]'), thetaComplete
+      ? number(portfolio.option_positions) + ' total option position'
+        + (Number(portfolio.option_positions) === 1 ? '' : 's') + ' · '
+        + (quotesStale ? 'STALE LAST QUOTE ' : 'quote ') + thetaAsOf
+      : 'Unavailable · one or more option Greeks are missing');
     setValue('open-pnl', summary.open_pnl, money);
+    staleMetric('income-theta', quotesStale); staleMetric('net-theta', quotesStale); staleMetric('open-pnl', quotesStale);
+    const openPnlBreakdown = money(summary.share_open_pnl) + ' shares + '
+      + money(summary.option_open_pnl) + ' options';
+    text(q('[data-vsim="open-pnl-note"]'), openPnlBreakdown
+      + (quotesStale ? ' · contains stale option marks' : ''));
     setValue('margin-debit', account.margin_debit, money);
-    setValue('buying-power', account.buying_power, money);
-    setValue('portfolio-nav', account.nav, money); setValue('portfolio-cash', account.cash, money);
-    setValue('gross-positions', account.gross_positions, money); setValue('position-count', account.position_count, number);
-    setValue('open-contracts', account.open_contracts, number); setValue('withdrawable-cash', account.withdrawable_cash, money);
-    text(q('[data-vsim="portfolio-asof"]'), 'As of ' + when(portfolio.asof));
+    const performanceSummary = performance && performance.summary || {};
+    const performanceHistory = performance && performance.history || {};
+    const realizedPremiumVerified = performanceHistory.status === 'COMPLETE_TO_CONFIGURED_HISTORY_FLOOR';
+    const realizedPremium = q('[data-vsim="mtd-realized-premium"]');
+    if (realizedPremium) {
+      text(realizedPremium, realizedPremiumVerified ? moneyExact(performanceSummary.mtd_realized_premium) : 'UNAVAILABLE');
+      realizedPremium.classList.toggle('negative', realizedPremiumVerified
+        && Number(performanceSummary.mtd_realized_premium) < 0);
+    }
+    text(q('[data-vsim="mtd-realized-premium-note"]'), realizedPremiumVerified
+      ? number(performanceSummary.mtd_realized_premium_trades) + ' closed covered-call / CSP lifecycle'
+        + (Number(performanceSummary.mtd_realized_premium_trades) === 1 ? '' : 's')
+        + ' this month · net of close costs and fees'
+      : 'Broker history incomplete · realized monthly premium cannot be verified');
     text(q('[data-vsim="inventory-count"]'), (portfolio.inventory || []).length + ' positions');
     text(q('[data-vsim="harvest-count"]'), (portfolio.harvest || []).length + ' active');
+    renderCalculatorSymbols(portfolio.inventory || []);
+
+    const masks = risk.custody_scope && risk.custody_scope.account_masks || [];
+    const limitsVersion = String(risk.limits_version || 'version unavailable')
+      .replace(/^constitution-/u, '');
+    text(q('[data-vsim="custody-scope"]'), 'Schwab brokerage account '
+      + (masks.length ? masks.map(mask => '••••' + mask).join(' + ') : 'scope unavailable')
+      + ' · equities and options · ' + number(risk.custody_scope && risk.custody_scope.packet_position_count) + ' positions');
+    const ladder = q('[data-vsim="expiration-ladder"]'); clear(ladder);
+    const ladderRows = [...(risk.expiration_ladder || []), {
+      bucket: 'CASH', label: 'settled reserve', value: Math.max(0, Number(account.cash || 0)),
+      pct: risk.cash_reserve_pct, limit_pct: risk.min_cash_reserve_pct,
+      breached: Boolean(risk.reserve_breached), cash: true,
+    }];
+    ladderRows.forEach(item => {
+      const row = make('div', undefined, 'expiration-row' + (item.breached ? ' breach' : '') + (item.cash ? ' cash-row' : ''));
+      const label = make('strong'); label.append(make('span', item.bucket), document.createTextNode(item.label));
+      const track = make('div', undefined, 'risk-track'); const fill = make('i');
+      fill.style.width = Math.min(100, Math.max(0, Number(item.pct || 0) * 100)) + '%'; track.append(fill);
+      if (present(item.limit_pct)) { const cap = make('i', undefined, 'cap-line'); cap.style.left = Number(item.limit_pct) * 100 + '%'; track.append(cap); }
+      row.append(label, track, make('span', percent(item.pct) + ' of NAV'), make('b', money(item.value))); ladder.append(row);
+    });
+    text(q('[data-vsim="expiration-note"]'), number(risk.short_option_contracts)
+      + ' open short contracts · short-option capital / NAV · Constitution '
+      + limitsVersion + ' expiration cap ' + percent(risk.expiration_limit_pct)
+      + ' of NAV · ' + when(portfolio.asof) + ' · closed futures activity remains in the Performance ledger.');
+
+    const renderGauge = (root, { label, value, limit, breached, note, floor = false }) => {
+      clear(root); if (!root) return;
+      const head = make('div', undefined, 'risk-gauge-head'); head.append(make('span', label), make('strong', percent(value)));
+      const track = make('div', undefined, 'risk-track'); const fill = make('i');
+      fill.style.width = Math.min(100, Math.max(0, Number(value || 0) * 100)) + '%'; track.append(fill);
+      if (present(limit)) { const cap = make('i', undefined, 'cap-line'); cap.style.left = Number(limit) * 100 + '%'; track.append(cap); }
+      root.classList.toggle('breach', Boolean(breached)); root.append(head, track,
+        make('small', note + ' · ' + (floor ? 'minimum ' : 'maximum ') + percent(limit)));
+    };
+    renderGauge(q('[data-vsim="deployed-gauge"]'), { label: 'Deployed', value: risk.deployed_pct,
+      limit: risk.max_deployed_pct, breached: risk.deployed_breached,
+      note: money(Math.max(0, Number(account.nav || 0) - Math.max(0, Number(account.cash || 0)))) + ' deployed' });
+    renderGauge(q('[data-vsim="reserve-gauge"]'), { label: 'Cash reserve', value: risk.cash_reserve_pct,
+      limit: risk.min_cash_reserve_pct, breached: risk.reserve_breached,
+      note: money(Math.max(0, Number(account.cash || 0))) + ' settled unborrowed cash', floor: true });
 
     const bars = q('[data-vsim="commitments"]'); clear(bars);
     const commitments = portfolio.capital_committed || [];
     if (!commitments.length) bars.append(make('p', 'No marked positions or positive cash commitment is available.', 'muted'));
-    commitments.forEach(item => { const row = make('div', undefined, 'commitment-row');
+    text(q('[data-vsim="concentration-cap"]'), percent(risk.single_underlying_limit_pct)
+      + ' Constitution single-name cap · ' + limitsVersion);
+    commitments.forEach(item => { const row = make('div', undefined, 'commitment-row' + (item.breached ? ' breach' : ''));
       row.append(make('strong', item.symbol)); const track = make('div', undefined, 'commitment-track');
       const fill = make('i'); fill.style.width = Math.min(100, Math.max(0, Number(item.pct_nav || 0) * 100)) + '%'; track.append(fill);
+      if (present(item.limit_pct)) { const cap = make('i', undefined, 'cap-line'); cap.style.left = Number(item.limit_pct) * 100 + '%'; track.append(cap); }
       row.append(track, make('span', percent(item.pct_nav)), make('b', money(item.value))); bars.append(row); });
 
     fillTable(q('[data-vsim="inventory-body"]'), portfolio.inventory || [], [
       item => item.symbol || '—', item => number(item.quantity), item => money(item.average_price), item => money(item.mark),
       item => money(item.market_value), item => money(item.unrealized_pnl), item => percent(item.portfolio_weight),
       item => number(item.covered_call_capacity),
+      item => {
+        if (item.covered_call_actionable) {
+          const button = make('button', 'SELL CC', 'cc-directive');
+          button.type = 'button'; button.dataset.ccSymbol = item.symbol;
+          button.setAttribute('aria-label', 'Calculate covered calls for ' + item.symbol);
+          return button;
+        }
+        const label = item.covered_call_blocker === 'OPEN_ORDER_RECONCILIATION_REQUIRED'
+          ? 'ORDER OPEN' : item.covered_call_blocker === 'AVERAGE_SHARE_PRICE_UNAVAILABLE'
+            ? 'BASIS NEEDED' : 'NOT AVAILABLE';
+        return make('span', label, 'cc-unavailable');
+      },
     ], 'No current Schwab equity positions.');
+    const quoteValue = (item, value, exact = false) => {
+      const node = make('span', exact ? moneyExact(value) : money(value));
+      if (Number(value) < 0) node.classList.add('negative');
+      if (item.quote_freshness === 'LAST_MARKET_QUOTE') {
+        node.classList.add('stale-value'); node.append(make('small', 'STALE', 'stale-badge'));
+      }
+      return node;
+    };
+    const distanceValue = item => {
+      if (!present(item.distance_to_strike_pct) || !present(item.distance_to_strike_dollars)
+        || !present(item.distance_to_strike_sigma)) return make('span', 'UNAVAILABLE', 'cc-unavailable');
+      const node = make('span', (Number(item.distance_to_strike_pct) * 100).toFixed(1) + '% · '
+        + moneyExact(item.distance_to_strike_dollars) + ' · ' + Number(item.distance_to_strike_sigma).toFixed(2) + 'σ', 'distance-value');
+      if (Number(item.distance_to_strike_dollars) < 0) node.classList.add('itm');
+      if (item.quote_freshness === 'LAST_MARKET_QUOTE') { node.classList.add('stale-value'); node.append(make('small', 'STALE', 'stale-badge')); }
+      return node;
+    };
     fillTable(q('[data-vsim="harvest-body"]'), portfolio.harvest || [], [
       item => item.symbol || '—', item => item.type || '—', item => money(item.strike), item => item.expiration || '—',
-      item => number(item.quantity), item => money(item.entry_credit), item => money(item.mark), item => money(item.unrealized_pnl),
-      item => money(item.theta_per_day), item => money(item.capital_committed), item => item.quote_asof ? when(item.quote_asof) : 'UNAVAILABLE',
+      item => number(item.quantity), item => money(item.entry_credit), item => quoteValue(item, item.mark, true), item => quoteValue(item, item.unrealized_pnl),
+      item => quoteValue(item, item.theta_per_day), item => distanceValue(item), item => money(item.capital_committed ?? item.expiration_capital),
+      item => item.quote_asof ? when(item.quote_asof) + (item.quote_freshness === 'LAST_MARKET_QUOTE' ? ' · LAST QUOTE' : '') : 'UNAVAILABLE',
     ], 'No current short-option positions in Schwab custody.');
   }
 
-  function renderRecords(performance, ledger) {
-    const summary = performance.summary || {}; const history = performance.history || {};
-    setValue('closed-trades', summary.closed_trades, number); setValue('records-realized', summary.realized_pnl, money);
-    setValue('imported-transactions', history.imported_transactions, number);
-    text(q('[data-vsim="history-status"]'), history.status || 'PARTIAL');
-    text(q('[data-vsim="history-note"]'), history.note || 'History status unavailable.');
-    fillTable(q('[data-vsim="closed-trades-body"]'), performance.trades || [], [
-      item => when(item.closed_at), item => item.underlying || item.symbol || '—', item => item.asset_class || '—',
-      item => item.direction || '—', item => number(item.quantity), item => when(item.opened_at), item => money(item.opening_price),
-      item => money(item.closing_price), item => money(item.fees), item => money(item.realized_pnl),
-    ], history.status === 'PARTIAL' ? 'No fully matched closed lifecycle is available in imported history.' : 'No closed trades.');
-    fillTable(q('[data-vsim="broker-activity-body"]'), ledger.events || [], [
+  function activateView(id) {
+    qa('.view').forEach(view => view.classList.toggle('active', view.id === id));
+    qa('.nav-button').forEach(button => button.classList.toggle('active', button.dataset.view === id));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function renderCoveredCall(result) {
+    const ready = Boolean(result && result.ok && result.selected);
+    const results = q('[data-vsim="cc-results"]'); if (results) results.hidden = false;
+    const status = q('[data-vsim="cc-status"]');
+    if (status) status.dataset.state = ready ? 'ready' : 'blocked';
+    text(q('[data-vsim="cc-outcome"]'), ready
+      ? 'SELL CC candidate identified for ' + result.symbol
+      : 'NO ELIGIBLE COVERED CALL' + (result && result.symbol ? ' · ' + result.symbol : ''));
+    text(q('[data-vsim="cc-badge"]'), ready ? 'READY' : 'BLOCKED');
+    text(q('[data-vsim="cc-reason"]'), result && result.reason
+      ? result.reason : 'Calculation is unavailable. No covered call should be initiated.');
+    text(q('[data-vsim="cc-asof"]'), result && result.asof ? 'Quotes as of ' + when(result.asof) : 'No valid live quote');
+    const recommendation = q('[data-vsim="cc-recommendation"]');
+    if (recommendation) recommendation.hidden = !ready;
+    if (ready) {
+      const selected = result.selected;
+      text(q('[data-vsim="cc-ticker"]'), result.symbol);
+      text(q('[data-vsim="cc-contracts"]'), number(selected.contracts));
+      text(q('[data-vsim="cc-strike"]'), moneyExact(selected.strike));
+      text(q('[data-vsim="cc-expiration"]'), selected.expiration + ' · ' + number(selected.dte) + ' DTE');
+      text(q('[data-vsim="cc-premium"]'), moneyExact(selected.net_premium));
+      text(q('[data-vsim="cc-roc"]'), percent(selected.premium_roc));
+      text(q('[data-vsim="cc-annualized-roc"]'), percent(selected.annualized_premium_roc) + ' annualized');
+      text(q('[data-vsim="cc-otm"]'), percent(selected.market_implied_expire_otm));
+      text(q('[data-vsim="cc-touch"]'), percent(selected.market_implied_touch));
+      text(q('[data-vsim="cc-callaway"]'), percent(selected.called_away_return_on_cost));
+      text(q('[data-vsim="cc-impact"]'), 'Decision impact: selling this call would reserve '
+        + number(selected.covered_shares) + ' shares through ' + selected.expiration
+        + ' and accept sale of those shares at ' + moneyExact(selected.strike)
+        + '. Modeled incremental value versus holding uncovered is ' + moneyExact(selected.incremental_nev_vs_holding)
+        + ' (' + moneyExact(selected.incremental_nev_per_day) + ' per day). User action is required outside VSIM; this screen cannot place the trade.');
+    }
+    const tenors = q('[data-vsim="cc-tenors"]'); clear(tenors);
+    const tenorRows = result && (result.targets || []).length ? result.targets
+      : [7, 14, 21].map(target => ({ target_dte: target, status: 'NOT_EVALUATED' }));
+    tenorRows.forEach(tenor => {
+      const card = make('div', undefined, 'cc-tenor');
+      card.append(make('strong', number(tenor.target_dte) + ' DTE target'));
+      if (tenor.best) card.append(
+        make('span', tenor.expiration + ' · ' + moneyExact(tenor.best.strike) + ' strike'),
+        make('small', number(tenor.eligible_candidates) + ' eligible · modeled edge/day ' + moneyExact(tenor.best.incremental_nev_per_day)),
+      );
+      else card.append(make('span', 'No eligible strike'), make('small', tenor.status || 'Blocked'));
+      tenors.append(card);
+    });
+    const candidateRows = [];
+    [7, 14, 21].forEach(target => candidateRows.push(...((result && result.candidates) || [])
+      .filter(row => Number(row.target_dte) === target).slice(0, 4)));
+    const candidatePanel = q('[data-vsim="cc-candidate-panel"]');
+    if (candidatePanel) candidatePanel.hidden = candidateRows.length === 0;
+    text(q('[data-vsim="cc-eligible-count"]'), candidateRows.length + ' shown');
+    if (candidateRows.length) fillTable(q('[data-vsim="cc-candidates"]'), candidateRows, [
+      item => number(item.rank), item => (item.expiration || '—') + ' (' + number(item.dte) + ')',
+      item => moneyExact(item.strike), item => moneyExact(item.executable_credit_per_share),
+      item => moneyExact(item.incremental_nev_per_day), item => moneyExact(item.incremental_nev_vs_holding),
+    ], '');
+    else clear(q('[data-vsim="cc-candidates"]'));
+    text(q('[data-vsim="cc-diagnostics"]'), JSON.stringify({
+      outcome: result && result.outcome, reason_code: result && result.reason_code,
+      symbol: result && result.symbol, target_dtes: result && result.target_dtes,
+      average_price: result && result.average_price, current_mark: result && result.spot,
+      minimum_strike_exclusive: result && result.minimum_strike_exclusive,
+      rejected: result && result.rejected, forecast: result && result.forecast, method: result && result.method,
+      diagnostics: result && result.diagnostics, source: result && result.source,
+      execution: result && result.execution,
+    }, null, 2));
+  }
+
+  async function openCoveredCall(symbol, button) {
+    activateView('underwrite'); setUnderwriteMode('manual'); setCalculatorMode('covered-call'); resetCoveredCallView();
+    const requestId = crypto.randomUUID();
+    calculatorState.coveredCallSymbol = symbol; calculatorState.coveredCallRequestId = requestId;
+    text(q('[data-vsim="cc-outcome"]'), 'Calculating ' + symbol + ' covered calls…');
+    text(q('[data-vsim="cc-badge"]'), 'CHECKING');
+    text(q('[data-vsim="cc-reason"]'), 'Re-checking unencumbered shares, average price, reconciliation, market session, and fresh 7 / 14 / 21 DTE option quotes.');
+    if (button) button.disabled = true;
+    try {
+      const result = await api('/api/covered-call/calculate?symbol=' + encodeURIComponent(symbol));
+      if (calculatorState.mode === 'covered-call' && calculatorState.coveredCallSymbol === symbol
+        && calculatorState.coveredCallRequestId === requestId) renderCoveredCall(result);
+    } catch (error) {
+      if (calculatorState.mode === 'covered-call' && calculatorState.coveredCallSymbol === symbol
+        && calculatorState.coveredCallRequestId === requestId) {
+        renderCoveredCall({ ok: false, symbol, reason_code: 'CALCULATION_REQUEST_FAILED', reason: error.message });
+      }
+    }
+    finally { if (button) button.disabled = false; }
+  }
+
+  function renderCashSecuredPuts(cycle) {
+    const rows = ((cycle && cycle.cspOpportunities) || (cycle && cycle.opportunities) || [])
+      .filter(item => item.structure === 'CSP' || item.structure === 'CASH_SECURED_PUT')
+      .map((item, index) => ({ ...item, cspRank: index + 1 }));
+    const best = rows.find(item => item.governorApproved) || null;
+    const reasonCodes = [cycle && cycle.reasonCode, ...rows.flatMap(item => item.governorReasonCodes || [])]
+      .filter(Boolean).map(value => String(value).toUpperCase());
+    const failed = cycle && (cycle.outcome === 'REFUSED' || cycle.state === 'QUARANTINED');
+    const unavailable = failed || reasonCodes.some(code => /TRUTH|DATA|QUOTE|CHAIN|SESSION|EVIDENCE|PERSIST|WORKFLOW|RECONCIL|UNAVAILABLE/u.test(code));
+    const governorDeclined = rows.some(item => item.governorStatus === 'DECLINED');
+    const assignmentUnfunded = rows.find(item => (item.governorReasonCodes || [])
+      .includes('SIMULTANEOUS_ASSIGNMENT_UNFUNDED'));
+    const verdict = best ? 'ELIGIBLE CSP CANDIDATE'
+      : unavailable ? 'NO DATA' : governorDeclined ? 'NO CAPITAL' : 'NO EDGE';
+    const results = q('[data-vsim="csp-results"]'); if (results) results.hidden = false;
+    calculatorState.cspCycleId = cycle && cycle.cycleId || null;
+    const status = q('[data-vsim="csp-status"]');
+    if (status) status.dataset.state = best ? 'ready' : 'blocked';
+    text(q('[data-vsim="csp-outcome"]'), best ? verdict + ' · ' + best.underlying : verdict);
+    text(q('[data-vsim="csp-badge"]'), best ? 'READY' : 'BLOCKED');
+    text(q('[data-vsim="csp-reason"]'), best
+      ? 'The candidate below cleared current market-data, expectancy, liquidity, cash-security, and portfolio gates.'
+      : unavailable && cycle && cycle.reason
+        ? cycle.reason + ' This is an infrastructure or input failure, not an investment rejection.'
+        : assignmentUnfunded && assignmentUnfunded.assignmentFunding
+          ? 'All open short puts plus this proposal require '
+            + moneyExact(assignmentUnfunded.assignmentFunding.totalObligation)
+            + ' at simultaneous assignment, but settled unborrowed cash is '
+            + moneyExact(assignmentUnfunded.assignmentFunding.settledUnborrowedCash)
+            + '. Schwab buying power and margin capacity are excluded.'
+        : governorDeclined
+          ? 'Underwriting found candidate structures, but the Portfolio Governor approved zero contracts. Cash remains uncommitted.'
+          : cycle && cycle.reason ? cycle.reason
+        : rows[0] && rows[0].governorReasons && rows[0].governorReasons.length
+          ? rows[0].governorReasons.join(' ')
+          : 'Fresh candidates were evaluated, but none produced positive NEV after the full collateral hurdle. Cash remains preferred.');
+    text(q('[data-vsim="csp-asof"]'), cycle && cycle.at ? 'Calculated ' + when(cycle.at) : 'No completed calculation');
+    const recommendation = q('[data-vsim="csp-recommendation"]');
+    if (recommendation) recommendation.hidden = !best;
+    if (best) {
+      const contracts = Number(best.approvedContracts || 0);
+      text(q('[data-vsim="csp-ticker"]'), best.underlying);
+      text(q('[data-vsim="csp-expiry-strike"]'), best.expiration + ' · ' + moneyExact(best.shortStrike) + ' put');
+      text(q('[data-vsim="csp-credit"]'), moneyExact(best.sizedEntryCredit));
+      text(q('[data-vsim="csp-cash"]'), moneyExact(best.sizedBuyingPower));
+      text(q('[data-vsim="csp-breakeven"]'), moneyExact(best.breakeven));
+      text(q('[data-vsim="csp-nev-day"]'), moneyExact(best.nevPerDay));
+      text(q('[data-vsim="csp-wheel-ready"]'), percent(best.wheelCompatibleFraction));
+      text(q('[data-vsim="csp-pop"]'), percent(best.probabilityOfProfitModel));
+      text(q('[data-vsim="csp-impact"]'), 'Decision impact: selling ' + number(contracts)
+        + ' cash-secured put contract' + (contracts === 1 ? '' : 's') + ' would reserve '
+        + moneyExact(best.sizedBuyingPower) + ' through ' + best.expiration + ' and accept assignment at '
+        + moneyExact(best.shortStrike) + ' per share. User action is required outside VSIM; this screen cannot place the trade.');
+    }
+    const candidatePanel = q('[data-vsim="csp-candidate-panel"]');
+    if (candidatePanel) candidatePanel.hidden = rows.length === 0;
+    if (rows.length) fillTable(q('[data-vsim="csp-candidates"]'), rows, [
+      item => number(item.cspRank), item => item.underlying || '—',
+      item => (item.expiration || '—') + ' (' + number(item.dte) + ')', item => moneyExact(item.shortStrike),
+      item => moneyExact(item.nevPerDay), item => item.governorApproved ? 'ELIGIBLE' : item.governorStatus || 'DECLINED',
+    ], '');
+    else clear(q('[data-vsim="csp-candidates"]'));
+    text(q('[data-vsim="csp-diagnostics"]'), JSON.stringify({
+      cycle_id: cycle && cycle.cycleId, outcome: cycle && cycle.outcome,
+      state: cycle && cycle.state, reason_code: cycle && cycle.reasonCode,
+      reason: cycle && cycle.reason, candidates_returned: rows.length,
+      verdict, governor_rejections: rows.map(item => ({ underlying: item.underlying,
+        strike: item.shortStrike, reason_codes: item.governorReasonCodes,
+        reasons: item.governorReasons, sizing: item.governorSizing,
+        assignment_funding: item.assignmentFunding,
+        wheel_compatibility: item.wheelCompatibility })),
+      authority: cycle && cycle.authority, evidence: cycle && cycle.evidence,
+    }, null, 2));
+  }
+
+  async function waitForCompletedCycle(cycleId) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const status = await api('/api/status');
+      if (status.latestCycle && status.latestCycle.cycleId === cycleId
+        && status.latestCycle.state !== 'TRIGGERED') return status.latestCycle;
+    }
+    return null;
+  }
+
+  async function runCashSecuredPut(button) {
+    setCalculatorMode('cash-secured-put'); resetCspView();
+    if (!window.confirm('Run a fresh protected cash-secured-put calculation? This records shadow evidence but cannot place an order.')) return;
+    const requestId = crypto.randomUUID(); calculatorState.cspRequestId = requestId;
+    if (button) button.disabled = true;
+    text(q('[data-vsim="csp-outcome"]'), 'Calculating cash-secured puts…');
+    text(q('[data-vsim="csp-badge"]'), 'RUNNING');
+    text(q('[data-vsim="csp-reason"]'), 'Verifying account cash, market session, live chains, tail risk, liquidity, and portfolio limits.');
+    try {
+      const trigger = await api('/api/cash-secured-put/calculate', { method: 'POST', headers: {
+        'content-type': 'application/json', 'idempotency-key': crypto.randomUUID(),
+      }, body: '{}' });
+      if (calculatorState.mode !== 'cash-secured-put' || calculatorState.cspRequestId !== requestId) return;
+      if (!trigger.ok) {
+        renderCashSecuredPuts({ outcome: 'REFUSED', state: 'REFUSED', reasonCode: trigger.error && trigger.error.code,
+          reason: trigger.error && trigger.error.message }); return;
+      }
+      const completed = await waitForCompletedCycle(trigger.cycle_id);
+      if (calculatorState.mode !== 'cash-secured-put' || calculatorState.cspRequestId !== requestId) return;
+      if (completed) { currentStatus.latestCycle = completed; renderCashSecuredPuts(completed); }
+      else {
+        text(q('[data-vsim="csp-outcome"]'), 'CSP CALCULATION STILL RUNNING');
+        text(q('[data-vsim="csp-badge"]'), 'IN PROGRESS');
+        text(q('[data-vsim="csp-reason"]'), 'The protected workflow has not finished yet. Its result will appear automatically on the next dashboard refresh.');
+      }
+    } catch (error) {
+      if (calculatorState.mode === 'cash-secured-put' && calculatorState.cspRequestId === requestId) {
+        renderCashSecuredPuts({ outcome: 'REFUSED', state: 'REFUSED', reasonCode: 'CALCULATION_REQUEST_FAILED', reason: error.message });
+      }
+    } finally { if (button) button.disabled = false; }
+  }
+
+  function renderBrokerActivity(performance, ledger) {
+    performanceState.ledger = ledger || {};
+    fillTable(q('[data-vsim="broker-activity-body"]'), performanceState.ledger.events || [], [
       item => when(item.occurred_at || item.first_seen_at), item => item.event_type || '—', item => item.symbol || '—',
       item => item.side || '—', item => number(item.quantity), item => money(item.price), item => money(item.amount), item => item.state || '—',
     ], 'No broker activity has been ingested.');
   }
 
+  function filterDate(value) {
+    return value ? marketDateKey(value) : null;
+  }
+
+  function monthLabel(value) {
+    const date = new Date(value + '-01T12:00:00Z');
+    return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }
+
+  function dayLabel(value) {
+    const date = new Date(value + 'T12:00:00Z');
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  }
+
+  function shiftedMonth(value, offset) {
+    const [year, month] = value.split('-').map(Number);
+    return new Date(Date.UTC(year, month - 1 + offset, 1)).toISOString().slice(0, 7);
+  }
+
+  function syncPerformanceUrl(mode = 'push') {
+    const url = new URL(window.location.href);
+    const fields = [
+      ['pnlMonth', performanceState.month], ['pnlScope', performanceState.scope],
+      ['pnlTicker', performanceState.ticker], ['pnlStrategy', performanceState.strategy],
+      ['pnlFrom', performanceState.from], ['pnlTo', performanceState.to],
+    ];
+    fields.forEach(([key, value]) => { if (value) url.searchParams.set(key, value); else url.searchParams.delete(key); });
+    window.history[mode === 'replace' ? 'replaceState' : 'pushState']({}, '', url.pathname + '?' + url.searchParams.toString() + url.hash);
+  }
+
+  function applyPerformanceUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const month = params.get('pnlMonth'); const scope = params.get('pnlScope');
+    performanceState.month = /^\d{4}-\d{2}$/u.test(String(month || ''))
+      ? month : marketDateKey(new Date()).slice(0, 7);
+    performanceState.scope = scope === 'IN_MANDATE' ? 'IN_MANDATE' : 'ALL';
+    performanceState.ticker = params.get('pnlTicker'); performanceState.strategy = params.get('pnlStrategy');
+    performanceState.from = params.get('pnlFrom'); performanceState.to = params.get('pnlTo');
+  }
+
+  function commitPerformanceState(changes, { push = true, scroll = false, reloadCalendar = false } = {}) {
+    Object.assign(performanceState, changes);
+    if (push) syncPerformanceUrl('push');
+    renderPerformanceLedger();
+    if (reloadCalendar) loadPerformanceCalendar(); else renderPerformanceCalendar(performanceState.calendar);
+    if (scroll) q('.performance-ledger')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function renderPerformanceCalendar(calendar) {
+    const root = q('[data-vsim="pnl-calendar-grid"]'); clear(root);
+    if (!root) return;
+    text(q('[data-vsim="pnl-calendar-month"]'), monthLabel(performanceState.month));
+    const reconciliationBadge = q('[data-vsim="pnl-calendar-reconciliation"]');
+    if (reconciliationBadge) {
+      text(reconciliationBadge, 'CHECKING');
+      reconciliationBadge.classList.remove('reconciled', 'drift');
+    }
+    qa('[data-pnl-calendar-scope]').forEach(button => button.classList.toggle('active', button.dataset.pnlCalendarScope === performanceState.scope));
+    const next = q('[data-pnl-calendar-shift="1"]');
+    if (next) next.disabled = performanceState.month >= marketDateKey(new Date()).slice(0, 7);
+    if (!calendar || calendar.month !== performanceState.month || calendar.scope !== performanceState.scope) {
+      root.append(make('p', 'Loading the requested month…', 'muted')); return;
+    }
+    text(q('[data-vsim="pnl-calendar-subtitle"]'), 'Realized daily P&L · '
+      + (calendar.scope === 'ALL' ? 'all closed lifecycles' : 'CC and CSP closed lifecycles only') + ' · Schwab ledger');
+    const weekdayColumn = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4 };
+    const first = calendar.days && calendar.days[0];
+    for (let index = 0; first && index < (weekdayColumn[first.weekday] || 0); index += 1) root.append(make('div', undefined, 'pnl-calendar-day non-trading'));
+    const maximum = Math.max(1, Number(calendar.summary && calendar.summary.largest_absolute_day || 0));
+    (calendar.days || []).forEach(day => {
+      const actionable = day.state === 'CLOSES' || day.state === 'ZERO';
+      const cell = make(actionable ? 'button' : 'div', undefined, 'pnl-calendar-day ' + (actionable ? 'actionable ' : 'non-trading ')
+        + (day.state === 'CLOSES' ? Number(day.pnl) < 0 ? 'negative' : 'positive' : day.state === 'ZERO' ? 'zero' : day.state.toLowerCase()));
+      if (actionable) {
+        cell.type = 'button'; cell.dataset.performanceDate = day.date;
+        const intensity = Math.abs(Number(day.pnl || 0)) / maximum;
+        if (day.state === 'CLOSES') {
+          const rgb = Number(day.pnl) < 0 ? '242,118,118' : '96,226,168';
+          cell.style.background = 'rgba(' + rgb + ',' + (0.05 + intensity * 0.24).toFixed(3) + ')';
+          cell.style.borderColor = 'rgba(' + rgb + ',' + (0.25 + intensity * 0.55).toFixed(3) + ')';
+        }
+        cell.classList.toggle('active', performanceState.from === day.date && performanceState.to === day.date);
+        cell.setAttribute('aria-label', day.date + ': ' + moneyExact(day.pnl) + ', ' + number(day.trades) + ' closed trade' + (day.trades === 1 ? '' : 's'));
+      } else cell.setAttribute('aria-label', day.date + ': ' + (day.state === 'HOLIDAY' ? 'market closed' : 'future trading day'));
+      cell.append(make('span', String(day.day), 'day-number'));
+      if (actionable) {
+        const amount = day.pnl > 0 ? '+' + moneyExact(day.pnl) : moneyExact(day.pnl);
+        cell.append(make('strong', amount), make('small', number(day.trades) + ' trade' + (day.trades === 1 ? '' : 's')));
+      }
+      root.append(cell);
+    });
+    const summary = calendar.summary || {};
+    const reconciliation = calendar.reconciliation || {};
+    if (reconciliationBadge) {
+      const matched = reconciliation.status === 'MATCH';
+      text(reconciliationBadge, matched ? 'RECONCILED' : 'DRIFT');
+      reconciliationBadge.classList.toggle('reconciled', matched);
+      reconciliationBadge.classList.toggle('drift', !matched);
+      reconciliationBadge.title = matched
+        ? 'Daily cells, monthly ticker attribution, and monthly strategy attribution agree.'
+        : 'Daily cells ' + moneyExact(reconciliation.cell_total) + ' · ticker attribution '
+          + moneyExact(reconciliation.ticker_attribution_total) + ' · strategy attribution '
+          + moneyExact(reconciliation.strategy_attribution_total);
+    }
+    setValue('pnl-calendar-profit', summary.profit, moneyExact); setValue('pnl-calendar-loss', summary.loss, moneyExact);
+    setValue('pnl-calendar-net', summary.net, value => Number(value) > 0 ? '+' + moneyExact(value) : moneyExact(value));
+    const net = q('[data-vsim="pnl-calendar-net"]'); if (net) net.classList.toggle('positive-value', Number(summary.net) > 0);
+    const currentMonth = calendar.month === marketDateKey(new Date()).slice(0, 7);
+    text(q('[data-vsim="pnl-calendar-net-label"]'), monthLabel(calendar.month).toUpperCase() + (currentMonth ? ' MTD' : ' TOTAL'));
+    text(q('[data-vsim="pnl-calendar-note"]'), 'New York market date · NYSE full-day closures · early-close sessions count as trading days · '
+      + number(summary.closed_trades || 0) + ' matched lifecycle' + (Number(summary.closed_trades) === 1 ? '' : 's')
+      + (reconciliation.status === 'MATCH'
+        ? ' · daily cells = monthly ticker attribution = monthly strategy attribution'
+        : ' · DRIFT: cells ' + moneyExact(reconciliation.cell_total) + ' · ticker '
+          + moneyExact(reconciliation.ticker_attribution_total) + ' · strategy '
+          + moneyExact(reconciliation.strategy_attribution_total))
+      + (calendar.history && calendar.history.status === 'PARTIAL' ? ' · HISTORY PARTIAL' : ''));
+  }
+
+  async function loadPerformanceCalendar() {
+    const requestId = ++performanceState.calendarRequestId;
+    renderPerformanceCalendar(null);
+    try {
+      const calendar = await api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month)
+        + '&scope=' + encodeURIComponent(performanceState.scope));
+      if (requestId !== performanceState.calendarRequestId) return;
+      performanceState.calendar = calendar; renderPerformanceCalendar(calendar);
+    } catch (error) {
+      if (requestId !== performanceState.calendarRequestId) return;
+      const root = q('[data-vsim="pnl-calendar-grid"]'); clear(root);
+      if (root) root.append(make('p', 'Calendar unavailable: ' + error.message, 'muted'));
+    }
+  }
+
+  function renderPerformanceLedger() {
+    const performance = performanceState.report || {};
+    const history = performance.history || {};
+    const rows = (performance.trades || []).filter(item => {
+      const ticker = item.underlying || item.symbol || '';
+      const closed = item.closed_date || filterDate(item.closed_at);
+      return (!performanceState.ticker || ticker === performanceState.ticker)
+        && (!performanceState.strategy || item.strategy === performanceState.strategy)
+        && (performanceState.scope !== 'IN_MANDATE' || ['SHORT_CALL','SHORT_PUT'].includes(item.strategy))
+        && (!performanceState.from || closed >= performanceState.from)
+        && (!performanceState.to || closed <= performanceState.to);
+    });
+    const filters = [];
+    if (performanceState.ticker) filters.push('Ticker ' + performanceState.ticker);
+    if (performanceState.strategy) filters.push('Strategy ' + performanceState.strategy);
+    if (performanceState.scope === 'IN_MANDATE') filters.push('CC + CSP only');
+    if (performanceState.from || performanceState.to) filters.push((performanceState.from || 'start') + ' → ' + (performanceState.to || 'latest'));
+    const exactDay = performanceState.from && performanceState.from === performanceState.to;
+    const filterWindow = exactDay ? dayLabel(performanceState.from) : filters.join(' · ');
+    text(q('[data-vsim="ledger-filter-summary"]'), filters.length
+      ? 'Filtered · ' + filterWindow + ' · ' + number(rows.length) + ' trade' + (rows.length === 1 ? '' : 's')
+      : 'All matched trades');
+    const drillDownNote = filters.length ? ' · drill-down below: ' + filters.join(' · ') : '';
+    const summary = performance.summary || {};
+    text(q('[data-vsim="performance-realized-note"]'), 'Lifetime · matched closed trades' + drillDownNote);
+    text(q('[data-vsim="profit-factor-note"]'), 'Lifetime · gross wins ÷ gross losses' + drillDownNote);
+    text(q('[data-vsim="closed-trades-note"]'), 'Lifetime ledger denominator' + drillDownNote);
+    text(q('[data-vsim="win-count"]'), 'Lifetime · ' + number(summary.wins || 0) + ' wins · '
+      + number(summary.losses || 0) + ' losses' + drillDownNote);
+    text(q('[data-vsim="filtered-trade-count"]'), number(rows.length) + ' of ' + number((performance.trades || []).length) + ' trades');
+    const from = q('[data-performance-from]'); const to = q('[data-performance-to]');
+    if (from) from.value = performanceState.from || '';
+    if (to) to.value = performanceState.to || '';
+    fillTable(q('[data-vsim="closed-trades-body"]'), rows, [
+      item => when(item.closed_at), item => item.underlying || item.symbol || '—', item => item.strategy || '—',
+      item => item.asset_class || '—', item => item.direction || '—', item => number(item.quantity),
+      item => when(item.opened_at), item => money(item.opening_price), item => money(item.closing_price),
+      item => money(item.fees), item => money(item.realized_pnl),
+    ], history.status === 'PARTIAL' ? 'No matched lifecycle satisfies these filters; imported history is partial.' : 'No matched lifecycle satisfies these filters.');
+    qa('.attribution-row').forEach(row => {
+      const active = (row.dataset.performanceFilter === 'ticker' && row.dataset.filterValue === performanceState.ticker)
+        || (row.dataset.performanceFilter === 'strategy' && row.dataset.filterValue === performanceState.strategy);
+      row.classList.toggle('active', active);
+    });
+  }
+
+  function setPerformanceFilter(kind, value) {
+    if (kind === 'ticker') commitPerformanceState({ ticker: performanceState.ticker === value ? null : value }, { scroll: true });
+    if (kind === 'strategy') commitPerformanceState({ strategy: performanceState.strategy === value ? null : value }, { scroll: true });
+  }
+
   function attribution(root, rows, key) {
     clear(root); const maximum = Math.max(1, ...(rows || []).map(row => Math.abs(Number(row.realized_pnl || 0))));
     if (!rows.length) { root.append(make('p', 'No matched realized trades.', 'muted')); return; }
-    rows.forEach(item => { const row = make('div', undefined, 'attribution-row'); row.append(make('strong', item[key] || '—'));
+    rows.forEach(item => { const row = make('button', undefined, 'attribution-row'); row.type = 'button';
+      row.dataset.performanceFilter = key; row.dataset.filterValue = item[key] || '';
+      row.setAttribute('aria-label', 'Filter closed trades to ' + (item[key] || 'unknown'));
+      row.append(make('strong', item[key] || '—'));
       const track = make('div', undefined, 'attribution-track'); const fill = make('i');
       fill.style.width = Math.abs(Number(item.realized_pnl || 0)) / maximum * 100 + '%'; if (Number(item.realized_pnl) < 0) fill.style.background = 'var(--red)';
-      track.append(fill); row.append(track, make('span', money(item.realized_pnl)), make('b', item.closed_trades ? item.closed_trades + ' trades' : '')); root.append(row); });
+      track.append(fill); row.append(track, make('span', money(item.realized_pnl)), make('b', number(item.closed_trades || 0) + ' trades')); root.append(row); });
   }
 
   function drawPerformanceChart(svg, points) {
     clear(svg); if (!points || !points.length) { const label = document.createElementNS('http://www.w3.org/2000/svg','text'); label.setAttribute('x','500'); label.setAttribute('y','112'); label.setAttribute('text-anchor','middle'); label.setAttribute('fill','#82978e'); label.textContent='No matched realized trades'; svg.append(label); return; }
-    const values = points.map(point => Number(point.value)); const min = Math.min(0, ...values); const max = Math.max(0, ...values); const span = Math.max(1, max - min);
-    const coordinates = points.map((point,index) => [30 + index * (940 / Math.max(1, points.length - 1)), 195 - ((Number(point.value)-min)/span)*165]);
+    const sorted = points.slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    const values = sorted.map(point => Number(point.value)); const min = Math.min(0, ...values); const max = Math.max(0, ...values); const span = Math.max(1, max - min);
+    const coordinates = sorted.map((point,index) => [30 + index * (940 / Math.max(1, sorted.length - 1)), 195 - ((Number(point.value)-min)/span)*165]);
     const zeroY = 195 - ((0-min)/span)*165; const zero = document.createElementNS('http://www.w3.org/2000/svg','line');
     zero.setAttribute('x1','25'); zero.setAttribute('x2','975'); zero.setAttribute('y1',String(zeroY)); zero.setAttribute('y2',String(zeroY)); zero.setAttribute('stroke','#28443a'); svg.append(zero);
     const path = document.createElementNS('http://www.w3.org/2000/svg','polyline'); path.setAttribute('points', coordinates.map(pair => pair.join(',')).join(' '));
     path.setAttribute('fill','none'); path.setAttribute('stroke','#60e2a8'); path.setAttribute('stroke-width','3'); svg.append(path);
+    let startX = null; let selection = null;
+    const chartX = event => { const box = svg.getBoundingClientRect(); return Math.max(30, Math.min(970, 30 + ((event.clientX - box.left) / Math.max(1, box.width)) * 940)); };
+    svg.onpointerdown = event => { startX = chartX(event); svg.setPointerCapture(event.pointerId); selection = document.createElementNS('http://www.w3.org/2000/svg','rect'); selection.setAttribute('y','20'); selection.setAttribute('height','180'); selection.setAttribute('class','range-selection'); selection.setAttribute('x',String(startX)); selection.setAttribute('width','0'); svg.append(selection); };
+    svg.onpointermove = event => { if (startX === null || !selection) return; const x = chartX(event); selection.setAttribute('x',String(Math.min(startX,x))); selection.setAttribute('width',String(Math.abs(x-startX))); };
+    svg.onpointerup = event => { if (startX === null) return; const endX = chartX(event); const left = Math.min(startX,endX); const right = Math.max(startX,endX); startX = null;
+      if (Math.abs(right-left) < 6) { selection?.remove(); selection = null; return; }
+      const indexAt = x => Math.max(0, Math.min(sorted.length - 1, Math.round(((x - 30) / 940) * (sorted.length - 1))));
+      const first = sorted[indexAt(left)]; const last = sorted[indexAt(right)];
+      selection = null;
+      commitPerformanceState({ from: first.closed_date || filterDate(first.at),
+        to: last.closed_date || filterDate(last.at) }, { scroll: true }); };
   }
 
-  function renderPerformance(performance) {
-    const summary = performance.summary || {};
+  function renderPerformance(performance, portfolio) {
+    performanceState.report = performance;
+    const summary = performance.summary || {}; const mandate = performance.mandate_view || {};
+    const compatible = mandate.mandate_compatible || {}; const review = mandate.structure_review || {};
     setValue('performance-realized', summary.realized_pnl, money); setValue('performance-unrealized', summary.unrealized_pnl, money);
     setValue('performance-total', summary.total_pnl, money); setValue('win-rate', summary.win_rate, percent);
-    setValue('profit-factor', summary.profit_factor, value => Number(value).toFixed(2));
-    text(q('[data-vsim="win-count"]'), number(summary.wins || 0) + ' wins · ' + number(summary.losses || 0) + ' losses');
+    const unrealizedStale = portfolio && portfolio.option_analytics_freshness === 'LAST_MARKET_QUOTE';
+    const unrealizedValue = q('[data-vsim="performance-unrealized"]');
+    const totalValue = q('[data-vsim="performance-total"]');
+    if (unrealizedValue) unrealizedValue.classList.toggle('stale-value', Boolean(unrealizedStale));
+    if (totalValue) totalValue.classList.toggle('stale-value', Boolean(unrealizedStale));
+    text(q('[data-vsim="performance-unrealized-note"]'), unrealizedStale
+      ? 'latest custody marks · STALE option marks included' : 'latest custody marks');
+    text(q('[data-vsim="performance-total-note"]'), unrealizedStale
+      ? 'lifetime realized + current unrealized · STALE option marks included' : 'lifetime realized + current unrealized');
+    setValue('profit-factor', summary.profit_factor, value => Number(value).toFixed(2)); setValue('closed-trades', summary.closed_trades, number);
+    text(q('[data-vsim="win-count"]'), 'Lifetime · ' + number(summary.wins || 0) + ' wins · ' + number(summary.losses || 0) + ' losses');
+    setValue('mandate-pnl', compatible.realized_pnl, money); setValue('mandate-profit-factor', compatible.profit_factor, value => Number(value).toFixed(2));
+    setValue('review-pnl', review.realized_pnl, money); setValue('review-profit-factor', review.profit_factor, value => Number(value).toFixed(2));
+    text(q('[data-vsim="mandate-trades"]'), number(compatible.closed_trades || 0) + ' matched trades');
+    text(q('[data-vsim="review-trades"]'), number(review.closed_trades || 0) + ' matched trades');
+    text(q('[data-vsim="mandate-note"]'), mandate.note || 'Historical option legs require ledger review before structure classification.');
     text(q('[data-vsim="performance-asof"]'), 'As of ' + when(performance.asof));
     text(q('[data-vsim="performance-warning"]'), performance.history && performance.history.note || 'Performance history unavailable.');
     drawPerformanceChart(q('[data-vsim="performance-chart"]'), performance.curve || []);
     attribution(q('[data-vsim="ticker-attribution"]'), performance.by_ticker || [], 'ticker');
     attribution(q('[data-vsim="strategy-attribution"]'), performance.by_strategy || [], 'strategy');
+    renderPerformanceLedger(); renderPerformanceCalendar(performanceState.calendar);
   }
 
-  function renderOverview(status) {
+  function renderOverview(status, portfolio) {
     const custody = status.custody || {};
     const account = custody.account || {};
     const positions = custody.positions || [];
-    const baseline = status.baseline || {};
     const cycle = status.latestCycle || {};
     const market = status.marketCheck;
     const completeMarks = positions.every(position => present(position.marketValue));
@@ -1772,32 +2857,67 @@ export function liveDashboardScript() {
         ? (money(marked) + ' + ' + money(account.cash) + ' cash = ' + money(account.nav) + ' NAV')
         : 'Incomplete position marks · no partial total shown');
     }
-    if (cards[3]) { text(q('.metric-label', cards[3]), 'Reconciliation baseline'); text(q('.metric-value', cards[3]), baseline.status || 'REQUIRED'); text(q('.metric-foot', cards[3]), baseline.status === 'CAPTURED' ? (baseline.positionCount + ' positions · ' + baseline.openOrderCount + ' open orders') : 'Required before a cycle may proceed'); }
+    if (cards[3]) {
+      const dayPnlVerified = present(account.dayProfitLoss)
+        && account.dayProfitLossSource === 'SCHWAB_SUM_RECONCILED_POSITION_DAY_PROFIT_LOSS';
+      const dayPnl = dayPnlVerified ? Number(account.dayProfitLoss) : null;
+      const dayPnlStale = portfolio && portfolio.option_analytics_freshness === 'LAST_MARKET_QUOTE';
+      cards[3].classList.add('today-pnl-card');
+      cards[3].dataset.pnlState = !dayPnlVerified ? 'unavailable' : dayPnl < 0 ? 'loss' : 'gain';
+      text(q('.metric-label', cards[3]), "Today's P&L");
+      const pnlValue = q('.metric-value', cards[3]);
+      text(pnlValue, dayPnlVerified ? moneyExact(dayPnl) : 'UNAVAILABLE');
+      if (pnlValue) {
+        pnlValue.classList.toggle('negative', dayPnlVerified && dayPnl < 0);
+        pnlValue.classList.toggle('positive-value', dayPnlVerified && dayPnl >= 0);
+        pnlValue.classList.toggle('stale-value', Boolean(dayPnlStale));
+      }
+      text(q('.metric-foot', cards[3]), dayPnlVerified
+        ? 'Schwab position day P&L · ' + number(account.dayProfitLossPositionCount) + ' open positions'
+          + (Number(account.dayProfitLossAdjustmentCount || 0) > 0
+            ? ' · ' + number(account.dayProfitLossAdjustmentCount) + ' carried day-cost reconciliation' : '')
+          + (dayPnlStale ? ' · STALE option marks included' : '')
+        : 'Schwab day P&L is incomplete · no estimated balance change shown');
+    }
     text(q('#overview .snapshot strong'), when(custody.observedAt));
 
-    const environment = q('#overview .environment-panel');
+    const environment = q('#decisions .environment-panel');
     if (environment) {
-      const session = market && market.marketState ? (market.marketState.status || market.marketState.error || 'UNKNOWN') : 'NOT CHECKED';
-      const confidence = present(cycle.regimeConfidence) ? Math.round(Number(cycle.regimeConfidence) * 100) : null;
-      text(q('.regime', environment), cycle.regime || session);
-      text(q('.score-ring span', environment), confidence === null ? '—' : String(confidence));
-      text(q('.score-ring small', environment), confidence === null ? '' : '/ 100');
-      text(q('.regime-score strong', environment), cycle.regime ? 'Live model classification' : 'Awaiting an admissible live cycle');
-      text(q('.regime-score p', environment), market ? (market.ok ? 'Schwab quotes and option chains passed freshness checks.' : 'Market data is fail-closed: ' + (market.marketState && (market.marketState.error || market.marketState.status) || 'freshness check failed') + '.') : 'Run the live market verification before opportunity analysis.');
+      const readiness = marketReadiness(status);
+      environment.dataset.readiness = readiness.state;
+      text(q('.kicker', environment), 'Operational gate · New trade evaluation');
+      text(q('h3', environment), 'Market & data readiness');
+      text(q('.regime', environment), readiness.badge);
+      text(q('.score-ring span', environment), readiness.glyph);
+      text(q('.score-ring small', environment), '');
+      const ring = q('.score-ring', environment);
+      if (ring) ring.style.background = readiness.state === 'ready'
+        ? 'radial-gradient(circle at center,#0c1915 54%,transparent 56%),conic-gradient(var(--green) 0 100%,#1b2a25 100%)'
+        : readiness.state === 'waiting'
+          ? 'radial-gradient(circle at center,#0c1915 54%,transparent 56%),conic-gradient(var(--amber) 0 65%,#1b2a25 65%)'
+          : 'radial-gradient(circle at center,#0c1915 54%,transparent 56%),conic-gradient(var(--red) 0 100%,#1b2a25 100%)';
+      text(q('.regime-score strong', environment), readiness.headline);
+      text(q('.regime-score p', environment), readiness.summary);
       const signals = qa('.signal-grid > div', environment);
-      const contractCount = market && market.symbols ? market.symbols.reduce((sum, row) => sum + Number(row.contractCount || 0), 0) : 0;
       const values = [
-        ['Market session', session, market && market.marketState && market.marketState.asOf ? when(market.marketState.asOf) : 'Not checked'],
-        ['Schwab market', market ? (market.ok ? 'VERIFIED' : 'BLOCKED') : 'NOT CHECKED', market ? when(market.checkedAt) : 'Strict freshness'],
-        ['Live contracts', market ? number(contractCount) : '—', market && market.symbols ? market.symbols.length + ' underlyings checked' : 'Not checked'],
-        ['Schwab', status.schwab && status.schwab.status || 'UNKNOWN', when(status.schwab && status.schwab.lastSuccessfulSyncAt)],
+        ['May evaluate new trades?', readiness.allowed, readiness.allowed === 'YES' ? 'Market-data gate passed' : 'Fails closed before underwriting'],
+        ['What is blocking it?', readiness.blockerShort, readiness.blocker],
+        ['Affected data / source', readiness.source, readiness.sourceAsOf],
+        ['What happens next?', readiness.nextShort, readiness.next],
       ];
       signals.forEach((node, index) => { const value = values[index]; if (!value) return; text(q('span', node), value[0]); text(q('strong', node), value[1]); text(q('small', node), value[2]); });
-      text(q('.confidence span', environment), 'Regime confidence'); text(q('.confidence strong', environment), confidence === null ? 'Not available' : confidence + '%');
-      const fill = q('.confidence .bar i', environment); if (fill) fill.style.width = (confidence || 0) + '%';
+      text(q('.confidence span', environment), 'User action required');
+      text(q('.confidence strong', environment), readiness.userAction);
+      let details = q('.vsim-diagnostics', environment);
+      if (!details) {
+        details = make('details', undefined, 'vsim-diagnostics');
+        details.append(make('summary', 'Technical diagnostics'), make('pre'));
+        environment.append(details);
+      }
+      text(q('pre', details), JSON.stringify(readiness.diagnostics, null, 2));
     }
 
-    const decision = q('#overview .decision-panel');
+    const decision = q('#decisions .decision-panel');
     if (decision) {
       const outcome = cycle.outcome || 'NO CYCLE';
       text(q('h3', decision), outcome === 'REFUSED' ? 'Proposal withheld' : outcome);
@@ -1810,7 +2930,7 @@ export function liveDashboardScript() {
     }
 
     const opportunities = cycle.opportunities || [];
-    const topBody = q('#overview .table-panel tbody');
+    const topBody = q('#underwrite [data-underwrite-pane="scan"] .top-opportunities-panel tbody');
     renderRows(topBody, opportunities.slice(0, 10), [
       (_item, index) => String(index + 1).padStart(2, '0'),
       item => item.underlying || '—', item => structure(item.structure),
@@ -1818,7 +2938,7 @@ export function liveDashboardScript() {
       item => number(item.dte), item => money(item.nev), item => percent(item.raroc),
       item => money(item.economicCapital), item => item.admissible ? 'ELIGIBLE' : (item.rejection || 'DECLINED'),
     ]);
-    text(q('#overview .panel-note'), 'Live ranked shadow candidates. Values are generated from current Schwab option chains; no order can be submitted.');
+    text(q('#underwrite [data-underwrite-pane="scan"] .top-opportunities-panel .panel-note'), 'Live ranked shadow candidates. Values are generated from current Schwab option chains; no order can be submitted.');
 
     const positionPanel = q('#overview .positions-empty');
     if (positionPanel) {
@@ -1849,19 +2969,19 @@ export function liveDashboardScript() {
   function renderOpportunities(status) {
     const cycle = status.latestCycle || {};
     const rows = cycle.opportunities || [];
-    const chips = qa('#opportunities .chip');
+    const chips = qa('#underwrite [data-underwrite-pane="scan"] .chip');
     if (chips[0]) text(chips[0], 'Current candidates ' + rows.length);
     if (chips[1]) text(chips[1], 'Eligible ' + rows.filter(row => row.admissible).length);
     if (chips[2]) text(chips[2], 'Declined ' + rows.filter(row => !row.admissible).length);
     if (chips[3]) text(chips[3], cycle.outcome || 'NO CYCLE');
-    text(q('#opportunities .as-of'), cycle.at ? ('As of ' + when(cycle.at)) : 'No completed cycle');
-    renderRows(q('#opportunities .detailed tbody'), rows, [
+    text(q('#underwrite [data-underwrite-pane="scan"] .as-of'), cycle.at ? ('As of ' + when(cycle.at)) : 'No completed cycle');
+    renderRows(q('#underwrite [data-underwrite-pane="scan"] .detailed tbody'), rows, [
       (_item, index) => String(index + 1).padStart(2, '0'), item => item.underlying || '—',
       item => structure(item.structure), () => '—', () => '—', () => '—',
       item => money(item.cvar), () => '—', item => money(item.nev), item => percent(item.raroc),
       item => item.admissible ? 'ELIGIBLE' : (item.rejection || 'DECLINED'),
     ]);
-    const detail = q('#opportunities .candidate-detail');
+    const detail = q('#underwrite [data-underwrite-pane="scan"] .candidate-detail');
     if (detail) {
       clear(detail);
       const panel = make('article', undefined, 'panel');
@@ -1874,8 +2994,8 @@ export function liveDashboardScript() {
   async function renderEvidence(status) {
     const payload = await api('/api/evidence');
     const records = payload.records || [];
-    text(q('#evidence .chain-valid strong'), records.length ? 'VALID' : 'EMPTY');
-    const layout = q('#evidence .evidence-layout'); clear(layout);
+    text(q('#decisions .chain-valid strong'), records.length ? 'VALID' : 'EMPTY');
+    const layout = q('#decisions .evidence-layout'); clear(layout);
     const list = make('article', undefined, 'panel evidence-list');
     const head = make('div', undefined, 'panel-head'); const title = make('div'); title.append(make('p', 'Append-only D1 index · immutable R2 packages', 'kicker'), make('h3', records.length + ' sealed evidence record' + (records.length === 1 ? '' : 's'))); head.append(title, make('span', 'SHA-256 chained', 'hash')); list.append(head);
     const tableWrap = make('div', undefined, 'table-wrap'); const table = make('table'); const thead = make('thead'); const hr = make('tr'); ['Sequence','Cycle','Decision','Authority','Fingerprint','Created'].forEach(label => hr.append(make('th', label))); thead.append(hr); const body = make('tbody');
@@ -1883,10 +3003,10 @@ export function liveDashboardScript() {
     if (!records.length) { const row = make('tr'); const cell = make('td', 'No evidence records have been sealed.'); cell.colSpan = 6; row.append(cell); body.append(row); }
     table.append(thead, body); tableWrap.append(table); list.append(tableWrap); layout.append(list);
     const side = make('aside', undefined, 'evidence-side'); const facts = make('article', undefined, 'panel'); facts.append(make('p', 'Protected evidence storage', 'kicker'), make('h3', status.evidence.storage)); const dl = make('dl', undefined, 'package-facts'); [['Index','Cloudflare D1'],['Raw packages','Protected R2'],['Records',String(records.length)],['Mutation request','None'],['Authority','2 · Propose only']].forEach(pair => { const div = make('div'); div.append(make('dt', pair[0]), make('dd', pair[1])); dl.append(div); }); facts.append(dl); side.append(facts); layout.append(side);
-    text(q('#evidence .preview-disclaimer'), 'Live protected evidence metadata. Raw evidence packages remain private and are not exposed to the browser.');
+    text(q('#decisions .preview-disclaimer'), 'Live protected evidence metadata. Raw evidence packages remain private and are not exposed to the browser.');
   }
 
-  function renderSystem(status) {
+  function renderSystem(status, performance) {
     text(q('#system .readiness-banner strong'), 'Operational live shadow system');
     text(q('#system .readiness-banner p'), 'Schwab custody and market data are read-only and fail-closed, and D1/R2 evidence is active. Live-order mutation remains constitutionally and technically unavailable.');
     text(q('#system .readiness-number'), 'SHADOW');
@@ -1919,6 +3039,23 @@ export function liveDashboardScript() {
       controls.append(actions, reason, make('p', 'Normal mission-control actions are limited to running a shadow cycle or replaying sealed evidence. Global pause and the independent kill switch are separate safety controls. None can submit, replace, or cancel an order.', 'connector-note'), make('pre', 'Ready.', 'operator-output'));
       ladderPanel.parentNode.insertBefore(controls, ladderPanel);
     }
+    let historyPanel = q('.system-history', q('#system'));
+    if (!historyPanel) {
+      historyPanel = make('article', undefined, 'panel system-history');
+      historyPanel.id = 'system-history';
+      const parent = controls && controls.parentNode || q('#system');
+      parent.insertBefore(historyPanel, controls || null);
+    }
+    clear(historyPanel);
+    const history = performance && performance.history || {};
+    historyPanel.append(make('p', 'Broker history integrity', 'kicker'), make('h3', history.status || 'History unavailable'));
+    const historyFacts = make('dl', undefined, 'package-facts');
+    [['Imported transactions', number(history.imported_transactions)], ['Evaluated packets', number(history.evaluated_packets)],
+      ['Coverage', history.broker_sync_complete ? 'COMPLETE TO CONFIGURED FLOOR' : 'PARTIAL'],
+      ['Earliest event', when(history.earliest_event_at)], ['Latest event', when(history.latest_event_at)],
+      ['Unmatched closures', number(history.unmatched_closures)]].forEach(pair => { const row = make('div'); row.append(make('dt', pair[0]), make('dd', pair[1])); historyFacts.append(row); });
+    historyPanel.append(historyFacts, make('p', history.note || 'History status unavailable.', 'connector-note'));
+
     const safety = status.controls || {};
     text(q('.control-status', controls), 'GLOBAL PAUSE: ' + (safety.globalPause ? 'ACTIVE' : 'CLEAR')
       + ' · INDEPENDENT KILL: ' + (safety.independentKill ? 'TRIPPED' : 'CLEAR')
@@ -1960,13 +3097,19 @@ export function liveDashboardScript() {
 
   let currentStatus = null;
   async function refresh() {
-    const payloads = await Promise.all([api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance')]);
+    const payloads = await Promise.all([api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
+      api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope))]);
     currentStatus = payloads[0];
-    renderOverview(currentStatus); renderOpportunities(currentStatus); renderSystem(currentStatus); await renderEvidence(currentStatus);
-    renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3]); renderRecords(payloads[4], payloads[2]); renderPerformance(payloads[4]);
+    performanceState.calendar = payloads[5];
+    renderOverview(currentStatus, payloads[3]); renderOpportunities(currentStatus); renderSystem(currentStatus, payloads[4]); await renderEvidence(currentStatus);
+    renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3], payloads[4]); renderBrokerActivity(payloads[4], payloads[2]); renderPerformance(payloads[4], payloads[3]);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
-    text(q('.safety-banner p'), 'Live Schwab custody, Schwab market data, and D1/R2 evidence are connected. Broker order mutation is disabled.');
+    const market = currentStatus.marketCheck;
+    text(q('.safety-banner p'), market && market.ok
+      ? 'Live Schwab custody, verified market data, and D1/R2 evidence are connected. Broker order mutation is disabled.'
+      : 'Schwab custody and D1/R2 evidence are connected. New-trade market data is '
+        + (market ? 'blocked or stale' : 'not yet verified') + '; broker order mutation is disabled.');
     text(q('footer span:nth-child(3)'), 'Worker ' + String(currentStatus.version || '').slice(0, 12));
   }
 
@@ -2007,7 +3150,39 @@ export function liveDashboardScript() {
     finally { if (button) button.disabled = false; }
   }
 
-  document.addEventListener('click', event => { const button = event.target.closest('[data-action]'); if (button) operate(button.dataset.action, button); });
+  document.addEventListener('click', event => {
+    const underwriteTab = event.target.closest('[data-underwrite-mode]');
+    if (underwriteTab) { setUnderwriteMode(underwriteTab.dataset.underwriteMode); return; }
+    const performanceFilter = event.target.closest('[data-performance-filter]');
+    if (performanceFilter) { setPerformanceFilter(performanceFilter.dataset.performanceFilter, performanceFilter.dataset.filterValue); return; }
+    const calendarDay = event.target.closest('[data-performance-date]');
+    if (calendarDay) { commitPerformanceState({ from: calendarDay.dataset.performanceDate,
+      to: calendarDay.dataset.performanceDate }, { scroll: true }); return; }
+    const calendarScope = event.target.closest('[data-pnl-calendar-scope]');
+    if (calendarScope) { commitPerformanceState({ scope: calendarScope.dataset.pnlCalendarScope }, { reloadCalendar: true }); return; }
+    const calendarShift = event.target.closest('[data-pnl-calendar-shift]');
+    if (calendarShift) { commitPerformanceState({ month: shiftedMonth(performanceState.month,
+      Number(calendarShift.dataset.pnlCalendarShift)) }, { reloadCalendar: true }); return; }
+    if (event.target.closest('[data-clear-performance-filter]')) {
+      commitPerformanceState({ ticker: null, strategy: null, from: null, to: null, scope: 'ALL' }, { reloadCalendar: true }); return;
+    }
+    if (event.target.closest('[data-jump-system-history]')) { activateView('system'); q('#system-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    const calculatorTab = event.target.closest('[data-calculator]');
+    if (calculatorTab) { setCalculatorMode(calculatorTab.dataset.calculator); return; }
+    const coveredCall = event.target.closest('[data-cc-symbol]');
+    if (coveredCall) { openCoveredCall(coveredCall.dataset.ccSymbol, coveredCall); return; }
+    const cspCalculate = event.target.closest('[data-csp-calculate]');
+    if (cspCalculate) { runCashSecuredPut(cspCalculate); return; }
+    const button = event.target.closest('[data-action]'); if (button) operate(button.dataset.action, button);
+  });
+  document.addEventListener('change', event => {
+    if (event.target.matches('[data-performance-from]')) commitPerformanceState({ from: event.target.value || null });
+    if (event.target.matches('[data-performance-to]')) commitPerformanceState({ to: event.target.value || null });
+  });
+  window.addEventListener('popstate', () => { applyPerformanceUrl(); renderPerformanceLedger(); loadPerformanceCalendar(); });
+  composeConsolidatedViews();
+  relocateOverviewEvidencePanels();
+  relocateTopOpportunities();
   scrubPreviewLanguage();
   refresh().catch(error => {
     text(q('.header-status strong'), 'Live data unavailable');
@@ -2072,6 +3247,19 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
   if (url.pathname === '/api/portfolio' && request.method === 'GET') {
     return json(await portfolioDashboard(env, owner.id));
+  }
+  if (url.pathname === '/api/covered-call/calculate' && request.method === 'GET') {
+    return json(await coveredCallDashboard(env, owner.id, url.searchParams.get('symbol')));
+  }
+  if (url.pathname === '/api/performance/calendar' && request.method === 'GET') {
+    try {
+      return json(await performanceCalendarDashboard(env, owner.id, {
+        month: url.searchParams.get('month'),
+        scope: url.searchParams.get('scope') || 'ALL',
+      }));
+    } catch (error) {
+      return json({ error: error.message }, 400);
+    }
   }
   if (url.pathname === '/api/performance' && request.method === 'GET') {
     return json(await performanceDashboard(env, owner.id));
@@ -2186,6 +3374,12 @@ async function route(request, env, ctx) {
     if (!cycleId) return json({ error: 'NO_SEALED_CYCLE' }, 404);
     const result = await replayEvidenceTool(env, owner.id, { cycleId, fingerprint: null });
     return json(result, result.ok ? 200 : 409);
+  }
+  if (url.pathname === '/api/cash-secured-put/calculate' && request.method === 'POST') {
+    try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
+    const idempotencyKey = request.headers.get('idempotency-key');
+    if (!idempotencyKey) return json({ error: 'OPERATOR_IDEMPOTENCY_KEY_REQUIRED' }, 400);
+    return json(await triggerShadowCycle(env, owner.id, { source: 'CSP_CALCULATOR', idempotencyKey }));
   }
   if (url.pathname === '/api/cycle' && request.method === 'POST') {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }

@@ -1,4 +1,5 @@
 import { contentHash } from '../src/execution/order.js';
+import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
 
 export const GUARDIAN_MANDATE_VERSION = 'NUVO-GUARDIAN-2026-08-26-v1';
 export const GUARDIAN_STATES = Object.freeze({
@@ -67,7 +68,7 @@ export function evaluateGuardian({ snapshot, reconStatus = 'MISSING', campaignCo
   const nav = finite(snapshot.nav, 0);
   const exposures = projectedExposure(snapshot).map((row) => ({ ...row, pctNav: nav > 0 ? row.projected / nav : null }));
   for (const row of exposures) {
-    if (row.pctNav > 0.20) violations.push({ code: 'RISK/SINGLE_NAME_ABOVE_20', severity: 'CRITICAL', detail: row });
+    if (row.pctNav > DEFAULT_LIMITS.maxSingleUnderlyingPct) violations.push({ code: 'RISK/SINGLE_NAME_ABOVE_20', severity: 'CRITICAL', detail: row });
     else if (row.pctNav > 0.15) violations.push({ code: 'RISK/SINGLE_NAME_ABOVE_15', severity: 'HIGH', detail: row });
     else if (row.pctNav > 0.10) violations.push({ code: 'RISK/SINGLE_NAME_ABOVE_10', severity: 'WARNING', detail: row });
   }

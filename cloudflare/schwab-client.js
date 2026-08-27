@@ -13,6 +13,10 @@ function finite(value, fallback = null) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
+function cents(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
 function iso(value, fallback = null) {
   const parsed = Date.parse(String(value ?? ''));
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback;
@@ -98,6 +102,12 @@ export function normalizePosition(position) {
   const option = parseOcc(symbol);
   const longQuantity = finite(position.longQuantity);
   const shortQuantity = finite(position.shortQuantity);
+  const previousSessionLongQuantity = finite(position.previousSessionLongQuantity, 0);
+  const previousSessionShortQuantity = finite(position.previousSessionShortQuantity, 0);
+  const multiplier = option ? 100 : 1;
+  const rawDayProfitLoss = finite(position.currentDayProfitLoss);
+  const netChange = finite(position.instrument?.netChange);
+  const previousSessionQuantity = previousSessionLongQuantity - previousSessionShortQuantity;
   return {
     symbol: symbol.replaceAll(' ', ''),
     underlying: option?.underlying ?? symbol,
@@ -107,9 +117,74 @@ export function normalizePosition(position) {
     expiration: option?.expiration ?? null,
     quantity: longQuantity != null && shortQuantity != null
       ? longQuantity - shortQuantity : null,
-    multiplier: option ? 100 : 1,
+    multiplier,
     averagePrice: finite(position.averagePrice),
     marketValue: finite(position.marketValue),
+    rawDayProfitLoss,
+    currentDayCost: finite(position.currentDayCost),
+    netChange,
+    previousSessionQuantity,
+    dayProfitLossReference: netChange == null ? null
+      : cents(previousSessionQuantity * multiplier * netChange),
+    dayProfitLoss: rawDayProfitLoss,
+    dayProfitLossSource: rawDayProfitLoss == null
+      ? 'INCOMPLETE_SCHWAB_POSITION_CURRENT_DAY_PROFIT_LOSS'
+      : 'SCHWAB_POSITION_CURRENT_DAY_PROFIT_LOSS',
+    dayProfitLossContributionMode: rawDayProfitLoss == null ? 'INCOMPLETE' : 'RAW',
+    dayProfitLossTriggerReason: rawDayProfitLoss == null
+      ? 'RAW_FIELD_MISSING' : 'RAW_FIELD_ACCEPTED',
+  };
+}
+
+function easternDate(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date);
+  const field = (type) => parts.find((part) => part.type === type)?.value;
+  return `${field('year')}-${field('month')}-${field('day')}`;
+}
+
+/**
+ * Schwab can carry a prior session's currentDayCost into the next session while
+ * currentDayProfitLoss continues subtracting it. Repair only the exact, sealed
+ * identity and only when the transaction ledger proves there was no trade in
+ * this instrument during the observation's session.
+ */
+export function reconcilePositionDayProfitLoss(position, brokerEvents, observedAt) {
+  const raw = finite(position?.rawDayProfitLoss ?? position?.dayProfitLoss);
+  const cost = finite(position?.currentDayCost);
+  const reference = finite(position?.dayProfitLossReference);
+  const quantity = finite(position?.quantity);
+  const previousQuantity = finite(position?.previousSessionQuantity);
+  const sessionDate = easternDate(observedAt);
+  const hasSessionTrade = (brokerEvents ?? []).some((event) => event?.type === 'TRADE'
+    && String(event.symbol ?? '').replaceAll(' ', '').toUpperCase() === position.symbol
+    && easternDate(event.occurredAt) === sessionDate);
+  const unchangedQuantity = quantity != null && previousQuantity != null
+    && Math.abs(quantity - previousQuantity) < 1e-9;
+  const staleCostIdentity = raw != null && cost != null && reference != null
+    && Math.abs(cost) > 0.01 && Math.abs(cents(raw + cost) - reference) <= 0.01;
+  if (!hasSessionTrade && unchangedQuantity && staleCostIdentity) {
+    return {
+      ...position,
+      dayProfitLoss: reference,
+      dayProfitLossAdjustment: cents(reference - raw),
+      dayProfitLossSource: 'SCHWAB_RECONCILED_CARRIED_CURRENT_DAY_COST',
+      dayProfitLossContributionMode: 'SUBSTITUTED',
+      dayProfitLossTriggerReason: 'CURRENT_DAY_COST_IDENTITY_WITHOUT_SAME_SESSION_TRADE',
+    };
+  }
+  return {
+    ...position,
+    dayProfitLoss: raw,
+    dayProfitLossAdjustment: 0,
+    dayProfitLossSource: raw == null
+      ? 'INCOMPLETE_SCHWAB_POSITION_CURRENT_DAY_PROFIT_LOSS'
+      : 'SCHWAB_POSITION_CURRENT_DAY_PROFIT_LOSS',
+    dayProfitLossContributionMode: raw == null ? 'INCOMPLETE' : 'RAW',
+    dayProfitLossTriggerReason: raw == null ? 'RAW_FIELD_MISSING' : 'RAW_FIELD_ACCEPTED',
   };
 }
 
@@ -124,6 +199,7 @@ export function aggregatePositions(positions) {
       grouped.set(key, {
         ...position,
         _allMarketValuesKnown: Number.isFinite(position.marketValue),
+        _allDayProfitLossKnown: Number.isFinite(position.dayProfitLoss),
         _weightedPrice: Number.isFinite(position.averagePrice)
           ? Math.abs(position.quantity) * position.averagePrice : null,
         _weight: Number.isFinite(position.averagePrice) ? Math.abs(position.quantity) : 0,
@@ -134,6 +210,9 @@ export function aggregatePositions(positions) {
     prior.quantity += position.quantity;
     prior._allMarketValuesKnown = prior._allMarketValuesKnown && Number.isFinite(position.marketValue);
     prior.marketValue = prior._allMarketValuesKnown ? prior.marketValue + position.marketValue : null;
+    prior._allDayProfitLossKnown = prior._allDayProfitLossKnown && Number.isFinite(position.dayProfitLoss);
+    prior.dayProfitLoss = prior._allDayProfitLossKnown
+      ? prior.dayProfitLoss + position.dayProfitLoss : null;
     if (prior._direction !== Math.sign(position.quantity)) prior._direction = 0;
     if (prior._direction && Number.isFinite(position.averagePrice)) {
       prior._weightedPrice = (prior._weightedPrice ?? 0) + Math.abs(position.quantity) * position.averagePrice;
@@ -144,7 +223,9 @@ export function aggregatePositions(positions) {
     }
   }
   return [...grouped.values()].filter((position) => position.quantity !== 0).map((position) => {
-    const { _allMarketValuesKnown, _weightedPrice, _weight, _direction, ...clean } = position;
+    const {
+      _allMarketValuesKnown, _allDayProfitLossKnown, _weightedPrice, _weight, _direction, ...clean
+    } = position;
     clean.averagePrice = _weightedPrice != null && _weight > 0 ? _weightedPrice / _weight : null;
     return clean;
   });
@@ -514,6 +595,7 @@ export class SchwabD1Client {
       gamma: finite(quote.gamma ?? record.gamma),
       theta: finite(quote.theta ?? record.theta),
       vega: finite(quote.vega ?? record.vega),
+      underlyingPrice: finite(quote.underlyingPrice ?? record.underlyingPrice),
       openInterest: finite(quote.openInterest ?? record.openInterest, 0),
       volume: finite(quote.totalVolume ?? record.totalVolume, 0),
       freshness: 'REAL_TIME',
@@ -683,7 +765,10 @@ export class SchwabD1Client {
       const packet = accountPackets.find((candidate) => String(candidate?.securitiesAccount?.accountNumber ?? '') === String(number.accountNumber));
       if (!packet) throw new Error('SCHWAB_ACCOUNT_SNAPSHOT_MISSING');
       const account = packet.securitiesAccount;
-      const normalizedPositions = (account.positions ?? []).map(normalizePosition);
+      // Retain each Schwab position object intact for the sealed observation.
+      // Normalization below remains the operational projection, not the evidence source.
+      const rawPositions = Array.isArray(account.positions) ? account.positions : [];
+      const normalizedPositions = rawPositions.map(normalizePosition);
       if (normalizedPositions.some((position) => !position.symbol || !Number.isFinite(position.quantity))) {
         throw new Error('SCHWAB_POSITION_QUANTITY_INCOMPLETE');
       }
@@ -691,6 +776,8 @@ export class SchwabD1Client {
       const balances = account.currentBalances ?? {};
       const positionMarketValue = positions.every((position) => Number.isFinite(position.marketValue))
         ? positions.reduce((sum, position) => sum + position.marketValue, 0) : null;
+      const dayProfitLoss = positions.every((position) => Number.isFinite(position.dayProfitLoss))
+        ? cents(positions.reduce((sum, position) => sum + position.dayProfitLoss, 0)) : null;
       const nav = finite(balances.liquidationValue ?? balances.equity);
       const reportedCash = finite(balances.cashBalance ?? balances.moneyMarketFund ?? balances.availableFunds);
       // In a margin account Schwab may report cashBalance=0 while the marked
@@ -707,7 +794,7 @@ export class SchwabD1Client {
           ?? balances.cashAvailableForTrading),
         marginBalance: finite(balances.marginBalance),
         marginDebit: Math.max(0, -(finite(balances.marginBalance, cash) ?? 0)),
-        nav, positions,
+        nav, dayProfitLoss, dayProfitLossPositionCount: positions.length, positions, rawPositions,
       };
     });
     if (accounts.some((account) => ![account.cash, account.buyingPower, account.nav].every(Number.isFinite))) {
@@ -741,8 +828,24 @@ export class SchwabD1Client {
         ],
       };
     }));
+    accounts.forEach((account, index) => {
+      account.positions = account.positions.map((position) => reconcilePositionDayProfitLoss(
+        position, brokerPackets[index]?.events ?? [], observedAt,
+      ));
+      account.rawDayProfitLoss = account.positions.every((position) => Number.isFinite(position.rawDayProfitLoss))
+        ? cents(account.positions.reduce((sum, position) => sum + position.rawDayProfitLoss, 0)) : null;
+      account.dayProfitLoss = account.positions.every((position) => Number.isFinite(position.dayProfitLoss))
+        ? cents(account.positions.reduce((sum, position) => sum + position.dayProfitLoss, 0)) : null;
+      account.dayProfitLossAdjustmentCount = account.positions.filter(
+        (position) => position.dayProfitLossSource === 'SCHWAB_RECONCILED_CARRIED_CURRENT_DAY_COST',
+      ).length;
+    });
     const orderRows = brokerPackets.map((packet) => packet.orders);
     const brokerEvents = brokerPackets.flatMap((packet) => packet.events).filter((event) => event.occurredAt);
+    const rawPositionPackets = accounts.map(({ accountMask, rawPositions }) => ({
+      accountMask,
+      positions: rawPositions,
+    }));
     const snapshot = {
       asOf: Date.parse(observedAt),
       cash: accounts.reduce((sum, account) => sum + account.cash, 0),
@@ -751,12 +854,25 @@ export class SchwabD1Client {
         ? accounts.reduce((sum, account) => sum + account.withdrawableCash, 0) : null,
       marginDebit: accounts.reduce((sum, account) => sum + account.marginDebit, 0),
       nav: accounts.reduce((sum, account) => sum + account.nav, 0),
+      dayProfitLoss: accounts.every((account) => Number.isFinite(account.dayProfitLoss))
+        ? cents(accounts.reduce((sum, account) => sum + account.dayProfitLoss, 0)) : null,
+      dayProfitLossPositionCount: accounts.reduce(
+        (sum, account) => sum + account.dayProfitLossPositionCount, 0,
+      ),
+      rawDayProfitLoss: accounts.every((account) => Number.isFinite(account.rawDayProfitLoss))
+        ? cents(accounts.reduce((sum, account) => sum + account.rawDayProfitLoss, 0)) : null,
+      dayProfitLossAdjustmentCount: accounts.reduce(
+        (sum, account) => sum + account.dayProfitLossAdjustmentCount, 0,
+      ),
       positions: aggregatePositions(accounts.flatMap((account) => account.positions)),
+      rawPositionPackets,
       openOrders: orderRows.flat().filter(isOpenOrder),
       accounts: accounts.map(({ accountRef, accountMask, cash, reportedCashBalance, buyingPower,
-        withdrawableCash, marginBalance, marginDebit, nav }) => ({
+        withdrawableCash, marginBalance, marginDebit, nav, rawDayProfitLoss, dayProfitLoss,
+        dayProfitLossPositionCount, dayProfitLossAdjustmentCount }) => ({
         accountRef, accountMask, cash, reportedCashBalance, buyingPower,
-        withdrawableCash, marginBalance, marginDebit, nav,
+        withdrawableCash, marginBalance, marginDebit, nav, rawDayProfitLoss, dayProfitLoss,
+        dayProfitLossPositionCount, dayProfitLossAdjustmentCount,
       })),
       brokerEvents,
     };
@@ -766,14 +882,24 @@ export class SchwabD1Client {
       withdrawableCash: snapshot.withdrawableCash,
       marginDebit: snapshot.marginDebit,
       nav: snapshot.nav,
+      dayProfitLoss: snapshot.dayProfitLoss,
+      rawDayProfitLoss: snapshot.rawDayProfitLoss,
+      dayProfitLossPositionCount: snapshot.dayProfitLossPositionCount,
+      dayProfitLossAdjustmentCount: snapshot.dayProfitLossAdjustmentCount,
+      dayProfitLossField: 'securitiesAccount.positions[].currentDayProfitLoss; carried currentDayCost reconciled with instrument.netChange x previousSession signed quantity x multiplier when the sealed same-session ledger has no trade',
+      dayProfitLossSource: snapshot.dayProfitLoss == null
+        ? 'INCOMPLETE_SCHWAB_POSITION_CURRENT_DAY_PROFIT_LOSS'
+        : 'SCHWAB_SUM_RECONCILED_POSITION_DAY_PROFIT_LOSS',
       accounts: snapshot.accounts.map(({ accountMask, cash, reportedCashBalance, buyingPower,
-        withdrawableCash, marginBalance, marginDebit, nav }) => ({
+        withdrawableCash, marginBalance, marginDebit, nav, rawDayProfitLoss, dayProfitLoss,
+        dayProfitLossPositionCount, dayProfitLossAdjustmentCount }) => ({
         accountMask, cash, reportedCashBalance, buyingPower,
-        withdrawableCash, marginBalance, marginDebit, nav,
+        withdrawableCash, marginBalance, marginDebit, nav, rawDayProfitLoss, dayProfitLoss,
+        dayProfitLossPositionCount, dayProfitLossAdjustmentCount,
       })),
     };
     const snapshotHash = await digest(JSON.stringify({
-      account, positions: snapshot.positions, openOrders: snapshot.openOrders,
+      account, positions: snapshot.positions, rawPositionPackets, openOrders: snapshot.openOrders,
     }));
     await this.env.DB.prepare(`INSERT INTO custody_latest
       (owner_id,snapshot_hash,account_json,positions_json,orders_json,observed_at,updated_at)
@@ -791,10 +917,11 @@ export class SchwabD1Client {
     const observationId = crypto.randomUUID();
     await this.env.DB.prepare(`INSERT INTO broker_observations
       (owner_id,observation_id,snapshot_hash,previous_chain_hash,chain_hash,account_json,
-       positions_json,orders_json,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(
+       positions_json,raw_positions_json,orders_json,observed_at,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(
       ownerId, observationId, snapshotHash, previousChainHash, chainHash,
-      JSON.stringify(account), JSON.stringify(snapshot.positions), JSON.stringify(snapshot.openOrders),
-      observedAt, observedAt,
+      JSON.stringify(account), JSON.stringify(snapshot.positions), JSON.stringify(rawPositionPackets),
+      JSON.stringify(snapshot.openOrders), observedAt, observedAt,
     ).run();
     const persistedEventCount = await this._persistBrokerEvents(ownerId, brokerEvents, observedAt);
     const markStatements = snapshot.positions.map((position) => {
@@ -848,7 +975,10 @@ export class SchwabD1Client {
       ownerId, reconciliationId, snapshotHash, priorBaseline?.snapshot_hash ?? null,
       snapshot.positions.length, snapshot.openOrders.length, persistedEventCount,
       JSON.stringify({ source: 'SCHWAB_CUSTODY_AND_TRANSACTION_LEDGER',
-        accountCount: accounts.length, observationId, observationChainHash: chainHash }), observedAt,
+        accountCount: accounts.length, observationId, observationChainHash: chainHash,
+        dayProfitLossField: account.dayProfitLossField,
+        rawPositionRowsSealed: rawPositionPackets.reduce((sum, row) => sum + row.positions.length, 0) }),
+      observedAt,
     ).run();
     await this.env.DB.prepare(`UPDATE broker_connections SET status='CONNECTED',
       last_successful_sync_at=?,last_error_code=NULL,updated_at=? WHERE owner_id=?`).bind(

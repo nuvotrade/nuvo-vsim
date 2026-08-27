@@ -6,7 +6,7 @@
  * This module answers the six questions in §3 in order and refuses to
  * answer any of them from data it does not have.
  */
-import { evaluate, conditionalLoss, DEFAULT_LAMBDAS } from './ev.js';
+import { evaluate, conditionalLoss, cspWheelCompatibility, DEFAULT_LAMBDAS } from './ev.js';
 import { capitalProfile, opportunityAdjusted } from './capital.js';
 import {
   probabilitySet, marketProbability, modelProbability,
@@ -51,9 +51,18 @@ export function underwrite({
   const evaluation = evaluate({
     structure, dist, diffusionDist, costs, lambdas,
     pNeedExit: isNum(pTouch) ? pTouch : 0.35,
+    collateralHurdleRate: (limits.riskFreeRate ?? 0.045)
+      + (limits.cspRequiredExcessReturn ?? 0.04),
   });
   const capital = capitalProfile({ evaluation, structure, dte, dist });
   const condLoss = conditionalLoss({ structure, dist });
+  const wheelCompatibility = cspWheelCompatibility({
+    structure,
+    dist,
+    forwardVol: shortIv,
+    ccDte: limits.wheelCcDte ?? 14,
+    recoverySigmaThreshold: limits.wheelRecoverySigmaThreshold ?? 1,
+  });
 
   // ── The three probabilities (§4) ──
   let probabilities = null;
@@ -119,12 +128,23 @@ export function underwrite({
     violations.push(violation(TIER.EXPECTANCY, 'NEV_NONPOSITIVE',
       `NEV ${evaluation.nev.toFixed(2)} does not exceed ${limits.minNev}.`, { nev: evaluation.nev }));
   }
-  if (isNum(capital.raroc) && capital.raroc < hurdle) {
+  const cspObjective = structure.kind === 'CSP';
+  if (cspObjective && !wheelCompatibility.measurable) {
+    violations.push(violation(TIER.TRUTH, 'WHEEL_COMPATIBILITY_UNMEASURABLE',
+      'CSP wheel compatibility could not be measured from verified assignment paths and observed volatility.',
+      wheelCompatibility));
+  } else if (cspObjective
+    && wheelCompatibility.strandedFraction >= (limits.maxCspStrandedAssignmentPct ?? 0.40)) {
+    violations.push(violation(TIER.EXPECTANCY, 'WHEEL_STRANDING_RISK',
+      `${(wheelCompatibility.strandedFraction * 100).toFixed(1)}% of assignment paths require more than ${wheelCompatibility.recoverySigmaThreshold.toFixed(1)}σ of recovery before an economically meaningful covered call is structurally available; limit ${((limits.maxCspStrandedAssignmentPct ?? 0.40) * 100).toFixed(0)}%.`,
+      wheelCompatibility));
+  }
+  if (!cspObjective && isNum(capital.raroc) && capital.raroc < hurdle) {
     violations.push(violation(TIER.CAPITAL_EFFICIENCY, 'RAROC_BELOW_HURDLE',
       `RAROC ${(capital.raroc * 100).toFixed(1)}% below the ${stance} hurdle of ${(hurdle * 100).toFixed(1)}%.`,
       { raroc: capital.raroc, hurdle, stance }));
   }
-  if (isNum(capital.roc) && capital.roc < limits.minRoc) {
+  if (!cspObjective && isNum(capital.roc) && capital.roc < limits.minRoc) {
     violations.push(violation(TIER.CAPITAL_EFFICIENCY, 'ROC_LOW',
       `ROC ${(capital.roc * 100).toFixed(2)}% below ${(limits.minRoc * 100).toFixed(2)}%.`,
       { roc: capital.roc }));
@@ -132,7 +152,7 @@ export function underwrite({
 
   // ── The edge must dominate its own cost estimate ──
   const cRatio = costRatio(structure, costs);
-  if (evaluation.costs.total > 0 && evaluation.ev > 0) {
+  if (!cspObjective && evaluation.costs.total > 0 && evaluation.ev > 0) {
     const multiple = evaluation.ev / evaluation.costs.total;
     if (multiple < limits.minEdgeOverCosts) {
       violations.push(violation(TIER.EXPECTANCY, 'EDGE_THIN_VS_COSTS',
@@ -157,8 +177,15 @@ export function underwrite({
       `${dte} DTE is outside the ${limits.minDte}-${limits.maxDte} operating band.`, { dte }));
   }
 
-  const opportunity = opportunityAdjusted({ capital, dte });
-  if (!opportunity.beatsAlternative && isNum(capital.raroc)) {
+  const opportunity = cspObjective
+    ? {
+      hurdle: evaluation.collateralOpportunity.annualRate,
+      beatsAlternative: evaluation.nev > limits.minNev,
+      embeddedInNev: true,
+      note: 'Full strike collateral hurdle is charged inside CSP NEV.',
+    }
+    : opportunityAdjusted({ capital, dte, riskFreeRate: limits.riskFreeRate ?? 0.045 });
+  if (!cspObjective && !opportunity.beatsAlternative && isNum(capital.raroc)) {
     violations.push(violation(TIER.CAPITAL_EFFICIENCY, 'BELOW_RISK_FREE',
       `RAROC ${(capital.raroc * 100).toFixed(1)}% does not beat the ${(opportunity.hurdle * 100).toFixed(2)}% alternative.`,
       opportunity));
@@ -174,14 +201,14 @@ export function underwrite({
     probabilities,
     success,
     conditionalLoss: condLoss,
+    wheelCompatibility,
     pTouch,
     costRatio: cRatio,
     stance,
-    hurdle,
+    hurdle: cspObjective ? evaluation.collateralOpportunity.annualRate : hurdle,
     opportunity,
     violations: violations.sort((a, b) => a.tier - b.tier),
     admissible: violations.length === 0,
-    /** Ranking score. RAROC, not premium (§20). */
-    score: isNum(capital.raroc) ? capital.raroc : -Infinity,
+    score: isNum(capital.decisionValue) ? capital.decisionValue : -Infinity,
   };
 }

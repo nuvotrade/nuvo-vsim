@@ -124,6 +124,23 @@ export function raroc({ evaluation, structure, dte, dist = null }) {
  * Capital efficiency summary for one candidate.
  */
 export function capitalProfile({ evaluation, structure, dte, dist = null }) {
+  if (structure?.kind === 'CSP') {
+    const ec = economicCapital({ evaluation, structure, dist });
+    const bp = structure.buyingPower;
+    return {
+      buyingPower: bp,
+      economicCapital: ec,
+      // CSP ranking and eligibility are NEV/day after the full collateral
+      // hurdle. Do not compute or pass annualised ROC/RAROC for CSPs: a
+      // deprecated display metric must not find its way back into selection.
+      decisionMetric: 'NEV_PER_CALENDAR_DAY',
+      decisionValue: isNum(evaluation.nev) && isNum(dte) && dte > 0
+        ? evaluation.nev / dte : null,
+      riskDensity: isNum(bp) && bp > 0 && isNum(ec) ? ec / bp : null,
+      creditToBp: isNum(bp) && bp > 0 ? structure.credit / bp : null,
+      creditToMaxLoss: structure.maxLoss > 0 ? structure.credit / structure.maxLoss : null,
+    };
+  }
   const roc = returnOnCapital({ evaluation, structure });
   const rar = raroc({ evaluation, structure, dte, dist });
   const bp = structure.buyingPower;
@@ -144,6 +161,8 @@ export function capitalProfile({ evaluation, structure, dte, dist = null }) {
       : null,
     creditToBp: isNum(bp) && bp > 0 ? structure.credit / bp : null,
     creditToMaxLoss: structure.maxLoss > 0 ? structure.credit / structure.maxLoss : null,
+    decisionMetric: 'RAROC',
+    decisionValue: rar.raroc,
   };
 }
 

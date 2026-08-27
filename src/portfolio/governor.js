@@ -75,6 +75,63 @@ export function portfolioGreeks(positions, { nav }) {
   };
 }
 
+/**
+ * Concentration is measured in the loss unit the structure can actually
+ * create. A cash-secured put contributes its complete assignment notional;
+ * defined-risk structures continue to contribute economic capital.
+ */
+export function concentrationCapital(position) {
+  const isCsp = position?.kind === 'CSP' || position?.strategy === 'CSP'
+    || (position?.right === 'put' && Number(position?.quantity) < 0
+      && !position?.longStrike && !Array.isArray(position?.legs));
+  if (isCsp && isNum(position.shortStrike ?? position.strike)) {
+    const strike = position.shortStrike ?? position.strike;
+    const contracts = Math.abs(position.contracts ?? position.quantity ?? 0);
+    const multiplier = position.multiplier ?? 100;
+    return strike * multiplier * contracts;
+  }
+  return position.economicCapital ?? position.buyingPower ?? 0;
+}
+
+/**
+ * Cash that must be available if a short put is assigned.
+ *
+ * This is deliberately not margin, buying power, economic capital, or a
+ * stress loss. A fully-collateralised mandate must be able to settle every
+ * short-put purchase with unborrowed cash at the same time.
+ */
+export function shortPutAssignmentObligation(position) {
+  const isCsp = position?.kind === 'CSP' || position?.strategy === 'CSP'
+    || (String(position?.right ?? '').toLowerCase().startsWith('p')
+      && Number(position?.quantity) < 0
+      && !position?.longStrike && !Array.isArray(position?.legs));
+  if (!isCsp || !isNum(position.shortStrike ?? position.strike)) return 0;
+  const strike = position.shortStrike ?? position.strike;
+  const contracts = Math.abs(position.contracts ?? position.quantity ?? 0);
+  const multiplier = position.multiplier ?? 100;
+  return strike * multiplier * contracts;
+}
+
+/** Aggregate settlement test for simultaneous assignment of every short put. */
+export function assignmentFunding({ positions = [], proposal = null, settledCash }) {
+  const existingObligation = positions.reduce(
+    (total, position) => total + shortPutAssignmentObligation(position), 0,
+  );
+  const proposedObligation = proposal ? shortPutAssignmentObligation(proposal) : 0;
+  const totalObligation = existingObligation + proposedObligation;
+  const measurable = isNum(settledCash);
+  return {
+    measurable,
+    passed: measurable && settledCash >= 0 && totalObligation <= settledCash,
+    existingObligation,
+    proposedObligation,
+    totalObligation,
+    settledUnborrowedCash: measurable ? settledCash : null,
+    shortfall: measurable ? Math.max(0, totalObligation - settledCash) : null,
+    cashSource: 'broker account settled cash; buying power and margin capacity excluded',
+  };
+}
+
 /** Exposure grouped by cluster, sector, underlying and expiration. */
 export function exposures(positions, clustering, { nav }) {
   const byCluster = new Map();
@@ -84,8 +141,7 @@ export function exposures(positions, clustering, { nav }) {
   const addTo = (map, key, amt) => map.set(key, (map.get(key) ?? 0) + amt);
 
   for (const p of positions) {
-    // Exposure measured as economic capital, which is what the limits mean.
-    const amt = p.economicCapital ?? p.buyingPower ?? 0;
+    const amt = concentrationCapital(p);
     const cl = clusterOf(clustering, p.underlying);
     addTo(byCluster, cl?.id ?? `SOLO:${p.underlying}`, amt);
     addTo(bySector, p.sector ?? 'UNKNOWN', amt);
@@ -181,7 +237,7 @@ export function checkLimits({ positions, nav, limits, clustering, drawdownPct = 
 export function govern({
   candidate, positions, nav, ledger, limits, regime, returnsBySymbol,
   sectors, authorityLevel, drawdownPct = 0, repricer = null, baseRiskPct = 0.02,
-  spot = null, beta = 1, rng = null, closedTradePnl = null,
+  spot = null, beta = 1, rng = null, closedTradePnl = null, settledCash = null,
 }) {
   const clustering = buildClusters(returnsBySymbol, {
     threshold: limits.clusterCorrelationThreshold, sectors,
@@ -192,6 +248,11 @@ export function govern({
     positions, nav, limits, clustering, drawdownPct,
   });
   const clusterExposure = currentExp.byCluster[cluster?.id ?? `SOLO:${candidate.underlying}`] ?? 0;
+  const singleUnderlyingExposure = currentExp.byUnderlying[candidate.underlying] ?? 0;
+  const perStructureContracts = Math.max(1, candidate.structure.contracts ?? 1);
+  const concentrationPerContract = candidate.structure.kind === 'CSP'
+    ? candidate.structure.shortStrike * (candidate.structure.multiplier ?? 100)
+    : candidate.capital.economicCapital / perStructureContracts;
 
   // Average correlation of the candidate against what is already held.
   const heldSymbols = [...new Set(positions.map((p) => p.underlying))];
@@ -205,7 +266,41 @@ export function govern({
   const sizing = sizePosition({
     candidate, nav, ledger, regime, clusterExposure, clusterCorrelation,
     limits, authorityLevel, baseRiskPct, holdingsCount: positions.length,
+    singleUnderlyingExposure, concentrationPerContract,
   });
+
+  // Test at least one CSP contract before returning any generic zero-size
+  // result. Otherwise a concentration or risk-budget cap can hide the more
+  // fundamental fact that the account cannot settle even one assignment.
+  const fundingProposal = candidate.structure.kind === 'CSP'
+    ? {
+      kind: 'CSP',
+      shortStrike: candidate.structure.shortStrike,
+      contracts: Math.max(1, sizing.contracts),
+      multiplier: candidate.structure.multiplier ?? 100,
+    }
+    : null;
+  const assignment = assignmentFunding({
+    positions, proposal: fundingProposal, settledCash,
+  });
+  if (!assignment.measurable) {
+    return {
+      approved: false, sizing, clustering, cluster, portfolioBefore,
+      assignmentFunding: assignment,
+      violations: [violation(TIER.TRUTH, 'SETTLED_CASH_UNAVAILABLE',
+        'Verified settled cash is unavailable; simultaneous short-put assignment cannot be funded or evaluated.',
+        assignment)],
+    };
+  }
+  if (!assignment.passed) {
+    return {
+      approved: false, sizing, clustering, cluster, portfolioBefore,
+      assignmentFunding: assignment,
+      violations: [violation(TIER.SURVIVAL, 'SIMULTANEOUS_ASSIGNMENT_UNFUNDED',
+        `All short puts would require $${assignment.totalObligation.toFixed(2)} at assignment, but only $${assignment.settledUnborrowedCash.toFixed(2)} of settled unborrowed cash is available.`,
+        assignment)],
+    };
+  }
 
   if (sizing.contracts === 0) {
     return {
@@ -243,6 +338,7 @@ export function govern({
       ?? candidate.structure.legs[0]?.contract?.iv,
     shortStrike: candidate.structure.shortStrike,
     longStrike: candidate.structure.longStrike ?? null,
+    kind: candidate.structure.kind,
     expiration: candidate.structure.expiration,
     beta: beta ?? 1,
     economicCapital: sizing.totalEconomicCapital,
@@ -324,6 +420,7 @@ export function govern({
     stress,
     portfolioCvar,
     ruin,
+    assignmentFunding: assignment,
     violations: blocking,
     warnings: check.violations.filter((v) => v.detail?.soft),
   };

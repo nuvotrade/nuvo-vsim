@@ -4,11 +4,24 @@ import {
   evaluateGuardian, guardianDiscordPayload, guardianReport, GUARDIAN_STATES,
   normalizedBrokerEventKey, projectedExposure, shouldNotifyGuardian, uncoveredShortCalls, wholeDollar,
 } from '../cloudflare/guardian.js';
+import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
 
 const NOW = Date.UTC(2026, 7, 26, 15, 0);
 const base = { asOf: NOW, nav: 100_000, cash: 20_000, marginDebit: 0, openOrders: [], positions: [] };
 
 describe('NUVO Guardian enforcement', () => {
+  test('uses the same 20% single-name cap as the frozen Constitution', () => {
+    assert.equal(DEFAULT_LIMITS.maxSingleUnderlyingPct, 0.20);
+    const below = evaluateGuardian({ snapshot: { ...base, positions: [
+      { symbol: 'ABC', underlying: 'ABC', type: 'EQUITY', quantity: 100, marketValue: 20_000 },
+    ] }, reconStatus: 'CAPTURED', campaignCount: 1, now: NOW });
+    assert.ok(!below.violations.some((row) => row.code === 'RISK/SINGLE_NAME_ABOVE_20'));
+    const above = evaluateGuardian({ snapshot: { ...base, positions: [
+      { symbol: 'ABC', underlying: 'ABC', type: 'EQUITY', quantity: 101, marketValue: 20_001 },
+    ] }, reconStatus: 'CAPTURED', campaignCount: 1, now: NOW });
+    assert.ok(above.violations.some((row) => row.code === 'RISK/SINGLE_NAME_ABOVE_20'));
+  });
+
   test('halts on any positive margin debit', () => {
     const result = evaluateGuardian({ snapshot: { ...base, marginDebit: 1 }, reconStatus: 'CAPTURED', now: NOW });
     assert.equal(result.state, GUARDIAN_STATES.HALTED);

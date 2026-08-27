@@ -2,7 +2,10 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { CapitalLedger, CAPITAL_STATE } from '../src/portfolio/capital_states.js';
 import { buildClusters, clusterOf } from '../src/portfolio/clusters.js';
-import { checkLimits, exposures, portfolioGreeks } from '../src/portfolio/governor.js';
+import {
+  assignmentFunding, checkLimits, concentrationCapital, exposures, govern, portfolioGreeks,
+  shortPutAssignmentObligation,
+} from '../src/portfolio/governor.js';
 import {
   qualityMultiplier, confidenceMultiplier, regimeMultiplier, diversificationMultiplier, sizePosition,
 } from '../src/portfolio/sizing.js';
@@ -54,6 +57,10 @@ describe('capital states', () => {
 });
 
 describe('correlation clustering (§14)', () => {
+  test('CSP concentration is full assignment notional while defined risk stays on economic capital', () => {
+    assert.equal(concentrationCapital({ kind: 'CSP', shortStrike: 130, contracts: 10, multiplier: 100 }), 130_000);
+    assert.equal(concentrationCapital({ kind: 'BULL_PUT_SPREAD', economicCapital: 2400, buyingPower: 5000 }), 2400);
+  });
   const r = new Rng('cluster');
   const factor = [...Array(200)].map(() => r.normal(0, 0.01));
   const load = (l) => factor.map((x) => l * x + Math.sqrt(1 - l * l) * r.normal(0, 0.01));
@@ -98,6 +105,58 @@ describe('correlation clustering (§14)', () => {
     const clustering = buildClusters({ A: [], B: [], C: [] }, { sectors: {} });
     const chk = checkLimits({ positions, nav: 100_000, limits: DEFAULT_LIMITS, clustering });
     assert.ok(chk.violations.some((v) => v.code === 'EXPIRATION_LIMIT'));
+  });
+});
+
+describe('simultaneous short-put assignment funding', () => {
+  test('every existing short put and the proposal use full strike settlement notional', () => {
+    const existing = [{ right: 'put', strike: 120, quantity: -1, multiplier: 100 }];
+    const proposal = { kind: 'CSP', shortStrike: 130, contracts: 2, multiplier: 100 };
+    assert.equal(shortPutAssignmentObligation(existing[0]), 12_000);
+    const result = assignmentFunding({ positions: existing, proposal, settledCash: 37_999 });
+    assert.equal(result.totalObligation, 38_000);
+    assert.equal(result.passed, false);
+    assert.equal(result.shortfall, 1);
+    assert.match(result.cashSource, /settled cash/u);
+  });
+
+  test('buying power cannot substitute for settled unborrowed cash', () => {
+    const proposal = {
+      kind: 'CSP', shortStrike: 130, contracts: 1, multiplier: 100, buyingPower: 100_000,
+    };
+    assert.equal(assignmentFunding({ proposal, settledCash: 3_468 }).passed, false);
+    assert.equal(assignmentFunding({ proposal, settledCash: 13_000 }).passed, true);
+  });
+
+  test('missing settled cash is unmeasurable rather than treated as zero or buying power', () => {
+    const result = assignmentFunding({
+      proposal: { kind: 'CSP', shortStrike: 100, contracts: 1, multiplier: 100 },
+      settledCash: null,
+    });
+    assert.equal(result.measurable, false);
+    assert.equal(result.passed, false);
+  });
+
+  test('the Governor names the $3,468 settlement shortfall before a generic zero-size limit', () => {
+    const ledger = new CapitalLedger({ nav: 100_000, limits: DEFAULT_LIMITS });
+    const result = govern({
+      candidate: {
+        underlying: 'X',
+        structure: { kind: 'CSP', shortStrike: 130, contracts: 1, multiplier: 100, buyingPower: 13_000 },
+        capital: { economicCapital: 1_000, decisionMetric: 'NEV_PER_CALENDAR_DAY', decisionValue: 2 },
+        evaluation: { nev: 20, edgeRetention: 0.5 },
+        probabilities: { confidence: 1 },
+        hurdle: 0.085,
+      },
+      positions: [], nav: 100_000, ledger, limits: DEFAULT_LIMITS,
+      regime: { sizeMultiplier: 1 }, returnsBySymbol: { X: [] }, sectors: { X: 'TECH' },
+      authorityLevel: AUTHORITY.AUTO_ENTRY, settledCash: 3_468, spot: 100,
+    });
+    assert.equal(result.approved, false);
+    assert.equal(result.violations[0].code, 'SIMULTANEOUS_ASSIGNMENT_UNFUNDED');
+    assert.equal(result.assignmentFunding.totalObligation, 13_000);
+    assert.equal(result.assignmentFunding.settledUnborrowedCash, 3_468);
+    assert.equal(result.assignmentFunding.shortfall, 9_532);
   });
 });
 
@@ -147,6 +206,24 @@ describe('sizing multipliers can only reduce', () => {
     assert.equal(s.contracts, 0);
     assert.ok(s.zeroReason, 'a zero size must be explained');
     assert.ok(s.binding);
+  });
+
+  test('single-name sizing subtracts existing exposure in the same concentration unit', () => {
+    const ledger = new CapitalLedger({ nav: 100_000, limits: DEFAULT_LIMITS });
+    const candidate = {
+      capital: { raroc: 0.5, economicCapital: 1000 },
+      structure: { contracts: 1, buyingPower: 5000 },
+      probabilities: { confidence: 1 }, hurdle: 0.08,
+    };
+    const s = sizePosition({
+      candidate, nav: 100_000, ledger, regime: { sizeMultiplier: 1 },
+      clusterExposure: 0, clusterCorrelation: null, limits: DEFAULT_LIMITS,
+      authorityLevel: AUTHORITY.AUTO_ENTRY, singleUnderlyingExposure: 19_000,
+      concentrationPerContract: 5000,
+    });
+    assert.equal(s.caps.bySingleName, 0);
+    assert.equal(s.contracts, 0);
+    assert.equal(s.binding, 'single-name-limit');
   });
 
   test('research-only authority can never deploy capital', () => {

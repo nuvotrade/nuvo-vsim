@@ -53,7 +53,9 @@ export function cashSecuredPut({ underlying, put, contracts = 1, aggression = 0.
   const credit = realisticFill(put, 'sell', aggression);
   const mult = put.multiplier ?? 100;
   if (!isNum(credit)) return null;
-  const bp = put.strike * mult * contracts - credit * mult * contracts;
+  // Cash-secured means the complete assignment purchase price is reserved.
+  // Entry credit is income received, not permission to under-collateralise.
+  const bp = put.strike * mult * contracts;
   return {
     kind: STRUCTURE.CSP,
     underlying,
