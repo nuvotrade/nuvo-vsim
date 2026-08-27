@@ -29,17 +29,21 @@ The transferred amount must be settled cash, not buying power, and may not leave
 
 Future funding rules remain a separate mandate decision.
 
-Funding and the per-contract cap jointly determine the admissible universe. If the Principal adopts the proposed 10% per-contract NAV cap, the maximum assignment or newly acquired share-lot notional is $5,000:
+Funding and the per-unit entry cap jointly determine the admissible universe. The Principal approved a 10% per-unit entry cap, so the maximum assignment or newly acquired share-lot commitment at the planned opening NAV is $5,000:
 
 ```text
-maximum lot or assignment notional = $50,000 × 10% = $5,000
-maximum new CC share price          = $5,000 ÷ 100 = $50
-maximum CSP strike                  = $5,000 ÷ 100 = $50
+maximum capital unit              = $50,000 × 10% = $5,000
+maximum new CC share price        = $5,000 ÷ 100 = $50
+maximum CSP strike                = $5,000 ÷ 100 = $50
 ```
 
 A CSP underlying may trade above $50 if the eligible short strike is at or below $50; a newly purchased covered-call lot may not. These are admission constraints, not recommendations to lower liquidity or quality standards to fill the account.
 
-At the current proposed 65% maximum deployment, the dollar deployment ceiling would be $32,500. A 20% reserve requires at least $10,000 cash, while the tighter 65% deployment ceiling would ordinarily leave at least $17,500 undeployed. All figures remain provisional until the Principal approves the corresponding mandate limits.
+At the approved Phase 0 limits, 80% maximum deployment permits no more than $40,000 of deployed capital and the complementary 20% reserve requires at least $10,000 of unencumbered settled cash. The earlier 65% figure was the legacy running-system value; it was never approved or activated as the copilot mandate. Phase 0 deliberately selected 80% / 20%. Those mandate values and the 10% per-unit entry cap remain draft-not-active until a separate reviewed activation.
+
+The cap measures the capital unit being added, not every option contract. A standard cash-secured put uses full assignment notional without netting premium; a newly acquired share lot uses its maximum order commitment. A covered call against verified existing shares creates no new share-capital unit, although every other account and admission limit still applies. Adjusted contracts require their complete broker or OCC deliverable and return `NO DATA` if it cannot be verified.
+
+Pending risk-increasing tickets reserve their maximum capital commitment. The reservation transitions to observed exposure on fill and releases on ticket expiry, void, or confirmed cancellation. Sequential proposals on the same underlying during one New York trading session share one logical batch and cannot evade the single-underlying or Authority-2 proposal-capacity limits by splitting the trade over time.
 
 ## Operating standard
 
@@ -116,7 +120,7 @@ activation.
 1. **Autonomous products:** recommended initial scope is covered calls and cash-secured puts only. Decide whether futures, 0DTE, long options, and spreads are prohibited only for the agent or prohibited in the governed account.
 2. **Universe:** fixed ticker list or rule-based admission. Recommended: rule-based admission with liquidity, chain completeness, event, leverage/inverse-product, and maximum one-lot percentage-of-NAV gates.
 3. **DTE policy:** decide eligible CSP and CC windows. The current 7-day concentration and the proposed 30–45-day cycle are materially different businesses.
-4. **Hard limits:** one value each for single underlying, expiration, deployed capital, reserve, per-contract NAV, factor/cluster, Greeks, and beta.
+4. **Hard limits:** one value each for single underlying, expiration, deployed capital, reserve, per-unit entry capital, factor/cluster, Greeks, and beta.
 5. **Drawdown ladder:** high-water-mark definition; warning, de-risk, halt, and independent-kill rungs; allowed actions at each rung.
 6. **Human-only powers:** mandate amendment, authority promotion, self-suspension clearance, account-scope changes, new products, and any weakening of collateral or survival limits.
 7. **Future funding:** whether contributions are prohibited, scheduled, or Principal-approved case by case; funding changes must not reset the HWM or conceal drawdown.
@@ -312,13 +316,11 @@ Before choosing the universe or concentration limits:
 
 Resolve the remaining Phase 1 Principal decisions in this order:
 
-1. automated products and manual-trading boundary;
-2. per-contract cap and the resulting rule-based universe;
-3. DTE policy;
-4. remaining portfolio limits;
-5. drawdown ladder and resumption authority;
-6. Authority 3 ladder amendment for risk-reducing lifecycle actions;
-7. future funding process.
-8. legacy-account recovery metric.
+1. DTE policy;
+2. drawdown ladder and resumption authority;
+3. remaining portfolio limits;
+4. Authority 3 ladder amendment for risk-reducing lifecycle actions;
+5. future funding process;
+6. legacy-account recovery metric.
 
-Only after those decisions should the draft governance artifacts be created. Until activation, the existing production constitution remains authoritative and the deployed system remains proposal-only.
+Each approved decision may be sealed as a successor draft governance artifact so its terms cannot drift while later decisions remain open. Runtime activation still requires a separate review of the complete governing root. Until that activation, the existing production constitution remains authoritative and the deployed system remains proposal-only.

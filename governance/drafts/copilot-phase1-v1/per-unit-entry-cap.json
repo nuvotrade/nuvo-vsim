@@ -1,0 +1,91 @@
+{
+  "activation": {
+    "activated_at": null,
+    "principal_signature": null,
+    "status": "DRAFT_NOT_ACTIVE"
+  },
+  "authority_effect": "NONE_UNTIL_SEPARATE_REVIEWED_ACTIVATION",
+  "decision": {
+    "capital_unit_measurement": {
+      "adjusted_option": "use complete broker or OCC deliverable including cash components; NO_DATA if unverifiable",
+      "buy_to_close_or_sell_owned_shares": "EXEMPT_RISK_REDUCING",
+      "buy_write": "share_order_limit * quantity + estimated_fees",
+      "cash_secured_put": "strike * contract_multiplier * abs(contracts)",
+      "covered_call_on_verified_existing_shares": "ZERO_NEW_SHARE_CAPITAL_UNIT",
+      "new_fully_paid_share_lot": "share_order_limit * quantity + estimated_fees",
+      "premium_credit_reduces_assignment_notional": false,
+      "standard_deliverable_assumption_allowed_for_adjusted_contract": false
+    },
+    "decision_id": "P1-1",
+    "disposition": "APPROVED_WITH_CLARIFICATIONS",
+    "entry_cap": {
+      "denominator": "nav",
+      "formula": "nav * 0.10",
+      "max_pct": 0.1,
+      "name": "PER_UNIT_ENTRY_CAP"
+    },
+    "existing_unit_above_cap_compels_liquidation": false,
+    "new_exposure_only": true,
+    "passing_cap_is_sufficient_authorization": false,
+    "pre_execution_revalidation_required": true,
+    "risk_reducing_closes_exempt": true
+  },
+  "interaction_with_prior_limits": {
+    "all_other_admission_and_data_gates_apply": true,
+    "authority_2_proposal_capacity_applies": true,
+    "exact_expiration_cap_applies": true,
+    "remaining_deployment_headroom_applies": true,
+    "single_underlying_cap_applies": true
+  },
+  "mandate_id": "nuvo-vsim-copilot-4315-phase1-v1",
+  "pending_capital": {
+    "cancellation_release_condition": "confirmed cancellation",
+    "fill_transition": "filled amount becomes observed position or order exposure",
+    "partial_fill_transition": "filled amount becomes observed exposure; unfilled amount remains reserved",
+    "release_events": [
+      "FILL_TRANSITION",
+      "TICKET_EXPIRY",
+      "VOID",
+      "CONFIRMED_CANCELLATION"
+    ],
+    "reservation_amount": "maximum ticket capital commitment",
+    "reservation_begins": "ticket issuance",
+    "reservation_evidence_is_immutable": true,
+    "void_or_expiry_release": "unfilled reservation released with terminal reason preserved"
+  },
+  "proposal_anti_splitting": {
+    "aggregation_keys": [
+      "canonical_underlying",
+      "new_york_trading_session"
+    ],
+    "batch_capacity_baseline": "sealed custody state for first live ticket in batch",
+    "batch_identity_survives_unfilled_replacement": true,
+    "filled_commitments_remain_in_session_batch": true,
+    "new_session_recomputes_from_current_sealed_custody": true,
+    "replacement_counting": "maximum live commitment; do not double-count abandoned unfilled ticket",
+    "sequential_proposals_aggregate_against": [
+      "P0_1_SINGLE_UNDERLYING",
+      "P0_4_AUTHORITY_2_PROPOSAL_CAPACITY"
+    ]
+  },
+  "provenance": {
+    "decision_date": "2026-08-26",
+    "decision_timezone": "America/Los_Angeles",
+    "principal": "PRINCIPAL",
+    "source": "Principal approval in NUVO VSIM V5 copilot planning record"
+  },
+  "schema": "nuvo.principal-mandate.phase1.per-unit-entry-cap/v1",
+  "supersession": {
+    "effect": "ON_ACTIVATION",
+    "predecessor_mandate_id": "nuvo-vsim-copilot-4315-phase0-v1",
+    "predecessor_mandate_root_sha256": "601fb1ee02ddeddb7dc1197ea0910cdfeb39e05aaa384b155b374b0124b1bba1",
+    "resolves_predecessor_open_decision": "PER_CONTRACT_NAV_CAP",
+    "replacement_name": "PER_UNIT_ENTRY_CAP"
+  },
+  "ticket_falsification": {
+    "deliverable_unverifiable": "NO_DATA",
+    "missing_or_stale_required_input": "NO_DATA",
+    "unit_exceeds_cap_before_execution": "VOID_PER_UNIT_ENTRY_CAP",
+    "void_reason_must_be_visible": true
+  }
+}

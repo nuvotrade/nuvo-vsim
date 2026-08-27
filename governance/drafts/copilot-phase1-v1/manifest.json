@@ -1,0 +1,32 @@
+{
+  "artifacts": [
+    {
+      "path": "governance/drafts/copilot-phase1-v1/per-unit-entry-cap.json",
+      "sha256": "2b4610dd6ab95ff3b97d744a169a8257a9262057f5e4a3fd0dbe6f693d775a77"
+    }
+  ],
+  "canonicalization": {
+    "algorithm": "SHA-256",
+    "artifact_bytes": "exact committed UTF-8 file bytes",
+    "root_definition": "SHA-256 of the exact manifest.json file bytes",
+    "working_directory": "repository root"
+  },
+  "manifest_id": "nuvo-vsim-copilot-4315-phase1-v1",
+  "predecessor": {
+    "manifest_id": "nuvo-vsim-copilot-4315-phase0-v1",
+    "mandate_root_sha256": "601fb1ee02ddeddb7dc1197ea0910cdfeb39e05aaa384b155b374b0124b1bba1"
+  },
+  "principal_approval": {
+    "decision_source": "2026-08-26 Copilot P1-1 Principal executive decision",
+    "measurements_activated": false,
+    "policy_decisions_recorded": true,
+    "signature": null
+  },
+  "schema": "nuvo.governance-manifest/v1",
+  "status": "DRAFT_NOT_ACTIVE",
+  "supersession_effect": "ON_ACTIVATION_ONLY",
+  "verification": {
+    "artifact_command": "shasum -a 256 -c governance/drafts/copilot-phase1-v1/SHA256SUMS",
+    "root_command": "shasum -a 256 governance/drafts/copilot-phase1-v1/manifest.json"
+  }
+}
