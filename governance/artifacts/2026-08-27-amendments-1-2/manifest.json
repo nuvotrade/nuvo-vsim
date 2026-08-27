@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "artifactSetId": "VSIM-AMENDMENTS-1-2-ORIGINALS-2026-08-27",
+  "artifactSetId": "VSIM-AMENDMENTS-1-4-PRESERVED-CHAIN-2026-08-27",
   "classification": "PRESERVATION_ONLY",
   "governanceEffect": "NONE",
   "baseCommit": "55052d32ab03c3eb46b8c8a8af52770b479428a5",
@@ -25,19 +25,53 @@
       "sizeBytes": 13086,
       "verificationStatus": "VERIFIED",
       "byteHandling": "Extracted from transfer container and committed without opening or resaving"
+    },
+    {
+      "filename": "AMENDMENT_3_REV1_FORWARD_EVENT_SOURCE_SIGNED.md",
+      "sha256": "a39b9a261aa20254999f9bbfca39a93abfaeac7174ceeb6bc048eae350785148",
+      "sizeBytes": 9191,
+      "verificationStatus": "VERIFIED",
+      "documentStatus": "SIGNED_PENDING_IMPLEMENTATION_GATES",
+      "active": false,
+      "byteHandling": "Attachment text transport omitted one terminal LF; restoring exactly that byte reproduced the declared signed size and SHA-256",
+      "transportPayload": {
+        "sizeBytes": 9190,
+        "sha256": "80a9c3b0127e251ad646f86acccb8b1d29a499cf67630c10000d74ae3eb712f9"
+      }
+    },
+    {
+      "filename": "AMENDMENT_4_NO_TENOR_FLOOR_SIGNED.md",
+      "sha256": "741735baeab2eea567a1c91dc894be42c5fea62b99496fdfca792a745cfaee07",
+      "sizeBytes": 11049,
+      "verificationStatus": "VERIFIED",
+      "documentStatus": "SIGNED_PENDING_IMPLEMENTATION_GATES",
+      "active": false,
+      "byteHandling": "Copied byte-for-byte from downloaded signed original; independently corroborated by attachment text plus one terminal LF",
+      "attachmentTransportPayload": {
+        "sizeBytes": 11048,
+        "sha256": "2ab5a6663e1ac7b0428f4a0ae1578b09ab410550033ec391276125d903ba9a7b"
+      }
     }
   ],
   "verification": {
-    "method": "Independent SHA-256 recomputation of extracted binary bytes; transfer ZIP and DOCX container CRCs validated",
+    "method": "Independent SHA-256 recomputation; DOCX artifacts verified from transferred originals with container CRC checks; signed Markdown artifacts verified against declared sizes and digests",
     "openedOrResaved": false,
-    "result": "ALL_MATCH",
+    "result": "ALL_FOUR_ARTIFACTS_MATCH",
     "findingId": "AMENDMENT_ARTIFACTS_NOT_INDEPENDENTLY_VERIFIABLE",
     "findingDisposition": "RESOLVED",
     "recurrenceRisk": "Canonical governance artifacts required manual transfer between isolated environments because they were not under version control"
   },
   "activation": {
-    "amendment4Signed": false,
+    "amendment3Rev1Signed": true,
+    "amendment3Rev1Activated": false,
+    "amendment4Signed": true,
     "amendment4Activated": false,
-    "note": "This preservation record does not sign, activate, or amend any governance instrument."
-  }
+    "note": "Preservation does not evaluate or satisfy implementation gates and has no runtime or authority effect."
+  },
+  "relationship": {
+    "amendment3Rev1ToAmendment4": "NO_PREDECESSOR_RELATION_ASSERTED",
+    "note": "Each signed amendment retains its own stated supersession and activation gates. Preservation does not invent ordering."
+  },
+  "priorPreservationCommit": "aa000f45de0482a2bbbe802aaed1462ba771c1e7",
+  "preservationScope": "This successor commit adds the signed Amendment-3 Revision 1 and Amendment-4 artifacts to the same canonical artifact set."
 }
