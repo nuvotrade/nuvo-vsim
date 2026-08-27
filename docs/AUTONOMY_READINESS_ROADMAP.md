@@ -104,6 +104,13 @@ The agent may read these artifacts. It may not write, select, amend, activate, o
 
 **Objective:** decide the rules before measuring compliance or gathering promotion evidence.
 
+The Copilot Phase 0 governance draft and its read-only current-book baseline
+are recorded in `docs/COPILOT_PHASE0_MANDATE_RESOLUTION.md` and
+`docs/COPILOT_PHASE0_CURRENT_BOOK_BASELINE.md`. The content-addressed draft
+artifact is under `governance/drafts/copilot-phase0-v1/`. It is not active and
+does not supersede the running Constitution until a separate reviewed
+activation.
+
 ### Principal decisions
 
 1. **Autonomous products:** recommended initial scope is covered calls and cash-secured puts only. Decide whether futures, 0DTE, long options, and spreads are prohibited only for the agent or prohibited in the governed account.

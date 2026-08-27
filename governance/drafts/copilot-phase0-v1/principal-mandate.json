@@ -1,0 +1,158 @@
+{
+  "account_scope": {
+    "account_mask": "4315",
+    "compliance_requires_complete_account_observation": true,
+    "custody_surface": "SCHWAB_BROKERAGE_EQUITIES_AND_OPTIONS",
+    "manual_activity_consumes_account_limits": true,
+    "multi_account_aggregation": false,
+    "scope_incomplete_granularity": "PER_LIMIT_AND_PER_PRODUCT_SURFACE",
+    "scope_incomplete_verdict": "NO_DATA/SCOPE_INCOMPLETE",
+    "retain_measurable_limit_results": true
+  },
+  "activation": {
+    "activated_at": null,
+    "principal_signature": null,
+    "status": "DRAFT_NOT_ACTIVE"
+  },
+  "authority": {
+    "broker_mutation_permitted": false,
+    "human_execution_required": true,
+    "level": 2,
+    "name": "PROPOSE_ONLY"
+  },
+  "decisions": {
+    "P0-1": {
+      "decision": "APPROVED",
+      "limit": {
+        "denominator": "nav",
+        "max_single_underlying_pct": 0.2
+      },
+      "manage_only_above_limit": true,
+      "name": "SINGLE_UNDERLYING"
+    },
+    "P0-2": {
+      "decision": "APPROVED",
+      "limit": {
+        "denominator": "nav",
+        "max_exact_expiration_pct": 0.25
+      },
+      "name": "ONE_EXPIRATION"
+    },
+    "P0-3": {
+      "complementary_limits": true,
+      "decision": "APPROVED_WITH_REVISION",
+      "limits": {
+        "max_deployed_pct": 0.8,
+        "min_unencumbered_settled_cash_reserve_pct": 0.2
+      },
+      "name": "DEPLOYMENT_AND_RESERVE"
+    },
+    "P0-4": {
+      "decision": "APPROVED_WITH_REVISION",
+      "formula": {
+        "max_single_proposal_commitment": "remaining_deployment_headroom * 0.20",
+        "remaining_deployment_headroom": "max(0, nav * 0.80 - deployed_amount)"
+      },
+      "name": "AUTHORITY_2_PROPOSAL_CAPACITY",
+      "new_proposals_only": true,
+      "risk_reducing_lifecycle_actions_exempt": true
+    },
+    "P0-5": {
+      "decision": "APPROVED",
+      "manual_activity_classification": "OPERATOR_DIRECTED_OUT_OF_SCOPE",
+      "monitor_all_account_activity": true,
+      "name": "ACCOUNT_AND_PRODUCT_SCOPE",
+      "prohibited_new_ticket_products": [
+        "FUTURE",
+        "LONG_OPTION",
+        "MARGIN_FUNDED",
+        "SPREAD",
+        "UNCOVERED_OPTION",
+        "ZERO_DTE"
+      ],
+      "ticket_actions": [
+        "BUY_FULLY_PAID_SHARES",
+        "BUY_TO_CLOSE_EXISTING_SHORT_OPTION",
+        "HOLD_CASH",
+        "HOLD_POSITION",
+        "NO_DATA",
+        "NO_TRADE",
+        "SELL_CASH_SECURED_PUT",
+        "SELL_COVERED_CALL",
+        "SELL_OWNED_SHARES"
+      ]
+    }
+  },
+  "mandate_id": "nuvo-vsim-copilot-4315-phase0-v1",
+  "measurements": {
+    "M0-1_NAV": {
+      "booked_premium_added": false,
+      "definition": "Schwab net liquidation for account 4315 at the custody packet observation time",
+      "field_name": "nav",
+      "position_equity_permitted_as_denominator": false,
+      "source": "SCHWAB_ACCOUNT_NET_LIQUIDATION"
+    },
+    "M0-2_SINGLE_UNDERLYING": {
+      "covered_call": "zero incremental notional beyond verified covering shares",
+      "denominator": "nav",
+      "economic_capital_substitution_permitted": false,
+      "grouping": "canonical_underlying",
+      "long_option": "absolute current market value; Greeks and stress governed separately",
+      "owned_shares": "absolute current market value",
+      "short_put": "strike * multiplier * abs(contracts)",
+      "unsupported_or_unobservable": "NO_DATA/SCOPE_INCOMPLETE",
+      "working_orders": "projected contribution if every live order fills"
+    },
+    "M0-3_EXACT_EXPIRATION": {
+      "covered_call": "current market value of verified covering shares, counted once",
+      "denominator": "nav",
+      "display_week_bucket_is_authoritative": false,
+      "grouping": "exact_expiration_date",
+      "short_put": "strike * multiplier * abs(contracts)"
+    },
+    "M0-4_DEPLOYMENT_AND_RESERVE": {
+      "buying_power_included": false,
+      "deployed_amount": "nav - unencumbered_settled_cash",
+      "deployed_pct": "1 - reserve_pct",
+      "margin_availability_included": false,
+      "net_marked_positions_is_constitutional": false,
+      "operational_market_value_label": "NET_MARKED_POSITIONS_PCT",
+      "other_verified_cash_encumbrances_deducted": true,
+      "reserve_pct": "unencumbered_settled_cash / nav",
+      "constitutional_deployment_label": "CONSTITUTIONAL_DEPLOYED_CAPITAL_PCT",
+      "unencumbered_settled_cash": "max(0, Schwab settled unborrowed cash - CSP assignment collateral - cash committed to live working orders - other verified cash encumbrances)",
+      "withdrawal_capacity_included": false
+    },
+    "M0-5_SCOPE_COMPLETENESS": {
+      "account_mask": "4315",
+      "additional_account_requires_amendment": true,
+      "compliance_requires_every_in_scope_product_observed": true,
+      "known_breach_survives_incomplete_scope": true,
+      "missing_product_surface_classification": "MANDATE_ENFORCEMENT_GAP",
+      "missing_product_surface_verdict": "NO_DATA/SCOPE_INCOMPLETE",
+      "numeric_result_when_surface_incomplete": "OBSERVED_FLOOR",
+      "partial_measurements_preserved": true,
+      "status_granularity": "per limit and product surface, never one global status"
+    }
+  },
+  "open_decisions_excluded_from_this_mandate": [
+    "CSP_AND_CC_DTE_POLICY",
+    "DRAWDOWN_LADDER_AND_HIGH_WATER_MARK",
+    "FACTOR_CLUSTER_GREEKS_AND_BETA_LIMITS",
+    "INITIAL_TAX_TREATMENT",
+    "PER_CONTRACT_NAV_CAP"
+  ],
+  "schema": "nuvo.principal-mandate.phase0/v1",
+  "supersession": {
+    "effect": "ON_ACTIVATION",
+    "scope": "Only P0-1 through P0-5 and M0-1 through M0-5",
+    "supersedes_for_covered_fields": [
+      "cloudflare dashboard display constants",
+      "docs/OPERATING.md authority-capital prose",
+      "docs/PRINCIPAL_PROPOSAL_WORKFLOW.md product-scope prose",
+      "prior Principal proposal prose",
+      "src/constitution/authority.js authority-capital formula",
+      "src/constitution/limits.js constitution-v5.2.1 covered limit fields"
+    ]
+  }
+}
