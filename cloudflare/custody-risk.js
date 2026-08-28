@@ -135,7 +135,7 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
     const cacheKey = `${underlying}:${dte}:${position.strike}`;
     if (!chainCache.has(cacheKey)) {
       chainCache.set(cacheKey, provider.optionChain(underlying, {
-        expirations: [dte], strikes: [position.strike],
+        expirations: [dte], strikes: [position.strike], decisionTime: now,
       }));
     }
     const chain = await chainCache.get(cacheKey);

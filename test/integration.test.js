@@ -113,6 +113,56 @@ describe('the cycle produces a decision, never an exception', () => {
     assert.equal(sealed.historyRawBarCount, 756);
     assert.equal(sealed.historyReturnedBarCount, 400);
   });
+
+  test('one cycle threads and seals one decision instant with acquisition provenance', async () => {
+    const { eng, provider } = build({ ivMult: 1.30 });
+    const chainCalls = [];
+    const eventCalls = [];
+    const optionChain = provider.optionChain.bind(provider);
+    const events = provider.events.bind(provider);
+    const quote = provider.quote.bind(provider);
+    provider.optionChain = async (symbol, options) => {
+      chainCalls.push({ symbol, decisionTime: options?.decisionTime });
+      return {
+        ...await optionChain(symbol, options),
+        acquiredAt: NOW + 400,
+        acquisitionTimes: [NOW + 300, NOW + 400],
+        decisionTime: options?.decisionTime,
+        clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+      };
+    };
+    provider.events = async (symbol, options) => {
+      eventCalls.push({ symbol, decisionTime: options?.decisionTime });
+      return {
+        ...await events(symbol, options),
+        acquiredAt: NOW + 600,
+        decisionTime: options?.decisionTime,
+        clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+      };
+    };
+    provider.quote = async (...args) => ({
+      ...await quote(...args),
+      acquiredAt: NOW + 200,
+      quoteAgeMs: 1200,
+      clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+    });
+    const result = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.deepEqual(chainCalls, SYMBOLS.map((symbol) => ({ symbol, decisionTime: NOW })));
+    assert.deepEqual(eventCalls, SYMBOLS.map((symbol) => ({ symbol, decisionTime: NOW })));
+    assert.equal(result.evidence.inputs.data.decisionTime, NOW);
+    assert.equal(result.evidence.inputs.data.clockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    const sealed = result.evidence.inputs.data.symbols.SPY;
+    assert.equal(sealed.quoteAcquiredAt, NOW + 200);
+    assert.equal(sealed.quoteAgeMs, 1200);
+    assert.equal(sealed.quoteClockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    assert.equal(sealed.chainAcquiredAt, NOW + 400);
+    assert.deepEqual(sealed.chainAcquisitionTimes, [NOW + 300, NOW + 400]);
+    assert.equal(sealed.chainDecisionTime, NOW);
+    assert.equal(sealed.chainClockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    assert.equal(sealed.eventsAcquiredAt, NOW + 600);
+    assert.equal(sealed.eventsDecisionTime, NOW);
+    assert.equal(sealed.eventsClockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+  });
 });
 
 describe('the machine fails closed (§18)', () => {

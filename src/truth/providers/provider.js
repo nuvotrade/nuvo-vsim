@@ -14,7 +14,7 @@ export class DataProvider {
   async quote(symbol) { return { error: 'not implemented' }; }
   async optionChain(symbol, opts) { return { error: 'not implemented' }; }
   async history(symbol, opts) { return { error: 'not implemented' }; }
-  async events(symbol) { return { error: 'not implemented' }; }
+  async events(symbol, opts) { return { error: 'not implemented' }; }
   async accountState() { return { error: 'not implemented' }; }
   async marketState() { return { error: 'not implemented' }; }
   /* eslint-enable no-unused-vars */

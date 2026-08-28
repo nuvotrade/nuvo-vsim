@@ -1,0 +1,11 @@
+FR-005 approved parent 058a2a839836279e5636b39f4024f7affc0b775c
+  total=391 passed=391 failed=0 unloaded=0 files=22
+  source=docs/evidence/fr-005/FILE_TEST_COUNTS.txt at the parent commit
+
+FR-006B branch
+  total=399 passed=399 failed=0 unloaded=0 files=22
+
+Delta 391 -> 399 is exactly eight added tests:
+  test/integration.test.js            +1
+  test/production_adapters.test.js    +7
+No test was removed, renamed, absorbed, or unloaded.

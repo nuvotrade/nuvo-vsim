@@ -35,13 +35,28 @@ export class ReplayProvider extends DataProvider {
   async quote(symbol) {
     const s = this._sym(symbol);
     if (!s?.quote) return { error: `no captured quote for ${symbol}` };
-    return { value: s.quote, asOf: s.quoteAsOf, source: 'replay' };
+    return {
+      value: s.quote,
+      asOf: s.quoteAsOf,
+      source: 'replay',
+      acquiredAt: s.quoteAcquiredAt ?? null,
+      quoteAgeMs: s.quoteAgeMs ?? null,
+      clockContractVersion: s.quoteClockContractVersion ?? null,
+    };
   }
 
   async optionChain(symbol) {
     const s = this._sym(symbol);
     if (!s?.chain) return { error: `no captured chain for ${symbol}` };
-    return { value: s.chain, asOf: s.chainAsOf, source: 'replay' };
+    return {
+      value: s.chain,
+      asOf: s.chainAsOf,
+      source: 'replay',
+      acquiredAt: s.chainAcquiredAt ?? null,
+      acquisitionTimes: s.chainAcquisitionTimes ?? null,
+      decisionTime: s.chainDecisionTime ?? null,
+      clockContractVersion: s.chainClockContractVersion ?? null,
+    };
   }
 
   async history(symbol) {
@@ -66,7 +81,14 @@ export class ReplayProvider extends DataProvider {
     if (!s || s.events === null || s.events === undefined) {
       return { error: `no captured events for ${symbol}` };
     }
-    return { value: s.events, asOf: s.eventsAsOf, source: 'replay' };
+    return {
+      value: s.events,
+      asOf: s.eventsAsOf,
+      source: 'replay',
+      acquiredAt: s.eventsAcquiredAt ?? null,
+      decisionTime: s.eventsDecisionTime ?? null,
+      clockContractVersion: s.eventsClockContractVersion ?? null,
+    };
   }
 
   async marketState() {

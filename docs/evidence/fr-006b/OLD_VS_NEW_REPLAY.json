@@ -1,0 +1,141 @@
+{
+  "packet": "FR-006B",
+  "contractVersion": "PRODUCTION_CLOCK_DOMAINS_V1",
+  "eventMembership": {
+    "population": 198,
+    "decisionTime": 1787875110000,
+    "oldUniqueWindows": 2,
+    "newUniqueWindows": 1,
+    "oldFirst": {
+      "symbol": "SYM001",
+      "providerClock": 1787875110000,
+      "from": "2026-08-25",
+      "through": "2026-10-26"
+    },
+    "oldLast": {
+      "symbol": "SYM198",
+      "providerClock": 1787875307000,
+      "from": "2026-08-26",
+      "through": "2026-10-27"
+    },
+    "newFirst": {
+      "symbol": "SYM001",
+      "from": "2026-08-25",
+      "through": "2026-10-26"
+    },
+    "newLast": {
+      "symbol": "SYM198",
+      "from": "2026-08-25",
+      "through": "2026-10-26"
+    }
+  },
+  "quoteFreshness": {
+    "currentMarketSource": "SCHWAB_MARKET_DATA",
+    "currentLiveTopology": "ONE_SCHWAB_CHAIN_RESPONSE_CONCURRENT_WITH_ONE_SCHWAB_UNDERLYING_RESPONSE",
+    "dormantMassiveTopology": "MULTIPLE_EXPIRATION_RIGHT_RESPONSES_NOT_CURRENT_LIVE_OPTION_SOURCE",
+    "configuredChainMaxAgeMs": 120000,
+    "configuredUnderlyingMaxAgeMs": 60000,
+    "scenario": "DETERMINISTIC_STRESS_REPLAY_NOT_OBSERVED_INCIDENCE",
+    "oldSharedEvaluationTime": 1787846530000,
+    "oldChainResponseAccepted": false,
+    "newChainResponseAccepted": true,
+    "newContractCount": 2,
+    "contractVerdicts": [
+      {
+        "symbol": "TEST_put",
+        "right": "put",
+        "oldAccepted": false,
+        "oldReason": "SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE",
+        "newAccepted": true
+      },
+      {
+        "symbol": "TEST_call",
+        "right": "call",
+        "oldAccepted": false,
+        "oldReason": "SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE",
+        "newAccepted": true
+      }
+    ],
+    "acquisitionTimes": [
+      1787846400000
+    ],
+    "rows": [
+      {
+        "response": "SCHWAB_OPTION_CHAIN",
+        "acquiredAt": 1787846400000,
+        "vendorQuoteAsOf": 1787846399000,
+        "oldSharedAgeMs": 131000,
+        "oldAccepted": false,
+        "newPerResponseAgeMs": 1000,
+        "newAccepted": true
+      },
+      {
+        "response": "SCHWAB_UNDERLYING_QUOTE",
+        "acquiredAt": 1787846530000,
+        "vendorQuoteAsOf": 1787846529000,
+        "oldSharedAgeMs": 1000,
+        "oldAccepted": true,
+        "newPerResponseAgeMs": 1000,
+        "newAccepted": true
+      }
+    ],
+    "sensitivity": {
+      "chainTrueAgeMs": 1000,
+      "falseRefusalWhenSiblingDelayMsGreaterThan": 119000,
+      "boundaryReason": "oldSharedAgeMs = chainTrueAgeMs + siblingDelayMs; refusal occurs only above 120000 ms",
+      "rows": [
+        {
+          "siblingDelayMs": 0,
+          "oldSharedAgeMs": 1000,
+          "oldAccepted": true,
+          "newPerResponseAgeMs": 1000,
+          "newAccepted": true
+        },
+        {
+          "siblingDelayMs": 30000,
+          "oldSharedAgeMs": 31000,
+          "oldAccepted": true,
+          "newPerResponseAgeMs": 1000,
+          "newAccepted": true
+        },
+        {
+          "siblingDelayMs": 60000,
+          "oldSharedAgeMs": 61000,
+          "oldAccepted": true,
+          "newPerResponseAgeMs": 1000,
+          "newAccepted": true
+        },
+        {
+          "siblingDelayMs": 90000,
+          "oldSharedAgeMs": 91000,
+          "oldAccepted": true,
+          "newPerResponseAgeMs": 1000,
+          "newAccepted": true
+        },
+        {
+          "siblingDelayMs": 119000,
+          "oldSharedAgeMs": 120000,
+          "oldAccepted": true,
+          "newPerResponseAgeMs": 1000,
+          "newAccepted": true
+        },
+        {
+          "siblingDelayMs": 120000,
+          "oldSharedAgeMs": 121000,
+          "oldAccepted": false,
+          "newPerResponseAgeMs": 1000,
+          "newAccepted": true
+        },
+        {
+          "siblingDelayMs": 130000,
+          "oldSharedAgeMs": 131000,
+          "oldAccepted": false,
+          "newPerResponseAgeMs": 1000,
+          "newAccepted": true
+        }
+      ]
+    },
+    "historicalIncidence": null,
+    "historicalIncidenceReason": "Legacy evidence did not seal per-response acquisition times."
+  }
+}

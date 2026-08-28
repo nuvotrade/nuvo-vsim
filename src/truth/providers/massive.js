@@ -1,4 +1,10 @@
 import { DataProvider } from './provider.js';
+import {
+  CLOCK_FAULT,
+  evaluateQuoteFreshness,
+  PRODUCTION_CLOCK_CONTRACT_VERSION,
+  requireDecisionTime,
+} from './clock_contract.js';
 
 const DAY_MS = 86_400_000;
 const RIGHTS = Object.freeze(['put', 'call']);
@@ -89,9 +95,12 @@ export class MassiveProvider extends DataProvider {
     const key = String(symbol).toUpperCase();
     if (!this.underlyingQuoteFetcher) return null;
     if (!this.underlyingQuotes.has(key)) {
-      this.underlyingQuotes.set(key, Promise.resolve().then(() => this.underlyingQuoteFetcher(key)));
+      this.underlyingQuotes.set(key, Promise.resolve()
+        .then(() => this.underlyingQuoteFetcher(key))
+        .then((packet) => ({ packet, acquiredAt: this.now() })));
     }
-    const quote = await this.underlyingQuotes.get(key);
+    const observed = await this.underlyingQuotes.get(key);
+    const quote = observed.packet;
     if (quote?.error) throw new Error(quote.error);
     const value = quote?.value ?? quote;
     const last = numeric(value?.last ?? value?.mark ?? value?.spot);
@@ -101,13 +110,24 @@ export class MassiveProvider extends DataProvider {
     const freshness = value?.freshness ?? value?.timeframe ?? quote?.freshness;
     const source = String(quote?.source ?? value?.source ?? 'UNDERLYING_QUOTE');
     const twoSided = Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask >= bid;
-    if (!(last > 0) || !Number.isFinite(asOf) || this.now() - asOf > this.maxQuoteAgeMs
-      || asOf > this.now() + 10_000 || (this.requireRealtimeUnderlying && !isRealtime(freshness))) {
+    const quoteFreshness = evaluateQuoteFreshness({
+      vendorAsOf: asOf,
+      acquiredAt: observed.acquiredAt,
+      maxAgeMs: this.maxQuoteAgeMs,
+    });
+    if (!quoteFreshness.ok && quoteFreshness.error === CLOCK_FAULT.VENDOR_TIME_MISSING) {
+      throw new Error(CLOCK_FAULT.VENDOR_TIME_MISSING);
+    }
+    if (!(last > 0) || !quoteFreshness.ok
+      || (this.requireRealtimeUnderlying && !isRealtime(freshness))) {
       throw new Error('UNDERLYING_QUOTE_NOT_REALTIME');
     }
     return {
       last, bid: twoSided ? bid : null, ask: twoSided ? ask : null,
       asOf, freshness, source,
+      acquiredAt: quoteFreshness.acquiredAt,
+      quoteAgeMs: quoteFreshness.ageMs,
+      clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
     };
   }
 
@@ -139,6 +159,11 @@ export class MassiveProvider extends DataProvider {
       catch (error) { lastError = error; }
     }
     throw lastError;
+  }
+
+  async _getObserved(path, options = {}) {
+    const body = await this._get(path, options);
+    return { body, acquiredAt: this.now() };
   }
 
   async history(symbol, { lookback = 400, minBars = 120 } = {}) {
@@ -224,19 +249,33 @@ export class MassiveProvider extends DataProvider {
     }
   }
 
-  async optionChain(symbol, { expirations = this.dteTargets } = {}) {
+  async optionChain(symbol, {
+    expirations = this.dteTargets,
+    decisionTime = null,
+  } = {}) {
     try {
+      const fixedDecisionTime = requireDecisionTime(decisionTime);
       const [packets, liveUnderlying] = await Promise.all([
         Promise.all(expirations.flatMap((dte) => RIGHTS.map(async (right) => {
           const path = `/v1/chain?ticker=${encodeURIComponent(symbol)}&dte=${dte}`
             + `&deltaTarget=0.25&type=${right}&strict=1`;
-          return { targetDte: dte, right, body: await this._get(path, { cache: false }) };
+          return {
+            targetDte: dte,
+            right,
+            ...await this._getObserved(path, { cache: false }),
+          };
         }))),
         this._underlyingQuote(symbol),
       ]);
-      const now = this.now();
+      const freshnessErrors = [];
       const groups = packets.map((packet) => (packet.body.contracts ?? []).map((row) => {
         const asOf = timestamp(row.quote_as_of);
+        const quoteFreshness = evaluateQuoteFreshness({
+          vendorAsOf: row.quote_as_of,
+          acquiredAt: packet.acquiredAt,
+          maxAgeMs: this.maxChainAgeMs,
+        });
+        if (!quoteFreshness.ok) freshnessErrors.push(quoteFreshness.error);
         return {
           symbol: String(row.contract ?? '').replace(/^O:/u, ''),
           underlying: symbol,
@@ -248,7 +287,12 @@ export class MassiveProvider extends DataProvider {
           iv: numeric(row.iv), delta: numeric(row.delta), gamma: numeric(row.gamma),
           theta: numeric(row.theta), vega: numeric(row.vega),
           openInterest: numeric(row.oi, 0), volume: numeric(row.volume, 0),
-          multiplier: 100, quoteAsOf: asOf,
+          multiplier: 100,
+          quoteAsOf: asOf,
+          acquiredAt: packet.acquiredAt,
+          quoteAgeMs: quoteFreshness.ageMs ?? null,
+          clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+          _freshnessVerified: quoteFreshness.ok,
         };
       }).filter((row) => row.symbol && row.right === packet.right
         && [row.strike, row.dte, row.bid, row.ask, row.iv, row.delta, row.quoteAsOf]
@@ -257,11 +301,16 @@ export class MassiveProvider extends DataProvider {
         && Math.abs(row.delta) <= 1
         && (row.right === 'put' ? row.delta <= 0 : row.delta >= 0)
         && row.bid > 0 && row.ask >= row.bid
-        && row.quoteAsOf <= now + 10_000
-        && now - row.quoteAsOf <= this.maxChainAgeMs));
-      const contracts = [...new Map(groups.flat().map((row) => [row.symbol, row])).values()];
+        && row._freshnessVerified));
+      const contracts = [...new Map(groups.flat().map((row) => {
+        const { _freshnessVerified, ...contract } = row;
+        return [row.symbol, contract];
+      })).values()];
       const requested = expirations.length * RIGHTS.length;
       if (packets.length !== requested || groups.some((group) => group.length === 0)) {
+        if (freshnessErrors.includes(CLOCK_FAULT.VENDOR_TIME_MISSING)) {
+          return { error: CLOCK_FAULT.VENDOR_TIME_MISSING };
+        }
         return { error: 'MASSIVE_EXECUTABLE_CHAIN_UNAVAILABLE' };
       }
       const massiveSpot = numeric(packets.find((packet) => numeric(packet.body.spot) != null)?.body.spot);
@@ -280,39 +329,60 @@ export class MassiveProvider extends DataProvider {
         },
         asOf,
         source: 'MASSIVE_POLYGON_OPTIONS_STRICT',
+        acquiredAt: Math.max(...packets.map((packet) => packet.acquiredAt)),
+        acquisitionTimes: [...new Set(packets.map((packet) => packet.acquiredAt))].sort((a, b) => a - b),
+        decisionTime: fixedDecisionTime,
+        clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
       };
     } catch (error) {
       return { error: error.message };
     }
   }
 
-  async events(symbol) {
+  async events(symbol, { decisionTime = null } = {}) {
     try {
-      const from = new Date(this.now() - 2 * DAY_MS).toISOString().slice(0, 10);
-      const through = new Date(this.now() + 60 * DAY_MS).toISOString().slice(0, 10);
+      const fixedDecisionTime = requireDecisionTime(decisionTime);
+      const from = new Date(fixedDecisionTime - 2 * DAY_MS).toISOString().slice(0, 10);
+      const through = new Date(fixedDecisionTime + 60 * DAY_MS).toISOString().slice(0, 10);
       // Exchange-traded funds have no corporate earnings. Calling an issuer
       // earnings calendar for them creates a false data-integrity failure;
       // their split/corporate-action clearance remains mandatory.
       const earningsPromise = this.fundSymbols.has(String(symbol).toUpperCase())
-        ? Promise.resolve({ status: 'VERIFIED', source: 'FUND_NOT_CORPORATE_ISSUER', events: [] })
-        : this._get(`/v1/earnings-events?ticker=${encodeURIComponent(symbol)}&from=${from}&through=${through}`, { cache: false });
+        ? Promise.resolve({
+          body: { status: 'VERIFIED', source: 'FUND_NOT_CORPORATE_ISSUER', events: [] },
+          acquiredAt: fixedDecisionTime,
+        })
+        : this._getObserved(`/v1/earnings-events?ticker=${encodeURIComponent(symbol)}&from=${from}&through=${through}`, { cache: false });
       const [earnings, actions] = await Promise.all([
         earningsPromise,
-        this._getRetry(`/v1/corporate-actions?ticker=${encodeURIComponent(symbol)}&through=${through}`),
+        (async () => ({
+          body: await this._getRetry(`/v1/corporate-actions?ticker=${encodeURIComponent(symbol)}&through=${through}`),
+          acquiredAt: this.now(),
+        }))(),
       ]);
-      if (earnings.status === 'INCOMPLETE' || actions.status === 'INCOMPLETE') {
+      if (earnings.body.status === 'INCOMPLETE' || actions.body.status === 'INCOMPLETE') {
         return { error: 'MASSIVE_EVENT_CLEARANCE_INCOMPLETE' };
       }
       const events = [
-        ...(earnings.events ?? []).map((event) => ({ type: 'EARNINGS', at: eventAt(event), source: earnings.source })),
-        ...(actions.splits ?? []).map((event) => ({
-          type: 'CORPORATE_SPLIT', at: timestamp(`${event.executionDate}T16:00:00Z`), source: actions.source,
+        ...(earnings.body.events ?? []).map((event) => ({
+          type: 'EARNINGS', at: eventAt(event), source: earnings.body.source,
+        })),
+        ...(actions.body.splits ?? []).map((event) => ({
+          type: 'CORPORATE_SPLIT', at: timestamp(`${event.executionDate}T16:00:00Z`), source: actions.body.source,
         })),
       ];
       if (events.some((event) => !Number.isFinite(event.at))) {
         return { error: 'MASSIVE_EVENT_DATE_UNVERIFIED' };
       }
-      return { value: events, asOf: this.now(), source: 'MASSIVE_EVENT_CLEARANCE' };
+      const acquiredAt = Math.max(earnings.acquiredAt, actions.acquiredAt);
+      return {
+        value: events,
+        asOf: acquiredAt,
+        source: 'MASSIVE_EVENT_CLEARANCE',
+        acquiredAt,
+        decisionTime: fixedDecisionTime,
+        clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+      };
     } catch (error) {
       return { error: error.message };
     }

@@ -1,0 +1,4 @@
+wrangler_outdir=/tmp/fr006b-wrangler-final-2
+97b9eb0e4484b6f9193314a068f6474dbbfc27840686b9bd46408020abddfa72  /tmp/fr006b-wrangler-final-2/README.md
+fdf0cd3d0c78c8924ee01a866362e2c048e60b2f2dbf5ae924cd3df95bb6dfd7  /tmp/fr006b-wrangler-final-2/entry.js
+fc67381e88f3a99101ea15e9bac2c4c82ce956f72f8cc875641ade3b49034508  /tmp/fr006b-wrangler-final-2/entry.js.map

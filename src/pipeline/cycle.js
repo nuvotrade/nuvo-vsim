@@ -34,6 +34,7 @@ import { isNum } from '../math/stats.js';
 import { STRUCTURE } from '../structures/structure.js';
 import { blackScholesRepricer } from '../portfolio/repricer.js';
 import { Rng } from '../math/random.js';
+import { PRODUCTION_CLOCK_CONTRACT_VERSION } from '../truth/providers/clock_contract.js';
 
 export const OUTCOME = Object.freeze({
   ORDER: 'ORDER',
@@ -178,10 +179,10 @@ export async function runCycle(ctx) {
   const quotes = {};
   const events = {};
   for (const sym of symbols) {
-    chains[sym] = await provider.optionChain(sym, { expirations: dteTargets });
+    chains[sym] = await provider.optionChain(sym, { expirations: dteTargets, decisionTime: now });
     histories[sym] = await provider.history(sym, { lookback: 400 });
     quotes[sym] = await provider.quote(sym);
-    events[sym] = await provider.events(sym);
+    events[sym] = await provider.events(sym, { decisionTime: now });
   }
 
   const sharedSnapshot = {
@@ -200,6 +201,8 @@ export async function runCycle(ctx) {
    */
   const rawInputs = {
     capturedAt: now,
+    decisionTime: now,
+    clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
     cycleId,
     account: account.value ?? null,
     accountAsOf: account.asOf ?? null,
@@ -213,8 +216,15 @@ export async function runCycle(ctx) {
     symbols: Object.fromEntries(symbols.map((sym) => [sym, {
       quote: quotes[sym]?.value ?? null,
       quoteAsOf: quotes[sym]?.asOf ?? null,
+      quoteAcquiredAt: quotes[sym]?.acquiredAt ?? null,
+      quoteAgeMs: quotes[sym]?.quoteAgeMs ?? null,
+      quoteClockContractVersion: quotes[sym]?.clockContractVersion ?? null,
       chain: chains[sym]?.value ?? null,
       chainAsOf: chains[sym]?.asOf ?? null,
+      chainAcquiredAt: chains[sym]?.acquiredAt ?? null,
+      chainAcquisitionTimes: chains[sym]?.acquisitionTimes ?? null,
+      chainDecisionTime: chains[sym]?.decisionTime ?? null,
+      chainClockContractVersion: chains[sym]?.clockContractVersion ?? null,
       history: histories[sym]?.value ?? null,
       historyAsOf: histories[sym]?.asOf ?? null,
       historySource: histories[sym]?.source ?? null,
@@ -224,6 +234,9 @@ export async function runCycle(ctx) {
       historyReturnedBarCount: histories[sym]?.returnedBarCount ?? null,
       events: events[sym]?.value ?? null,
       eventsAsOf: events[sym]?.asOf ?? null,
+      eventsAcquiredAt: events[sym]?.acquiredAt ?? null,
+      eventsDecisionTime: events[sym]?.decisionTime ?? null,
+      eventsClockContractVersion: events[sym]?.clockContractVersion ?? null,
     }])),
     engineState: {
       // Strategy-level positions drive concentration, Greeks, stress and

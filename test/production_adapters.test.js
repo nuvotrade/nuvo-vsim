@@ -4,6 +4,9 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
 import {
+  CLOCK_FAULT, evaluateQuoteFreshness, PRODUCTION_CLOCK_CONTRACT_VERSION,
+} from '../src/truth/providers/clock_contract.js';
+import {
   normalizeSchwabHistoryPacket, SCHWAB_HISTORY_CONTRACT_VERSION,
   SCHWAB_HISTORY_REQUEST_PERIOD_YEARS, SchwabMarketProvider, sessionStatus,
 } from '../src/truth/providers/schwab.js';
@@ -178,6 +181,11 @@ describe('protected live dashboard', () => {
     assert.match(workerSource, /cspShadowLog/u);
     assert.match(workerSource, /underwritingEligibleBeforeCapital/u);
     assert.match(workerSource, /capitalConstraintAppliedAfterUnderwriting/u);
+    assert.match(workerSource, /verifyLiveMarket\(env, ownerId, \{ decisionTime \}\)/u);
+    assert.match(workerSource, /provider\.optionChain\(symbol, \{ expirations: dteTargets, decisionTime \}\)/u);
+    assert.match(workerSource, /provider\.events\(symbol, \{ decisionTime \}\)/u);
+    assert.match(workerSource, /provider\.optionChain\(symbol, \{ expirations: targetDtes, decisionTime \}\)/u);
+    assert.match(workerSource, /now: decisionTime/u);
     assert.match(source, /governorApproved/u);
     assert.match(source, /NO CAPITAL/u);
     assert.match(source, /NO EDGE/u);
@@ -273,11 +281,23 @@ function marketFetcher({ staleChain = false } = {}) {
 }
 
 describe('Massive production provider', () => {
+  test('the clock evaluator never substitutes acquisition time for a missing vendor timestamp', () => {
+    assert.deepEqual(evaluateQuoteFreshness({
+      vendorAsOf: null,
+      acquiredAt: NOW,
+      maxAgeMs: 120_000,
+    }), {
+      ok: false,
+      error: 'VENDOR_QUOTE_TIMESTAMP_MISSING',
+    });
+  });
+
   test('normalizes live quotes, histories, chains, events, and session state', async () => {
     const provider = new MassiveProvider({ fetcher: marketFetcher(), now: () => NOW, dteTargets: [14, 30] });
     const [history, quote, chain, events, state] = await Promise.all([
       provider.history('SPY', { lookback: 120 }), provider.quote('SPY'),
-      provider.optionChain('SPY', { expirations: [14, 30] }), provider.events('SPY'), provider.marketState(),
+      provider.optionChain('SPY', { expirations: [14, 30], decisionTime: NOW }),
+      provider.events('SPY', { decisionTime: NOW }), provider.marketState(),
     ]);
     assert.equal(history.value.length, 130);
     assert.equal(quote.value.last, 526.8);
@@ -291,8 +311,76 @@ describe('Massive production provider', () => {
 
   test('removes authority when every executable option quote is stale', async () => {
     const provider = new MassiveProvider({ fetcher: marketFetcher({ staleChain: true }), now: () => NOW });
-    const chain = await provider.optionChain('SPY', { expirations: [14] });
+    const chain = await provider.optionChain('SPY', { expirations: [14], decisionTime: NOW });
     assert.equal(chain.error, 'MASSIVE_EXECUTABLE_CHAIN_UNAVAILABLE');
+  });
+
+  test('uses each option response acquisition time while preserving one decision instant', async () => {
+    const acquisitions = [NOW + 1000, NOW + 2000];
+    const provider = new MassiveProvider({
+      fetcher: marketFetcher(),
+      now: () => acquisitions.shift() ?? NOW + 2000,
+    });
+    const chain = await provider.optionChain('SPY', {
+      expirations: [14],
+      decisionTime: NOW - 5000,
+    });
+    assert.equal(chain.clockContractVersion, PRODUCTION_CLOCK_CONTRACT_VERSION);
+    assert.equal(chain.clockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    assert.equal(chain.decisionTime, NOW - 5000);
+    assert.deepEqual(chain.acquisitionTimes, [NOW + 1000, NOW + 2000]);
+    assert.deepEqual(chain.value.contracts.map((row) => row.acquiredAt), [NOW + 1000, NOW + 2000]);
+    assert.deepEqual(chain.value.contracts.map((row) => row.quoteAgeMs), [2000, 3000]);
+  });
+
+  test('refuses a missing Massive vendor quote timestamp by name', async () => {
+    const base = marketFetcher();
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      fetcher: async (request) => {
+        const response = await base(request);
+        if (new URL(request.url).pathname !== '/v1/chain') return response;
+        const body = await response.json();
+        delete body.contracts[0].quote_as_of;
+        return Response.json(body);
+      },
+    });
+    assert.equal((await provider.optionChain('SPY', {
+      expirations: [14], decisionTime: NOW,
+    })).error, CLOCK_FAULT.VENDOR_TIME_MISSING);
+  });
+
+  test('uses one explicit decision instant for every symbol event window', async () => {
+    const requests = [];
+    let providerRequestCount = 0;
+    const base = marketFetcher();
+    const provider = new MassiveProvider({
+      now: (() => { let tick = 0; return () => NOW + (++tick * 1000); })(),
+      fetcher: async (request) => {
+        providerRequestCount += 1;
+        const url = new URL(request.url);
+        if (url.pathname === '/v1/earnings-events') requests.push(url);
+        return base(request);
+      },
+    });
+    const decisionTime = NOW - 12_345;
+    assert.equal((await provider.events('AAPL')).error, CLOCK_FAULT.DECISION_TIME_MISSING,
+      'the production adapter must reject a caller that skips the decision-time boundary');
+    assert.equal((await provider.optionChain('AAPL', { expirations: [14] })).error,
+      CLOCK_FAULT.DECISION_TIME_MISSING);
+    assert.equal(providerRequestCount, 0,
+      'an unvalidated operation clock must fail before any provider request');
+    const first = await provider.events('AAPL', { decisionTime });
+    const second = await provider.events('MSFT', { decisionTime });
+    assert.equal(first.decisionTime, decisionTime);
+    assert.equal(second.decisionTime, decisionTime);
+    assert.equal(first.clockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    assert.equal(second.clockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].searchParams.get('from'), requests[1].searchParams.get('from'));
+    assert.equal(requests[0].searchParams.get('through'), requests[1].searchParams.get('through'));
+    assert.equal(requests[0].searchParams.get('from'), '2026-08-21');
+    assert.equal(requests[0].searchParams.get('through'), '2026-10-22');
   });
 
   test('refuses a chain when any requested tenor/right slice is missing', async () => {
@@ -307,7 +395,7 @@ describe('Massive production provider', () => {
         return base(request);
       },
     });
-    assert.equal((await provider.optionChain('SPY', { expirations: [30] })).error,
+    assert.equal((await provider.optionChain('SPY', { expirations: [30], decisionTime: NOW })).error,
       'MASSIVE_EXECUTABLE_CHAIN_UNAVAILABLE');
   });
 
@@ -324,7 +412,7 @@ describe('Massive production provider', () => {
         return Response.json(body);
       },
     });
-    assert.equal((await provider.optionChain('SPY', { expirations: [30] })).error,
+    assert.equal((await provider.optionChain('SPY', { expirations: [30], decisionTime: NOW })).error,
       'MASSIVE_EXECUTABLE_CHAIN_UNAVAILABLE');
   });
 
@@ -340,7 +428,7 @@ describe('Massive production provider', () => {
         return Response.json(body);
       },
     });
-    assert.equal((await provider.optionChain('SPY', { expirations: [30] })).error,
+    assert.equal((await provider.optionChain('SPY', { expirations: [30], decisionTime: NOW })).error,
       'MASSIVE_EXECUTABLE_CHAIN_UNAVAILABLE');
   });
 
@@ -354,7 +442,7 @@ describe('Massive production provider', () => {
         return base(request);
       },
     });
-    assert.match((await provider.events('SPY')).error, /INCOMPLETE|HTTP_503/u);
+    assert.match((await provider.events('SPY', { decisionTime: NOW })).error, /INCOMPLETE|HTTP_503/u);
   });
 
   test('keeps mark-only custody data separate from executable quote requirements', async () => {
@@ -426,7 +514,7 @@ describe('Massive production provider', () => {
         return base(request);
       },
     });
-    assert.deepEqual((await provider.events('SPY')).value, []);
+    assert.deepEqual((await provider.events('SPY', { decisionTime: NOW })).value, []);
     assert.equal(earningsCalls, 0);
   });
 
@@ -445,7 +533,7 @@ describe('Massive production provider', () => {
         return base(request);
       },
     });
-    await provider.optionChain('SPY', { expirations: [30] });
+    await provider.optionChain('SPY', { expirations: [30], decisionTime: NOW });
     assert.equal((await provider.quote('SPY')).error,
       'MASSIVE_UNDERLYING_NOT_REALTIME:DELAYED');
   });
@@ -471,7 +559,7 @@ describe('Massive production provider', () => {
         return base(request);
       },
     });
-    const chain = await provider.optionChain('SPY', { expirations: [30] });
+    const chain = await provider.optionChain('SPY', { expirations: [30], decisionTime: NOW });
     const quote = await provider.quote('SPY');
     assert.equal(chain.value.spot, 527.1);
     assert.equal(chain.value.underlyingAsOf, NOW - 250);
@@ -512,7 +600,7 @@ describe('Massive production provider', () => {
         return base(request);
       },
     });
-    assert.deepEqual((await provider.events('SPY')).value, []);
+    assert.deepEqual((await provider.events('SPY', { decisionTime: NOW })).value, []);
     assert.equal(actionCalls, 2);
   });
 
@@ -726,7 +814,8 @@ describe('Schwab-only production market provider', () => {
     });
     const [quote, history, chain, events, state] = await Promise.all([
       provider.quote('SPY'), provider.history('SPY', { lookback: 120 }),
-      provider.optionChain('SPY', { expirations: [14, 30] }), provider.events('SPY'),
+      provider.optionChain('SPY', { expirations: [14, 30], decisionTime: NOW }),
+      provider.events('SPY', { decisionTime: NOW }),
       provider.marketState(),
     ]);
     assert.equal(quote.value.last, 527);
@@ -742,12 +831,65 @@ describe('Schwab-only production market provider', () => {
     assert.equal(state.value.vixSource, 'SCHWAB_MARKET_DATA_REALTIME');
   });
 
+  test('does not age an early Schwab chain against a later underlying response', async () => {
+    const client = schwabMarketClient();
+    client.marketQuote = async (ownerId, symbol) => ({
+      value: { symbol, last: 527, bid: 526.99, ask: 527.01, freshness: 'REAL_TIME' },
+      asOf: NOW + 129_000,
+      source: 'SCHWAB_MARKET_DATA_REALTIME',
+    });
+    const acquisitions = [NOW, NOW + 130_000];
+    const provider = new SchwabMarketProvider({
+      client, ownerId: 'owner', now: () => acquisitions.shift() ?? NOW + 130_000,
+      dteTargets: [14], eventProvider: { async events() { return { value: [], asOf: NOW }; } },
+    });
+    const chain = await provider.optionChain('SPY', {
+      expirations: [14], decisionTime: NOW - 60_000,
+    });
+    assert.equal(chain.decisionTime, NOW - 60_000);
+    assert.equal(chain.acquiredAt, NOW);
+    assert.deepEqual(chain.acquisitionTimes, [NOW]);
+    assert.equal(chain.clockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    assert.ok(chain.value.contracts.every((row) => row.acquiredAt === NOW));
+    assert.ok(chain.value.contracts.every((row) => row.quoteAgeMs === 1000));
+    assert.equal((NOW + 130_000) - (NOW - 1000), 131_000,
+      'the old shared post-batch clock would refuse the same fresh chain at the 120-second gate');
+  });
+
+  test('refuses a missing Schwab vendor quote timestamp by name', async () => {
+    const client = schwabMarketClient();
+    const original = client.marketOptionChain.bind(client);
+    client.marketOptionChain = async (...args) => {
+      const packet = await original(...args);
+      for (const expiration of Object.values(packet.putExpDateMap)) {
+        for (const strikes of Object.values(expiration)) {
+          for (const row of Object.values(strikes).flat()) delete row.quoteTimeInLong;
+        }
+      }
+      for (const expiration of Object.values(packet.callExpDateMap)) {
+        for (const strikes of Object.values(expiration)) {
+          for (const row of Object.values(strikes).flat()) delete row.quoteTimeInLong;
+        }
+      }
+      return packet;
+    };
+    const provider = new SchwabMarketProvider({
+      client, ownerId: 'owner', now: () => NOW, dteTargets: [14],
+      eventProvider: { async events() { return { value: [], asOf: NOW }; } },
+    });
+    assert.equal((await provider.optionChain('SPY', {
+      expirations: [14], decisionTime: NOW,
+    })).error, CLOCK_FAULT.VENDOR_TIME_MISSING);
+  });
+
   test('refuses stale Schwab option quotes instead of ranking them', async () => {
     const provider = new SchwabMarketProvider({
       client: schwabMarketClient({ stale: true }), ownerId: 'owner', now: () => NOW,
       dteTargets: [14, 30], eventProvider: { async events() { return { value: [], asOf: NOW }; } },
     });
-    assert.equal((await provider.optionChain('SPY', { expirations: [14, 30] })).error,
+    assert.equal((await provider.optionChain('SPY', {
+      expirations: [14, 30], decisionTime: NOW,
+    })).error,
       'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE');
   });
 
@@ -756,7 +898,9 @@ describe('Schwab-only production market provider', () => {
       client: schwabMarketClient({ incomplete: true }), ownerId: 'owner', now: () => NOW,
       dteTargets: [14, 30], eventProvider: { async events() { return { value: [], asOf: NOW }; } },
     });
-    assert.equal((await provider.optionChain('SPY', { expirations: [14, 30] })).error,
+    assert.equal((await provider.optionChain('SPY', {
+      expirations: [14, 30], decisionTime: NOW,
+    })).error,
       'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE');
   });
 });
@@ -772,6 +916,33 @@ describe('evidence replay boundaries', () => {
   test('preserves a captured market-state failure', async () => {
     const provider = new ReplayProvider({ indexState: {}, indexAsOf: null, indexError: 'SESSION_TIMEOUT' });
     assert.equal((await provider.marketState()).error, 'SESSION_TIMEOUT');
+  });
+
+  test('preserves sealed decision and acquisition clocks without recomputing them', async () => {
+    const provider = new ReplayProvider({ symbols: { SPY: {
+      quote: { last: 500 }, quoteAsOf: NOW - 1000, quoteAcquiredAt: NOW + 200,
+      quoteAgeMs: 1200, quoteClockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+      chain: { contracts: [] }, chainAsOf: NOW - 1000, chainAcquiredAt: NOW + 400,
+      chainAcquisitionTimes: [NOW + 300, NOW + 400], chainDecisionTime: NOW - 5000,
+      chainClockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+      events: [], eventsAsOf: NOW + 600, eventsAcquiredAt: NOW + 600,
+      eventsDecisionTime: NOW - 5000,
+      eventsClockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+    } } });
+    assert.deepEqual(await provider.quote('SPY'), {
+      value: { last: 500 }, asOf: NOW - 1000, source: 'replay',
+      acquiredAt: NOW + 200, quoteAgeMs: 1200,
+      clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+    });
+    assert.deepEqual(await provider.optionChain('SPY'), {
+      value: { contracts: [] }, asOf: NOW - 1000, source: 'replay',
+      acquiredAt: NOW + 400, acquisitionTimes: [NOW + 300, NOW + 400],
+      decisionTime: NOW - 5000, clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+    });
+    assert.deepEqual(await provider.events('SPY'), {
+      value: [], asOf: NOW + 600, source: 'replay', acquiredAt: NOW + 600,
+      decisionTime: NOW - 5000, clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+    });
   });
 });
 

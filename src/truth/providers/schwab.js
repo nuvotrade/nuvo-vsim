@@ -1,4 +1,10 @@
 import { DataProvider } from './provider.js';
+import {
+  CLOCK_FAULT,
+  evaluateQuoteFreshness,
+  PRODUCTION_CLOCK_CONTRACT_VERSION,
+  requireDecisionTime,
+} from './clock_contract.js';
 
 const DAY_MS = 86_400_000;
 const RIGHTS = Object.freeze(['put', 'call']);
@@ -142,12 +148,26 @@ export class SchwabMarketProvider extends DataProvider {
   async _quote(symbol) {
     const key = String(symbol).toUpperCase();
     if (!this.quoteCache.has(key)) {
-      this.quoteCache.set(key, this.client.marketQuote(this.ownerId, key));
+      this.quoteCache.set(key, Promise.resolve(this.client.marketQuote(this.ownerId, key))
+        .then((packet) => ({ packet, acquiredAt: this.now() })));
     }
-    const quote = await this.quoteCache.get(key);
-    if (!Number.isFinite(quote?.asOf) || this.now() - quote.asOf > this.maxQuoteAgeMs
-      || quote.asOf > this.now() + 10_000) throw new Error('SCHWAB_MARKET_QUOTE_STALE');
-    return quote;
+    const observed = await this.quoteCache.get(key);
+    const quote = observed.packet;
+    const freshness = evaluateQuoteFreshness({
+      vendorAsOf: quote?.asOf,
+      acquiredAt: observed.acquiredAt,
+      maxAgeMs: this.maxQuoteAgeMs,
+    });
+    if (!freshness.ok && freshness.error === CLOCK_FAULT.VENDOR_TIME_MISSING) {
+      throw new Error(CLOCK_FAULT.VENDOR_TIME_MISSING);
+    }
+    if (!freshness.ok) throw new Error('SCHWAB_MARKET_QUOTE_STALE');
+    return {
+      ...quote,
+      acquiredAt: freshness.acquiredAt,
+      quoteAgeMs: freshness.ageMs,
+      clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+    };
   }
 
   async markQuote(symbol) {
@@ -192,36 +212,51 @@ export class SchwabMarketProvider extends DataProvider {
         },
         asOf: quote.asOf,
         source: quote.source,
+        acquiredAt: quote.acquiredAt,
+        quoteAgeMs: quote.quoteAgeMs,
+        clockContractVersion: quote.clockContractVersion,
       };
     } catch (error) {
       return { error: error.message };
     }
   }
 
-  async optionChain(symbol, { expirations = this.dteTargets, strikes = [] } = {}) {
+  async optionChain(symbol, {
+    expirations = this.dteTargets,
+    strikes = [],
+    decisionTime = null,
+  } = {}) {
     try {
+      const fixedDecisionTime = requireDecisionTime(decisionTime);
       const start = Math.max(0, Math.min(...expirations) - 5);
       const end = Math.max(...expirations) + 8;
-      const [packet, underlying] = await Promise.all([
-        this.client.marketOptionChain(this.ownerId, symbol, {
-          fromDate: ymd(this.now() + start * DAY_MS),
-          toDate: ymd(this.now() + end * DAY_MS),
+      const [observedChain, underlying] = await Promise.all([
+        Promise.resolve(this.client.marketOptionChain(this.ownerId, symbol, {
+          fromDate: ymd(fixedDecisionTime + start * DAY_MS),
+          toDate: ymd(fixedDecisionTime + end * DAY_MS),
           strike: strikes.length === 1 ? numeric(strikes[0]) : null,
-        }),
+        })).then((packet) => ({ packet, acquiredAt: this.now() })),
         this._quote(symbol),
       ]);
+      const packet = observedChain.packet;
       const raw = [
         ...flattenExpirationMap(packet.putExpDateMap, 'put'),
         ...flattenExpirationMap(packet.callExpDateMap, 'call'),
       ];
       const selectedDtes = nearestListedDtes(raw, expirations);
-      const now = this.now();
+      const freshnessErrors = [];
       const rows = raw.map((row) => {
         const right = String(row.putCall ?? row._right).toLowerCase();
         const dte = numeric(row.daysToExpiration);
         const bid = numeric(row.bid ?? row.bidPrice);
         const ask = numeric(row.ask ?? row.askPrice);
         const quoteAsOf = timestamp(row.quoteTimeInLong ?? row.quoteTime ?? row.tradeTimeInLong);
+        const quoteFreshness = evaluateQuoteFreshness({
+          vendorAsOf: row.quoteTimeInLong ?? row.quoteTime ?? row.tradeTimeInLong,
+          acquiredAt: observedChain.acquiredAt,
+          maxAgeMs: this.maxChainAgeMs,
+        });
+        if (!quoteFreshness.ok) freshnessErrors.push(quoteFreshness.error);
         return {
           symbol: String(row.symbol ?? '').replaceAll(' ', ''),
           underlying: String(symbol).toUpperCase(),
@@ -242,6 +277,10 @@ export class SchwabMarketProvider extends DataProvider {
           volume: numeric(row.totalVolume, 0),
           multiplier: numeric(row.multiplier, 100),
           quoteAsOf,
+          acquiredAt: observedChain.acquiredAt,
+          quoteAgeMs: quoteFreshness.ageMs ?? null,
+          clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+          _freshnessVerified: quoteFreshness.ok,
         };
       }).filter((row) => row.symbol && RIGHTS.includes(row.right) && selectedDtes.has(row.dte)
         && [row.strike, row.dte, row.bid, row.ask, row.iv, row.delta, row.quoteAsOf]
@@ -249,11 +288,19 @@ export class SchwabMarketProvider extends DataProvider {
         && row.strike > 0 && row.iv > 0 && Math.abs(row.delta) <= 1
         && (row.right === 'put' ? row.delta <= 0 : row.delta >= 0)
         && row.bid > 0 && row.ask >= row.bid
-        && row.quoteAsOf <= now + 10_000 && now - row.quoteAsOf <= this.maxChainAgeMs);
-      const contracts = [...new Map(rows.map((row) => [row.symbol, row])).values()];
+        && row._freshnessVerified);
+      const contracts = [...new Map(rows.map((row) => {
+        const { _freshnessVerified, ...contract } = row;
+        return [row.symbol, contract];
+      })).values()];
       const complete = [...selectedDtes].every((dte) => RIGHTS.every((right) =>
         contracts.some((contract) => contract.dte === dte && contract.right === right)));
-      if (!complete || contracts.length === 0) return { error: 'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE' };
+      if (!complete || contracts.length === 0) {
+        if (freshnessErrors.includes(CLOCK_FAULT.VENDOR_TIME_MISSING)) {
+          return { error: CLOCK_FAULT.VENDOR_TIME_MISSING };
+        }
+        return { error: 'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE' };
+      }
       const asOf = Math.min(...contracts.map((row) => row.quoteAsOf));
       return {
         value: {
@@ -266,6 +313,10 @@ export class SchwabMarketProvider extends DataProvider {
         },
         asOf,
         source: 'SCHWAB_MARKET_DATA_OPTIONS_REALTIME',
+        acquiredAt: observedChain.acquiredAt,
+        acquisitionTimes: [observedChain.acquiredAt],
+        decisionTime: fixedDecisionTime,
+        clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
       };
     } catch (error) {
       return { error: error.message };
@@ -275,17 +326,38 @@ export class SchwabMarketProvider extends DataProvider {
   async optionQuote(symbol) {
     try {
       const quote = await this.client.marketOptionQuote(this.ownerId, symbol);
-      if (!Number.isFinite(quote?.asOf) || this.now() - quote.asOf > this.maxChainAgeMs
-        || quote.asOf > this.now() + 10_000) return { error: 'SCHWAB_OPTION_QUOTE_STALE' };
-      return quote;
+      const acquiredAt = this.now();
+      const freshness = evaluateQuoteFreshness({
+        vendorAsOf: quote?.asOf,
+        acquiredAt,
+        maxAgeMs: this.maxChainAgeMs,
+      });
+      if (!freshness.ok && freshness.error === CLOCK_FAULT.VENDOR_TIME_MISSING) {
+        return { error: CLOCK_FAULT.VENDOR_TIME_MISSING };
+      }
+      if (!freshness.ok) return { error: 'SCHWAB_OPTION_QUOTE_STALE' };
+      return {
+        ...quote,
+        acquiredAt: freshness.acquiredAt,
+        quoteAgeMs: freshness.ageMs,
+        clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+      };
     } catch (error) {
       return { error: error.message };
     }
   }
 
-  async events(symbol) {
+  async events(symbol, { decisionTime = null } = {}) {
     if (!this.eventProvider) return { error: 'SCHWAB_EVENT_CLEARANCE_NOT_CONFIGURED' };
-    return this.eventProvider.events(symbol);
+    const fixedDecisionTime = requireDecisionTime(decisionTime);
+    const result = await this.eventProvider.events(symbol, { decisionTime: fixedDecisionTime });
+    const acquiredAt = result.acquiredAt ?? this.now();
+    return {
+      ...result,
+      acquiredAt,
+      decisionTime: result.decisionTime ?? fixedDecisionTime,
+      clockContractVersion: result.clockContractVersion ?? PRODUCTION_CLOCK_CONTRACT_VERSION,
+    };
   }
 
   async marketState() {

@@ -378,7 +378,7 @@ function marketProvider(env, ownerId = null) {
   });
 }
 
-async function verifyLiveMarket(env, ownerId) {
+async function verifyLiveMarket(env, ownerId, { decisionTime = Date.now() } = {}) {
   const provider = marketProvider(env, ownerId);
   const symbols = String(env.NUVO_SYMBOLS ?? 'SPY,QQQ,IWM')
     .split(',').map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
@@ -388,8 +388,11 @@ async function verifyLiveMarket(env, ownerId) {
   const rows = await Promise.all(symbols.map(async (symbol) => {
     // The fresh options snapshot supplies the options-only strategy's
     // underlying mark; load it before the normalized underlying quote.
-    const chain = await provider.optionChain(symbol, { expirations: dteTargets });
-    const [quote, events] = await Promise.all([provider.quote(symbol), provider.events(symbol)]);
+    const chain = await provider.optionChain(symbol, { expirations: dteTargets, decisionTime });
+    const [quote, events] = await Promise.all([
+      provider.quote(symbol),
+      provider.events(symbol, { decisionTime }),
+    ]);
     const errors = [quote.error, chain.error, events.error].filter(Boolean);
     return {
       symbol,
@@ -696,7 +699,10 @@ export function cycleIdFor({ ownerId, source, now = Date.now(), idempotencyKey =
 export async function runShadowCycle(env, ownerId, {
   source = 'MANUAL', idempotencyKey = null, cycleIdOverride = null,
 } = {}) {
-  const cycleId = cycleIdOverride ?? cycleIdFor({ ownerId, source, idempotencyKey });
+  const decisionTime = Date.now();
+  const cycleId = cycleIdOverride ?? cycleIdFor({
+    ownerId, source, idempotencyKey, now: decisionTime,
+  });
   if (!await acquireCycleLease(env, ownerId, cycleId)) {
     const existing = await env.DB.prepare(`SELECT summary_json FROM cycle_summaries
       WHERE owner_id=? AND cycle_id=?`).bind(ownerId, cycleId).first();
@@ -756,7 +762,7 @@ export async function runShadowCycle(env, ownerId, {
     // a market-data incompatibility. This is intentionally redundant with
     // the engine Truth Contract: the preflight gives the operator a precise
     // feed-capability result while the engine remains the final authority.
-    const marketCompatibility = await verifyLiveMarket(env, ownerId);
+    const marketCompatibility = await verifyLiveMarket(env, ownerId, { decisionTime });
     if (!marketCompatibility.ok) {
       finalStatus = 'BLOCKED';
       return await recordBlocked(env, ownerId, cycleId, 'TRUTH/MARKET_DATA_INCOMPATIBLE', {
@@ -783,7 +789,9 @@ export async function runShadowCycle(env, ownerId, {
     broker.snapshotPromise = Promise.resolve(currentSnapshot);
     const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45').split(',').map(Number).filter(Number.isFinite);
     const provider = marketProvider(env, ownerId);
-    const custodyRisk = await mapCustodyRisk({ provider, positions: currentSnapshot.positions });
+    const custodyRisk = await mapCustodyRisk({
+      provider, positions: currentSnapshot.positions, now: decisionTime,
+    });
     if (!custodyRisk.ok) {
       finalStatus = 'BLOCKED';
       return await recordBlocked(env, ownerId, cycleId, 'CUSTODY_RISK_MAPPING_REQUIRED', {
@@ -804,7 +812,7 @@ export async function runShadowCycle(env, ownerId, {
     // rather than allowed to make the fixed ETF opportunity universe fail.
     const optionableHoldings = [];
     for (const symbol of Object.keys(holdings).filter((value) => !baseSymbols.includes(value))) {
-      const probe = await provider.optionChain(symbol, { expirations: dteTargets });
+      const probe = await provider.optionChain(symbol, { expirations: dteTargets, decisionTime });
       if (!probe.error && probe.value?.contracts?.length) optionableHoldings.push(symbol);
       else await audit(env, ownerId, 'COVERED_CALL_UNIVERSE_EXCLUDED', {
         symbol, reason: probe.error ?? 'NO_EXECUTABLE_CONTRACTS',
@@ -814,6 +822,7 @@ export async function runShadowCycle(env, ownerId, {
     const engine = new NuvoEngine({
       provider, broker, nav: currentSnapshot.nav, authorityLevel: operationalAuthority(env),
       symbols, approved: symbols, evidenceStore,
+      clock: () => decisionTime,
       accountMirror: { cash: baseline.account.cash, buyingPower: baseline.account.buyingPower },
       codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
       modelVersion: 'nuvo-model-5.0.1-execution-cost-v2',
@@ -982,6 +991,7 @@ function blockedCoveredCall(symbol, reasonCode, reason, detail = {}) {
 }
 
 async function coveredCallDashboard(env, ownerId, rawSymbol) {
+  const decisionTime = Date.now();
   const symbol = String(rawSymbol ?? '').trim().toUpperCase();
   const targetDtes = configuredCoveredCallDteTargets(env.NUVO_CC_DTE_TARGETS);
   if (!targetDtes) return blockedCoveredCall(symbol || null,
@@ -1044,8 +1054,8 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     'TRUTH/SESSION_NOT_RTH',
     `The options market is ${String(session.value?.status ?? 'closed').toLowerCase()}. Recalculation becomes available automatically during regular trading hours.`);
   const [chain, events, history] = await Promise.all([
-    provider.optionChain(symbol, { expirations: targetDtes }),
-    provider.events(symbol),
+    provider.optionChain(symbol, { expirations: targetDtes, decisionTime }),
+    provider.events(symbol, { decisionTime }),
     provider.history(symbol, { lookback: 400, minBars: 121 }),
   ]);
   if (chain.error) return blocked(symbol, 'TRUTH/EXECUTABLE_CHAIN_UNAVAILABLE',
@@ -1067,7 +1077,7 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     contracts: chain.value?.contracts,
     historyBars: history.value,
     events: events.value,
-    now: Date.now(),
+    now: decisionTime,
     seed: `covered-call-entry:${symbol}:${chain.asOf}`,
     targets: targetDtes,
   });

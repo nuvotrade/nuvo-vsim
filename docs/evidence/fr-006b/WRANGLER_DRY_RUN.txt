@@ -1,0 +1,40 @@
+
+ ⛅️ wrangler 4.125.0
+────────────────────
+Total Upload: 1740.83 KiB / gzip: 361.58 KiB
+Your Worker has access to the following bindings:
+Binding                                                                          Resource                     
+env.ACCOUNT_COORDINATOR (VsimAccountCoordinator)                                 Durable Object               
+env.SHADOW_CYCLE_WORKFLOW (ShadowCycleWorkflow)                                  Workflow                     
+env.TELEGRAM_JOBS (nuvo-vsim-telegram-jobs)                                      Queue                        
+env.DB (nuvo-vsim-v5-shadow)                                                     D1 Database                  
+env.EVIDENCE (nuvo-vsim-v5-evidence-shadow)                                      R2 Bucket                    
+env.MARKET (master)                                                              Worker                       
+env.AI                                                                           AI                           
+env.CF_VERSION_METADATA                                                          Worker Version Metadata      
+env.NUVO_ENVIRONMENT ("shadow")                                                  Environment Variable         
+env.NUVO_AUTHORITY_LEVEL ("2")                                                   Environment Variable         
+env.NUVO_BROKER_MODE ("READ_ONLY")                                               Environment Variable         
+env.NUVO_BROKER_EXECUTION_MODE ("SHADOW_ONLY")                                   Environment Variable         
+env.NUVO_ALLOWED_STRUCTURES ("CSP,SHARES,COVERED_CALL")                          Environment Variable         
+env.NUVO_SYMBOLS ("SPY,QQQ,IWM")                                                 Environment Variable         
+env.NUVO_FUND_SYMBOLS ("SPY,QQQ,IWM")                                            Environment Variable         
+env.NUVO_DTE_TARGETS ("14,30,45")                                                Environment Variable         
+env.NUVO_CC_DTE_TARGETS ("7,14,21")                                              Environment Variable         
+env.NUVO_MAX_CHAIN_AGE_MS ("120000")                                             Environment Variable         
+env.NUVO_MAX_QUOTE_AGE_MS ("60000")                                              Environment Variable         
+env.NUVO_MARKET_SOURCE ("SCHWAB_MARKET_DATA")                                    Environment Variable         
+env.NUVO_UNDERLYING_SOURCE ("SCHWAB_MARKET_DATA")                                Environment Variable         
+env.NUVO_SCHWAB_VIX_SYMBOL ("$VIX")                                              Environment Variable         
+env.NUVO_SCREEN_SAMPLES ("1500")                                                 Environment Variable         
+env.NUVO_DECISION_SAMPLES ("8000")                                               Environment Variable         
+env.NUVO_REFINE_TOP ("8")                                                        Environment Variable         
+env.NUVO_AI_MODEL ("@cf/openai/gpt-oss-120b")                                    Environment Variable         
+env.TELEGRAM_BOT_USERNAME ("nuvovsim_bot")                                       Environment Variable         
+env.PUBLIC_ORIGIN ("https://nuvo-vsim-v5-shadow.yulgutier...")                   Environment Variable         
+env.SCHWAB_CALLBACK_URL ("https://nuvo-vsim-v5-shadow.yulgutier...")             Environment Variable         
+env.ACCESS_TEAM_DOMAIN ("yulgutierrez")                                          Environment Variable         
+env.ACCESS_AUD ("9ff9966020d5438ee91a675d8ab2edc27860f...")                      Environment Variable         
+env.MCP_ACCESS_AUD ("dc81ee7c6b88272159b7c985deaea3ecd8712...")                  Environment Variable         
+
+--dry-run: exiting now.
