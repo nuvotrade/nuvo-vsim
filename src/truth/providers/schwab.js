@@ -2,6 +2,8 @@ import { DataProvider } from './provider.js';
 
 const DAY_MS = 86_400_000;
 const RIGHTS = Object.freeze(['put', 'call']);
+export const SCHWAB_HISTORY_REQUEST_PERIOD_YEARS = 3;
+export const SCHWAB_HISTORY_CONTRACT_VERSION = 'SCHWAB_PRICE_HISTORY_3Y_V2';
 
 function numeric(value, fallback = null) {
   if (value === null || value === undefined || value === '') return fallback;
@@ -28,6 +30,32 @@ function ivDecimal(value) {
   const parsed = numeric(value);
   if (!(parsed > 0)) return null;
   return parsed > 3 ? parsed / 100 : parsed;
+}
+
+export function normalizeSchwabHistoryPacket(packet, { lookback = 400, minBars = 120 } = {}) {
+  const rawBarCount = Array.isArray(packet?.candles) ? packet.candles.length : 0;
+  const bars = (packet?.candles ?? []).map((bar) => ({
+    t: timestamp(bar.datetime), o: numeric(bar.open), h: numeric(bar.high),
+    l: numeric(bar.low), c: numeric(bar.close), v: numeric(bar.volume, 0),
+  })).filter((bar) => [bar.t, bar.o, bar.h, bar.l, bar.c].every(Number.isFinite))
+    .sort((a, b) => a.t - b.t)
+    .filter((bar, index, rows) => index === 0 || bar.t !== rows[index - 1].t)
+    .slice(-lookback);
+  const provenance = {
+    historyContractVersion: SCHWAB_HISTORY_CONTRACT_VERSION,
+    requestPeriodYears: SCHWAB_HISTORY_REQUEST_PERIOD_YEARS,
+    rawBarCount,
+    returnedBarCount: bars.length,
+  };
+  if (packet?.empty === true || bars.length < minBars) {
+    return { error: `SCHWAB_HISTORY_SHORT:${bars.length}`, ...provenance };
+  }
+  return {
+    value: bars,
+    asOf: bars.at(-1).t,
+    source: 'SCHWAB_MARKET_DATA_PRICE_HISTORY_3Y',
+    ...provenance,
+  };
 }
 
 function flattenExpirationMap(map, right) {
@@ -131,20 +159,12 @@ export class SchwabMarketProvider extends DataProvider {
     try {
       const key = String(symbol).toUpperCase();
       if (!this.historyCache.has(key)) {
-        this.historyCache.set(key, this.client.marketHistory(this.ownerId, key, { period: 2 }));
+        this.historyCache.set(key, this.client.marketHistory(this.ownerId, key, {
+          period: SCHWAB_HISTORY_REQUEST_PERIOD_YEARS,
+        }));
       }
       const packet = await this.historyCache.get(key);
-      const bars = (packet?.candles ?? []).map((bar) => ({
-        t: timestamp(bar.datetime), o: numeric(bar.open), h: numeric(bar.high),
-        l: numeric(bar.low), c: numeric(bar.close), v: numeric(bar.volume, 0),
-      })).filter((bar) => [bar.t, bar.o, bar.h, bar.l, bar.c].every(Number.isFinite))
-        .sort((a, b) => a.t - b.t)
-        .filter((bar, index, rows) => index === 0 || bar.t !== rows[index - 1].t)
-        .slice(-lookback);
-      if (packet?.empty === true || bars.length < minBars) {
-        return { error: `SCHWAB_HISTORY_SHORT:${bars.length}` };
-      }
-      return { value: bars, asOf: bars.at(-1).t, source: 'SCHWAB_MARKET_DATA_PRICE_HISTORY' };
+      return normalizeSchwabHistoryPacket(packet, { lookback, minBars });
     } catch (error) {
       return { error: error.message };
     }

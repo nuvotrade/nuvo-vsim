@@ -47,7 +47,15 @@ export class ReplayProvider extends DataProvider {
   async history(symbol) {
     const s = this._sym(symbol);
     if (!s?.history) return { error: `no captured history for ${symbol}` };
-    return { value: s.history, asOf: s.historyAsOf, source: 'replay' };
+    return {
+      value: s.history,
+      asOf: s.historyAsOf,
+      source: s.historySource ?? 'replay',
+      historyContractVersion: s.historyContractVersion ?? null,
+      requestPeriodYears: s.historyRequestPeriodYears ?? null,
+      rawBarCount: s.historyRawBarCount ?? null,
+      returnedBarCount: s.historyReturnedBarCount ?? null,
+    };
   }
 
   async events(symbol) {

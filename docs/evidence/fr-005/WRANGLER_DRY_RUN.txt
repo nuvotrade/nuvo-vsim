@@ -1,0 +1,23 @@
+Command: npm run deploy:shadow:dry-run
+Wrangler: 4.125.0
+Exit: 0
+Total Upload: 1731.53 KiB / gzip: 360.02 KiB
+
+Bindings recognized:
+- Durable Object: ACCOUNT_COORDINATOR
+- Workflow: SHADOW_CYCLE_WORKFLOW
+- Queue: TELEGRAM_JOBS
+- D1: DB
+- R2: EVIDENCE
+- Service: MARKET
+- Workers AI: AI
+- Worker Version Metadata: CF_VERSION_METADATA
+
+Runtime guard values recognized:
+- NUVO_ENVIRONMENT=shadow
+- NUVO_AUTHORITY_LEVEL=2
+- NUVO_BROKER_MODE=READ_ONLY
+- NUVO_BROKER_EXECUTION_MODE=SHADOW_ONLY
+
+Result: --dry-run: exiting now.
+No deployment was performed.

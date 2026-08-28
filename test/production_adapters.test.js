@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
-import { SchwabMarketProvider, sessionStatus } from '../src/truth/providers/schwab.js';
+import {
+  normalizeSchwabHistoryPacket, SCHWAB_HISTORY_CONTRACT_VERSION,
+  SCHWAB_HISTORY_REQUEST_PERIOD_YEARS, SchwabMarketProvider, sessionStatus,
+} from '../src/truth/providers/schwab.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
@@ -623,7 +626,90 @@ function schwabMarketClient({ stale = false, incomplete = false } = {}) {
   };
 }
 
+function historySeries(length = 756) {
+  const start = Date.UTC(2023, 0, 1);
+  return Array.from({ length }, (_, index) => ({
+    sequence: index + 1,
+    datetime: start + index * 86_400_000,
+    open: index + 1,
+    high: index + 1.5,
+    low: index + 0.5,
+    close: index + 1.25,
+    volume: 1_000_000 + index,
+  }));
+}
+
 describe('Schwab-only production market provider', () => {
+  test('requests three years and returns the exact final 504 records from a liquid history', async () => {
+    const requests = [];
+    const candles = historySeries();
+    const provider = new SchwabMarketProvider({
+      ownerId: 'owner',
+      client: { async marketHistory(ownerId, symbol, options) {
+        requests.push({ ownerId, symbol, options });
+        return { empty: false, candles };
+      } },
+    });
+    const result = await provider.history('SPY', { lookback: 504, minBars: 504 });
+    assert.deepEqual(requests, [{ ownerId: 'owner', symbol: 'SPY', options: { period: 3 } }]);
+    assert.equal(SCHWAB_HISTORY_REQUEST_PERIOD_YEARS, 3);
+    assert.equal(result.value.length, 504);
+    assert.equal(result.value[0].t, candles[252].datetime);
+    assert.equal(result.value[0].c, 253.25);
+    assert.equal(result.value.at(-1).t, candles[755].datetime);
+    assert.equal(result.value.at(-1).c, 756.25);
+    assert.equal(result.asOf, candles[755].datetime);
+    assert.equal(result.source, 'SCHWAB_MARKET_DATA_PRICE_HISTORY_3Y');
+    assert.equal(result.historyContractVersion, SCHWAB_HISTORY_CONTRACT_VERSION);
+    assert.equal(result.historyContractVersion, 'SCHWAB_PRICE_HISTORY_3Y_V2');
+    assert.equal(result.requestPeriodYears, 3);
+    assert.equal(result.rawBarCount, 756);
+    assert.equal(result.returnedBarCount, 504);
+  });
+
+  test('the 504-bar gate still fails closed at exactly 503 normalized records', async () => {
+    const requests = [];
+    const provider = new SchwabMarketProvider({
+      ownerId: 'owner',
+      client: { async marketHistory(ownerId, symbol, options) {
+        requests.push({ ownerId, symbol, options });
+        return { empty: false, candles: historySeries(503) };
+      } },
+    });
+    const result = await provider.history('SPY', { lookback: 504, minBars: 504 });
+    assert.deepEqual(requests, [{ ownerId: 'owner', symbol: 'SPY', options: { period: 3 } }]);
+    assert.deepEqual(result, {
+      error: 'SCHWAB_HISTORY_SHORT:503',
+      historyContractVersion: 'SCHWAB_PRICE_HISTORY_3Y_V2',
+      requestPeriodYears: 3,
+      rawBarCount: 503,
+      returnedBarCount: 503,
+    });
+  });
+
+  test('three-year retrieval preserves the exact 120, 252, and 400-bar suffixes', () => {
+    const threeYears = historySeries();
+    const twoYears = threeYears.slice(-502);
+    const expectations = {
+      120: { first: 637.25, last: 756.25,
+        sha256: '7fe334790bea1669bfa457b4cb65dcc1c2f81661bf19ec0ec1305a62434e4394' },
+      252: { first: 505.25, last: 756.25,
+        sha256: 'fa01df992d815626b9319909a9e8539a6a4f0cbde1f87cd0366d0975d57fcf65' },
+      400: { first: 357.25, last: 756.25,
+        sha256: '3a4cce5a127d1b9f565d82355200884f0b4edcc30e70762870507c8d1eed2c4f' },
+    };
+    for (const [lookbackText, expected] of Object.entries(expectations)) {
+      const lookback = Number(lookbackText);
+      const before = normalizeSchwabHistoryPacket({ candles: twoYears }, { lookback, minBars: 1 });
+      const after = normalizeSchwabHistoryPacket({ candles: threeYears }, { lookback, minBars: 1 });
+      assert.deepEqual(after.value, before.value);
+      assert.equal(after.value[0].c, expected.first);
+      assert.equal(after.value.at(-1).c, expected.last);
+      assert.equal(createHash('sha256').update(JSON.stringify(after.value)).digest('hex'),
+        expected.sha256);
+    }
+  });
+
   test('does not treat Schwab top-level isOpen as options RTH before the regular interval', () => {
     const start = Date.UTC(2026, 7, 26, 13, 30);
     const packet = { option: { OPTION: { marketType: 'OPTION', isOpen: true, sessionHours: {

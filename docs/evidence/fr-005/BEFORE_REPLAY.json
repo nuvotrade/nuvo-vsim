@@ -1,0 +1,56 @@
+{
+  "state": "BEFORE_FR_005",
+  "requests": [
+    {
+      "owner": "owner",
+      "symbol": "SPY",
+      "options": {
+        "period": 2
+      }
+    },
+    {
+      "owner": "owner",
+      "symbol": "SPY",
+      "options": {
+        "period": 2
+      }
+    },
+    {
+      "owner": "owner",
+      "symbol": "SPY",
+      "options": {
+        "period": 2
+      }
+    },
+    {
+      "owner": "owner",
+      "symbol": "SPY",
+      "options": {
+        "period": 2
+      }
+    }
+  ],
+  "results": {
+    "120": {
+      "count": 120,
+      "firstClose": 637.25,
+      "lastClose": 756.25,
+      "hash": "7fe334790bea1669bfa457b4cb65dcc1c2f81661bf19ec0ec1305a62434e4394"
+    },
+    "252": {
+      "count": 252,
+      "firstClose": 505.25,
+      "lastClose": 756.25,
+      "hash": "fa01df992d815626b9319909a9e8539a6a4f0cbde1f87cd0366d0975d57fcf65"
+    },
+    "400": {
+      "count": 400,
+      "firstClose": 357.25,
+      "lastClose": 756.25,
+      "hash": "3a4cce5a127d1b9f565d82355200884f0b4edcc30e70762870507c8d1eed2c4f"
+    },
+    "504": {
+      "error": "SCHWAB_HISTORY_SHORT:502"
+    }
+  }
+}

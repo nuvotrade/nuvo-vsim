@@ -93,6 +93,26 @@ describe('the cycle produces a decision, never an exception', () => {
       assert.ok(names.includes(stage), `missing trace stage ${stage}`);
     }
   });
+
+  test('history contract identity and request provenance survive into sealed inputs', async () => {
+    const { eng, provider } = build({ ivMult: 1.30 });
+    const history = provider.history.bind(provider);
+    provider.history = async (...args) => ({
+      ...await history(...args),
+      source: 'SCHWAB_MARKET_DATA_PRICE_HISTORY_3Y',
+      historyContractVersion: 'SCHWAB_PRICE_HISTORY_3Y_V2',
+      requestPeriodYears: 3,
+      rawBarCount: 756,
+      returnedBarCount: 400,
+    });
+    const result = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    const sealed = result.evidence.inputs.data.symbols.SPY;
+    assert.equal(sealed.historySource, 'SCHWAB_MARKET_DATA_PRICE_HISTORY_3Y');
+    assert.equal(sealed.historyContractVersion, 'SCHWAB_PRICE_HISTORY_3Y_V2');
+    assert.equal(sealed.historyRequestPeriodYears, 3);
+    assert.equal(sealed.historyRawBarCount, 756);
+    assert.equal(sealed.historyReturnedBarCount, 400);
+  });
 });
 
 describe('the machine fails closed (§18)', () => {

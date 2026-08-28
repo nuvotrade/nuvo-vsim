@@ -1,0 +1,192 @@
+{
+  "schema": "nuvo.fr-005.old-vs-new-replay.v1",
+  "fixture": {
+    "totalSourceBars": 756,
+    "legacyTwoYearBars": 502,
+    "firstSourceRecord": {
+      "sequence": 1,
+      "datetime": 1672531200000,
+      "open": 1,
+      "high": 1.5,
+      "low": 0.5,
+      "close": 1.25,
+      "volume": 1000000
+    },
+    "lastSourceRecord": {
+      "sequence": 756,
+      "datetime": 1737763200000,
+      "open": 756,
+      "high": 756.5,
+      "low": 755.5,
+      "close": 756.25,
+      "volume": 1000755
+    }
+  },
+  "old": {
+    "requestPeriodYears": 2,
+    "rawBarCount": 502,
+    "requestedLookback": 504,
+    "requiredBars": 504,
+    "result": {
+      "error": "SCHWAB_HISTORY_SHORT:502"
+    }
+  },
+  "new": {
+    "requests": [
+      {
+        "ownerId": "owner",
+        "symbol": "SPY",
+        "options": {
+          "period": 3
+        }
+      }
+    ],
+    "contractVersion": "SCHWAB_PRICE_HISTORY_3Y_V2",
+    "rawBarCount": 756,
+    "requestedLookback": 504,
+    "requiredBars": 504,
+    "returnedBarCount": 504,
+    "firstReturned": {
+      "t": 1694304000000,
+      "o": 253,
+      "h": 253.5,
+      "l": 252.5,
+      "c": 253.25,
+      "v": 1000252
+    },
+    "lastReturned": {
+      "t": 1737763200000,
+      "o": 756,
+      "h": 756.5,
+      "l": 755.5,
+      "c": 756.25,
+      "v": 1000755
+    },
+    "resultSha256": "7d0f987f917697306aacda7c41dc0c37b08727e79144d55d44473c11dcba978b"
+  },
+  "boundary": {
+    "rawBarCount": 503,
+    "result": {
+      "error": "SCHWAB_HISTORY_SHORT:503"
+    }
+  },
+  "lowerLookbackIdentity": {
+    "120": {
+      "beforeCount": 120,
+      "afterCount": 120,
+      "beforeFirst": {
+        "t": 1727481600000,
+        "o": 637,
+        "h": 637.5,
+        "l": 636.5,
+        "c": 637.25,
+        "v": 1000636
+      },
+      "afterFirst": {
+        "t": 1727481600000,
+        "o": 637,
+        "h": 637.5,
+        "l": 636.5,
+        "c": 637.25,
+        "v": 1000636
+      },
+      "beforeLast": {
+        "t": 1737763200000,
+        "o": 756,
+        "h": 756.5,
+        "l": 755.5,
+        "c": 756.25,
+        "v": 1000755
+      },
+      "afterLast": {
+        "t": 1737763200000,
+        "o": 756,
+        "h": 756.5,
+        "l": 755.5,
+        "c": 756.25,
+        "v": 1000755
+      },
+      "beforeSha256": "7fe334790bea1669bfa457b4cb65dcc1c2f81661bf19ec0ec1305a62434e4394",
+      "afterSha256": "7fe334790bea1669bfa457b4cb65dcc1c2f81661bf19ec0ec1305a62434e4394",
+      "byteIdentical": true
+    },
+    "252": {
+      "beforeCount": 252,
+      "afterCount": 252,
+      "beforeFirst": {
+        "t": 1716076800000,
+        "o": 505,
+        "h": 505.5,
+        "l": 504.5,
+        "c": 505.25,
+        "v": 1000504
+      },
+      "afterFirst": {
+        "t": 1716076800000,
+        "o": 505,
+        "h": 505.5,
+        "l": 504.5,
+        "c": 505.25,
+        "v": 1000504
+      },
+      "beforeLast": {
+        "t": 1737763200000,
+        "o": 756,
+        "h": 756.5,
+        "l": 755.5,
+        "c": 756.25,
+        "v": 1000755
+      },
+      "afterLast": {
+        "t": 1737763200000,
+        "o": 756,
+        "h": 756.5,
+        "l": 755.5,
+        "c": 756.25,
+        "v": 1000755
+      },
+      "beforeSha256": "fa01df992d815626b9319909a9e8539a6a4f0cbde1f87cd0366d0975d57fcf65",
+      "afterSha256": "fa01df992d815626b9319909a9e8539a6a4f0cbde1f87cd0366d0975d57fcf65",
+      "byteIdentical": true
+    },
+    "400": {
+      "beforeCount": 400,
+      "afterCount": 400,
+      "beforeFirst": {
+        "t": 1703289600000,
+        "o": 357,
+        "h": 357.5,
+        "l": 356.5,
+        "c": 357.25,
+        "v": 1000356
+      },
+      "afterFirst": {
+        "t": 1703289600000,
+        "o": 357,
+        "h": 357.5,
+        "l": 356.5,
+        "c": 357.25,
+        "v": 1000356
+      },
+      "beforeLast": {
+        "t": 1737763200000,
+        "o": 756,
+        "h": 756.5,
+        "l": 755.5,
+        "c": 756.25,
+        "v": 1000755
+      },
+      "afterLast": {
+        "t": 1737763200000,
+        "o": 756,
+        "h": 756.5,
+        "l": 755.5,
+        "c": 756.25,
+        "v": 1000755
+      },
+      "beforeSha256": "3a4cce5a127d1b9f565d82355200884f0b4edcc30e70762870507c8d1eed2c4f",
+      "afterSha256": "3a4cce5a127d1b9f565d82355200884f0b4edcc30e70762870507c8d1eed2c4f",
+      "byteIdentical": true
+    }
+  }
+}

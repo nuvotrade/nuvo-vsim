@@ -1,0 +1,11 @@
+Wrangler version: 4.125.0
+Command: npx wrangler deploy --dry-run --config cloudflare/wrangler.jsonc --outdir <temporary-directory>
+Exit: 0
+Total upload: 1731.53 KiB
+Gzip: 360.02 KiB
+
+041f45c207408c6c68ee960e8f0448e0f17396cbae911dac4ccbb829e0788643  entry.js
+0e3e4448aba3d278571ce59a53429cdb6276a46307d5f655c2f8b02a9c45e33b  entry.js.map
+11d27809a4da39d3546d9c7ff15ad94edc72b5cb1377ba2a2c72d04428416524  README.md
+
+No deployment was performed.
