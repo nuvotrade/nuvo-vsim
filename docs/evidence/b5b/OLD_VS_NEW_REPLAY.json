@@ -1,0 +1,61 @@
+{
+  "schema": "nuvo.b5b.earnings-consumer-replay.v1",
+  "baseCommit": "d600c0b8e00936d31d550eff1d75cc4d4af6ca03",
+  "contractVersion": "BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1",
+  "missingTime": {
+    "old": {
+      "result": {
+        "type": "EARNINGS",
+        "at": 1793289600000,
+        "source": "MASSIVE_BENZINGA_EARNINGS"
+      },
+      "verdict": "ACCEPTED_FABRICATED_TIME"
+    },
+    "next": {
+      "error": "EARNINGS_EVENT_TIME_MISSING",
+      "faultStage": "EARNINGS_CONSUMER",
+      "verdict": "REFUSED",
+      "containsInvented1600Z": false
+    }
+  },
+  "correctedTime": {
+    "input": "2026-10-29T20:00:00.000Z",
+    "result": {
+      "type": "EARNINGS",
+      "at": 1793304000000,
+      "source": "MASSIVE_BENZINGA_EARNINGS"
+    },
+    "exactInstant": true
+  },
+  "splitIsolation": {
+    "old": {
+      "type": "CORPORATE_SPLIT",
+      "at": 1788278400000,
+      "source": "MASSIVE_ACTIONS"
+    },
+    "next": {
+      "type": "CORPORATE_SPLIT",
+      "at": 1788278400000,
+      "source": "MASSIVE_ACTIONS"
+    },
+    "oldSha256": "8e8893d716f8326b93c573a9c9827c115e69a3ee6680cbb99007c2d92c2e0aed",
+    "nextSha256": "8e8893d716f8326b93c573a9c9827c115e69a3ee6680cbb99007c2d92c2e0aed",
+    "byteIdentical": true,
+    "limitation": "FR-026 split half remains open; date-only splits still receive 16:00Z."
+  },
+  "sealedEnvelopeFields": [
+    "status",
+    "faultCode",
+    "faultStage",
+    "sourceId",
+    "upstreamOrigin",
+    "vendorAsOf",
+    "fetchedAt",
+    "requestedRange",
+    "echoedRange",
+    "coverageThrough",
+    "schemaVersion",
+    "events",
+    "rawPayloadHash"
+  ]
+}

@@ -1,0 +1,7 @@
+base d600c0b8e00936d31d550eff1d75cc4d4af6ca03
+base_tests 399
+packet_tests 405
+delta +6
+added production_adapters.test.js 6
+removed 0
+unloaded 0

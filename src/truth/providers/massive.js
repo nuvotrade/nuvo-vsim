@@ -8,6 +8,12 @@ import {
 
 const DAY_MS = 86_400_000;
 const RIGHTS = Object.freeze(['put', 'call']);
+export const EARNINGS_SOURCE_CONTRACT_VERSION = 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1';
+export const EARNINGS_SOURCE_ID = 'MASSIVE_BENZINGA_EARNINGS';
+export const EARNINGS_UPSTREAM_ORIGIN = 'BENZINGA';
+
+const EARNINGS_CONSUMER_STAGE = 'EARNINGS_CONSUMER';
+const EARNINGS_DATE_STATUSES = new Set(['projected', 'confirmed']);
 
 function numeric(value, fallback = null) {
   if (value === null || value === undefined || value === '') return fallback;
@@ -21,9 +27,92 @@ function timestamp(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function eventAt(event) {
-  return timestamp(event.eventTimeUtc)
-    ?? timestamp(event.date ? `${event.date}T16:00:00Z` : null);
+function earningsSourceEnvelope(body) {
+  return {
+    status: body?.status ?? null,
+    faultCode: body?.faultCode ?? null,
+    faultStage: body?.faultStage ?? null,
+    sourceId: body?.sourceId ?? null,
+    upstreamOrigin: body?.upstreamOrigin ?? null,
+    vendorAsOf: body?.vendorAsOf ?? null,
+    fetchedAt: body?.fetchedAt ?? null,
+    requestedRange: body?.requestedRange ?? null,
+    echoedRange: body?.echoedRange ?? null,
+    coverageThrough: body?.coverageThrough ?? null,
+    schemaVersion: body?.schemaVersion ?? null,
+    events: Array.isArray(body?.events) ? body.events : null,
+    rawPayloadHash: body?.rawPayloadHash ?? null,
+  };
+}
+
+function earningsFailure(code, envelope, detail = {}) {
+  return {
+    ok: false,
+    error: code,
+    faultCode: code,
+    faultStage: EARNINGS_CONSUMER_STAGE,
+    sourceEnvelope: envelope,
+    ...detail,
+  };
+}
+
+/**
+ * Consume the signed Amendment-3 event envelope without reimplementing the
+ * producer adapter. The producer owns request, echo, freshness and timezone
+ * normalization. This boundary independently enforces source identity and
+ * clause 3.7 so a producer regression cannot become an invented event time.
+ */
+export function consumeEarningsEnvelope(body, { httpStatus = 200 } = {}) {
+  const envelope = earningsSourceEnvelope(body);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return earningsFailure('EARNINGS_RESPONSE_ENVELOPE_INVALID', envelope);
+  }
+  if (envelope.schemaVersion !== EARNINGS_SOURCE_CONTRACT_VERSION
+    || envelope.sourceId !== EARNINGS_SOURCE_ID
+    || envelope.upstreamOrigin !== EARNINGS_UPSTREAM_ORIGIN) {
+    return earningsFailure('EARNINGS_SOURCE_CONTRACT_UNVERIFIED', envelope);
+  }
+  if (!(httpStatus >= 200 && httpStatus < 300) || envelope.faultCode != null) {
+    return earningsFailure(envelope.faultCode ?? `EARNINGS_PROVIDER_HTTP_${httpStatus}`,
+      envelope, { producerFaultStage: envelope.faultStage });
+  }
+  if (!Array.isArray(envelope.events)) {
+    return earningsFailure('EARNINGS_EVENTS_MISSING', envelope);
+  }
+  const verifiedEmpty = envelope.status === 'VERIFIED' && envelope.events.length === 0;
+  const verifiedBlocked = envelope.status === 'BLOCKED' && envelope.events.length > 0;
+  if (!verifiedEmpty && !verifiedBlocked) {
+    return earningsFailure('EARNINGS_RESULT_SEMANTICS_INVALID', envelope);
+  }
+
+  const normalized = [];
+  for (const event of envelope.events) {
+    if (event?.timeEst == null || String(event.timeEst).trim() === '') {
+      return earningsFailure('EARNINGS_EVENT_TIME_MISSING', envelope,
+        { eventDate: event?.date ?? null });
+    }
+    const at = typeof event.eventTimeUtc === 'string'
+      ? Date.parse(event.eventTimeUtc) : Number.NaN;
+    if (!Number.isFinite(at)) {
+      return earningsFailure('EARNINGS_EVENT_TIME_INVALID', envelope,
+        { eventDate: event?.date ?? null, eventTimeUtc: event?.eventTimeUtc ?? null });
+    }
+    if (!Number.isFinite(Date.parse(event.lastUpdated ?? ''))) {
+      return earningsFailure('EARNINGS_LAST_UPDATED_MISSING_OR_INVALID', envelope,
+        { eventDate: event?.date ?? null, lastUpdated: event?.lastUpdated ?? null });
+    }
+    if (!EARNINGS_DATE_STATUSES.has(event.dateStatus)) {
+      return earningsFailure('EARNINGS_DATE_STATUS_UNKNOWN', envelope,
+        { eventDate: event?.date ?? null, dateStatus: event?.dateStatus ?? null });
+    }
+    normalized.push({ type: 'EARNINGS', at, source: envelope.sourceId });
+  }
+  return {
+    ok: true,
+    events: normalized,
+    sourceEnvelope: envelope,
+    contractVersion: envelope.schemaVersion,
+  };
 }
 
 function normalizedFreshness(value) {
@@ -164,6 +253,21 @@ export class MassiveProvider extends DataProvider {
   async _getObserved(path, options = {}) {
     const body = await this._get(path, options);
     return { body, acquiredAt: this.now() };
+  }
+
+  async _getEarningsObserved(path) {
+    let response;
+    try {
+      response = await this.fetcher(new Request(`https://market.internal${path}`));
+    } catch (error) {
+      throw new Error(`MASSIVE_SERVICE_UNAVAILABLE:${error?.message ?? error}`);
+    }
+    const acquiredAt = this.now();
+    const text = await response.text();
+    let body;
+    try { body = JSON.parse(text); }
+    catch { throw new Error('MASSIVE_MALFORMED_JSON'); }
+    return { body, acquiredAt, httpStatus: response.status };
   }
 
   async history(symbol, { lookback = 400, minBars = 120 } = {}) {
@@ -351,8 +455,9 @@ export class MassiveProvider extends DataProvider {
         ? Promise.resolve({
           body: { status: 'VERIFIED', source: 'FUND_NOT_CORPORATE_ISSUER', events: [] },
           acquiredAt: fixedDecisionTime,
+          httpStatus: 200,
         })
-        : this._getObserved(`/v1/earnings-events?ticker=${encodeURIComponent(symbol)}&from=${from}&through=${through}`, { cache: false });
+        : this._getEarningsObserved(`/v1/earnings-events?ticker=${encodeURIComponent(symbol)}&from=${from}&through=${through}`);
       const [earnings, actions] = await Promise.all([
         earningsPromise,
         (async () => ({
@@ -360,13 +465,45 @@ export class MassiveProvider extends DataProvider {
           acquiredAt: this.now(),
         }))(),
       ]);
-      if (earnings.body.status === 'INCOMPLETE' || actions.body.status === 'INCOMPLETE') {
-        return { error: 'MASSIVE_EVENT_CLEARANCE_INCOMPLETE' };
+      const earningsResult = this.fundSymbols.has(String(symbol).toUpperCase())
+        ? {
+          ok: true,
+          events: [],
+          sourceEnvelope: {
+            status: 'VERIFIED', sourceId: 'FUND_NOT_CORPORATE_ISSUER',
+            upstreamOrigin: null, vendorAsOf: null, fetchedAt: null,
+            requestedRange: { ticker: String(symbol).toUpperCase(), from, through },
+            echoedRange: { ticker: String(symbol).toUpperCase(), from, through },
+            coverageThrough: through, schemaVersion: 'FUND_NON_ISSUER_EVENT_BYPASS_V1',
+            events: [], rawPayloadHash: null, faultCode: null, faultStage: null,
+          },
+          contractVersion: 'FUND_NON_ISSUER_EVENT_BYPASS_V1',
+        }
+        : consumeEarningsEnvelope(earnings.body, { httpStatus: earnings.httpStatus });
+      if (!earningsResult.ok) {
+        return {
+          error: earningsResult.error,
+          faultCode: earningsResult.faultCode,
+          faultStage: earningsResult.faultStage,
+          sourceEnvelope: earningsResult.sourceEnvelope,
+          contractVersion: earningsResult.sourceEnvelope?.schemaVersion ?? null,
+          acquiredAt: earnings.acquiredAt,
+          decisionTime: fixedDecisionTime,
+          clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+        };
+      }
+      if (actions.body.status === 'INCOMPLETE') {
+        return {
+          error: 'MASSIVE_EVENT_CLEARANCE_INCOMPLETE',
+          sourceEnvelope: earningsResult.sourceEnvelope,
+          contractVersion: earningsResult.contractVersion,
+          acquiredAt: earnings.acquiredAt,
+          decisionTime: fixedDecisionTime,
+          clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+        };
       }
       const events = [
-        ...(earnings.body.events ?? []).map((event) => ({
-          type: 'EARNINGS', at: eventAt(event), source: earnings.body.source,
-        })),
+        ...earningsResult.events,
         ...(actions.body.splits ?? []).map((event) => ({
           type: 'CORPORATE_SPLIT', at: timestamp(`${event.executionDate}T16:00:00Z`), source: actions.body.source,
         })),
@@ -382,6 +519,8 @@ export class MassiveProvider extends DataProvider {
         acquiredAt,
         decisionTime: fixedDecisionTime,
         clockContractVersion: PRODUCTION_CLOCK_CONTRACT_VERSION,
+        sourceEnvelope: earningsResult.sourceEnvelope,
+        contractVersion: earningsResult.contractVersion,
       };
     } catch (error) {
       return { error: error.message };

@@ -75,6 +75,18 @@ export class ReplayProvider extends DataProvider {
 
   async events(symbol) {
     const s = this._sym(symbol);
+    if (s?.eventsError) {
+      return {
+        error: s.eventsError,
+        faultCode: s.eventsFaultCode ?? null,
+        faultStage: s.eventsFaultStage ?? null,
+        sourceEnvelope: s.eventsSourceEnvelope ?? null,
+        contractVersion: s.eventsContractVersion ?? null,
+        acquiredAt: s.eventsAcquiredAt ?? null,
+        decisionTime: s.eventsDecisionTime ?? null,
+        clockContractVersion: s.eventsClockContractVersion ?? null,
+      };
+    }
     // `null` means the live provider failed to verify the calendar; `[]`
     // means it verified that there were no events. Conflating those states
     // makes a refused live cycle replay with fabricated event clearance.
@@ -88,6 +100,8 @@ export class ReplayProvider extends DataProvider {
       acquiredAt: s.eventsAcquiredAt ?? null,
       decisionTime: s.eventsDecisionTime ?? null,
       clockContractVersion: s.eventsClockContractVersion ?? null,
+      sourceEnvelope: s.eventsSourceEnvelope ?? null,
+      contractVersion: s.eventsContractVersion ?? null,
     };
   }
 

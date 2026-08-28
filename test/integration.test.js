@@ -133,11 +133,23 @@ describe('the cycle produces a decision, never an exception', () => {
     };
     provider.events = async (symbol, options) => {
       eventCalls.push({ symbol, decisionTime: options?.decisionTime });
+      const sourceEnvelope = {
+        status: 'VERIFIED', faultCode: null, faultStage: null,
+        sourceId: 'MASSIVE_BENZINGA_EARNINGS', upstreamOrigin: 'BENZINGA',
+        vendorAsOf: '2024-06-03T14:59:59.000Z', fetchedAt: '2024-06-03T15:00:00.000Z',
+        requestedRange: { ticker: symbol, from: '2024-06-01', through: '2024-08-02' },
+        echoedRange: { ticker: symbol, from: '2024-06-01', through: '2024-08-02' },
+        coverageThrough: '2024-08-02',
+        schemaVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+        events: [], rawPayloadHash: 'b'.repeat(64),
+      };
       return {
         ...await events(symbol, options),
         acquiredAt: NOW + 600,
         decisionTime: options?.decisionTime,
         clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+        contractVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+        sourceEnvelope,
       };
     };
     provider.quote = async (...args) => ({
@@ -162,6 +174,10 @@ describe('the cycle produces a decision, never an exception', () => {
     assert.equal(sealed.eventsAcquiredAt, NOW + 600);
     assert.equal(sealed.eventsDecisionTime, NOW);
     assert.equal(sealed.eventsClockContractVersion, 'PRODUCTION_CLOCK_DOMAINS_V1');
+    assert.equal(sealed.eventsContractVersion,
+      'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1');
+    assert.equal(sealed.eventsSourceEnvelope.sourceId, 'MASSIVE_BENZINGA_EARNINGS');
+    assert.equal(sealed.eventsSourceEnvelope.rawPayloadHash, 'b'.repeat(64));
   });
 });
 
@@ -217,12 +233,37 @@ describe('the machine fails closed (§18)', () => {
   test('an unverified event calendar on any scan symbol refuses the cycle', async () => {
     const { eng, provider } = build({ ivMult: 1.45 });
     const real = provider.events.bind(provider);
+    const sourceEnvelope = {
+      status: 'INCOMPLETE', faultCode: 'EARNINGS_EVENT_TIME_MISSING',
+      faultStage: 'EARNINGS_CONSUMER', sourceId: 'MASSIVE_BENZINGA_EARNINGS',
+      upstreamOrigin: 'BENZINGA', vendorAsOf: '2024-06-03T14:59:59.000Z',
+      fetchedAt: '2024-06-03T15:00:00.000Z',
+      requestedRange: { ticker: 'XOM', from: '2024-06-01', through: '2024-08-02' },
+      echoedRange: { ticker: 'XOM', from: '2024-06-01', through: '2024-08-02' },
+      coverageThrough: '2024-08-02',
+      schemaVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+      events: [{ date: '2024-07-25', timeEst: null, eventTimeUtc: null }],
+      rawPayloadHash: 'c'.repeat(64),
+    };
     provider.events = async (symbol) => symbol === 'XOM'
-      ? { error: 'event feed unavailable' }
+      ? {
+        error: 'EARNINGS_EVENT_TIME_MISSING',
+        faultCode: 'EARNINGS_EVENT_TIME_MISSING',
+        faultStage: 'EARNINGS_CONSUMER',
+        contractVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+        sourceEnvelope,
+      }
       : real(symbol);
     const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
     assert.equal(r.outcome, OUTCOME.REFUSED);
     assert.equal(r.trace.find((entry) => entry.name === 'truth')?.detail?.symbol, 'XOM');
+    const sealed = r.evidence.inputs.data.symbols.XOM;
+    assert.equal(sealed.eventsError, 'EARNINGS_EVENT_TIME_MISSING');
+    assert.equal(sealed.eventsFaultCode, 'EARNINGS_EVENT_TIME_MISSING');
+    assert.equal(sealed.eventsFaultStage, 'EARNINGS_CONSUMER');
+    assert.equal(sealed.eventsContractVersion,
+      'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1');
+    assert.deepEqual(sealed.eventsSourceEnvelope, sourceEnvelope);
   });
 
   test('an unconfident regime call blocks new exposure', async () => {

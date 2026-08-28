@@ -233,10 +233,15 @@ export async function runCycle(ctx) {
       historyRawBarCount: histories[sym]?.rawBarCount ?? null,
       historyReturnedBarCount: histories[sym]?.returnedBarCount ?? null,
       events: events[sym]?.value ?? null,
+      eventsError: events[sym]?.error ?? null,
+      eventsFaultCode: events[sym]?.faultCode ?? null,
+      eventsFaultStage: events[sym]?.faultStage ?? null,
       eventsAsOf: events[sym]?.asOf ?? null,
       eventsAcquiredAt: events[sym]?.acquiredAt ?? null,
       eventsDecisionTime: events[sym]?.decisionTime ?? null,
       eventsClockContractVersion: events[sym]?.clockContractVersion ?? null,
+      eventsContractVersion: events[sym]?.contractVersion ?? null,
+      eventsSourceEnvelope: events[sym]?.sourceEnvelope ?? null,
     }])),
     engineState: {
       // Strategy-level positions drive concentration, Greeks, stress and

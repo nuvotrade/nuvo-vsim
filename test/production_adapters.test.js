@@ -2,7 +2,10 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { MassiveProvider } from '../src/truth/providers/massive.js';
+import {
+  consumeEarningsEnvelope, EARNINGS_SOURCE_CONTRACT_VERSION,
+  EARNINGS_SOURCE_ID, EARNINGS_UPSTREAM_ORIGIN, MassiveProvider,
+} from '../src/truth/providers/massive.js';
 import {
   CLOCK_FAULT, evaluateQuoteFreshness, PRODUCTION_CLOCK_CONTRACT_VERSION,
 } from '../src/truth/providers/clock_contract.js';
@@ -28,6 +31,26 @@ import {
 import { D1R2EvidencePersistence } from '../cloudflare/evidence-persistence.js';
 
 const NOW = Date.UTC(2026, 7, 23, 18, 0, 0);
+
+function earningsContractEnvelope(events = [], overrides = {}) {
+  const requestedRange = { ticker: 'SPY', from: '2026-08-21', through: '2026-10-22' };
+  return {
+    status: events.length ? 'BLOCKED' : 'VERIFIED',
+    faultCode: null,
+    faultStage: null,
+    sourceId: EARNINGS_SOURCE_ID,
+    upstreamOrigin: EARNINGS_UPSTREAM_ORIGIN,
+    vendorAsOf: '2026-08-23T17:59:59.000Z',
+    fetchedAt: '2026-08-23T18:00:00.000Z',
+    requestedRange,
+    echoedRange: { ...requestedRange },
+    coverageThrough: requestedRange.through,
+    schemaVersion: EARNINGS_SOURCE_CONTRACT_VERSION,
+    events,
+    rawPayloadHash: 'a'.repeat(64),
+    ...overrides,
+  };
+}
 
 describe('protected live dashboard', () => {
   test('bundles the byte-verified reviewed design and preserves the fail-safe console', async () => {
@@ -266,7 +289,13 @@ function marketFetcher({ staleChain = false } = {}) {
         }],
       };
     } else if (url.pathname === '/v1/earnings-events') {
-      body = { status: 'VERIFIED', source: 'MASSIVE_EARNINGS', events: [] };
+      body = earningsContractEnvelope([], {
+        requestedRange: { ticker: url.searchParams.get('ticker'),
+          from: url.searchParams.get('from'), through: url.searchParams.get('through') },
+        echoedRange: { ticker: url.searchParams.get('ticker'),
+          from: url.searchParams.get('from'), through: url.searchParams.get('through') },
+        coverageThrough: url.searchParams.get('through'),
+      });
     } else if (url.pathname === '/v1/corporate-actions') {
       body = { status: 'VERIFIED', source: 'MASSIVE_ACTIONS', splits: [] };
     } else if (url.pathname === '/v1/market-status') {
@@ -281,6 +310,100 @@ function marketFetcher({ staleChain = false } = {}) {
 }
 
 describe('Massive production provider', () => {
+  test('requires the signed source identity before an earnings calendar can clear', () => {
+    const envelope = earningsContractEnvelope([]);
+    envelope.schemaVersion = 'UNREGISTERED_CONTRACT';
+    const result = consumeEarningsEnvelope(envelope);
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'EARNINGS_SOURCE_CONTRACT_UNVERIFIED');
+    assert.equal(result.sourceEnvelope.schemaVersion, 'UNREGISTERED_CONTRACT');
+  });
+
+  test('independently refuses every missing clause-3.7 field without inventing an instant', () => {
+    const event = {
+      date: '2026-10-29', timeEst: '16:00:00', eventTimeUtc: '2026-10-29T20:00:00.000Z',
+      lastUpdated: '2026-08-12T23:30:03.000Z', dateStatus: 'projected',
+    };
+    const cases = [
+      [{ ...event, timeEst: null, eventTimeUtc: null }, 'EARNINGS_EVENT_TIME_MISSING'],
+      [{ ...event, eventTimeUtc: 'not-an-instant' }, 'EARNINGS_EVENT_TIME_INVALID'],
+      [{ ...event, eventTimeUtc: 0 }, 'EARNINGS_EVENT_TIME_INVALID'],
+      [{ ...event, lastUpdated: null }, 'EARNINGS_LAST_UPDATED_MISSING_OR_INVALID'],
+      [{ ...event, dateStatus: 'estimated' }, 'EARNINGS_DATE_STATUS_UNKNOWN'],
+    ];
+    for (const [candidate, error] of cases) {
+      const result = consumeEarningsEnvelope(earningsContractEnvelope([candidate]));
+      assert.equal(result.ok, false);
+      assert.equal(result.error, error);
+      assert.equal(JSON.stringify(result).includes('T16:00:00Z'), false);
+    }
+  });
+
+  test('preserves a producer fault envelope instead of converting it to an empty calendar', async () => {
+    const base = marketFetcher();
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      fetcher: async (request) => {
+        if (new URL(request.url).pathname === '/v1/earnings-events') {
+          return Response.json(earningsContractEnvelope([], {
+            status: 'INCOMPLETE', faultCode: 'EARNINGS_EMPTY_STALE',
+            faultStage: 'EMPTY_FRESHNESS',
+          }), { status: 503 });
+        }
+        return base(request);
+      },
+    });
+    const result = await provider.events('SPY', { decisionTime: NOW });
+    assert.equal(result.error, 'EARNINGS_EMPTY_STALE');
+    assert.equal(result.faultCode, 'EARNINGS_EMPTY_STALE');
+    assert.equal(result.faultStage, 'EARNINGS_CONSUMER');
+    assert.equal(result.sourceEnvelope.faultStage, 'EMPTY_FRESHNESS');
+    assert.equal(result.value, undefined);
+  });
+
+  test('keeps the unresolved split mapping byte-identical while replacing earnings mapping', async () => {
+    const base = marketFetcher();
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      fetcher: async (request) => {
+        if (new URL(request.url).pathname === '/v1/corporate-actions') {
+          return Response.json({
+            status: 'VERIFIED', source: 'MASSIVE_ACTIONS',
+            splits: [{ executionDate: '2026-09-01' }],
+          });
+        }
+        return base(request);
+      },
+    });
+    const result = await provider.events('SPY', { decisionTime: NOW });
+    const split = result.value.find((event) => event.type === 'CORPORATE_SPLIT');
+    const serialized = JSON.stringify(split);
+    assert.equal(serialized,
+      '{"type":"CORPORATE_SPLIT","at":1788278400000,"source":"MASSIVE_ACTIONS"}');
+    assert.equal(createHash('sha256').update(serialized).digest('hex'),
+      '8e8893d716f8326b93c573a9c9827c115e69a3ee6680cbb99007c2d92c2e0aed');
+  });
+
+  test('preserves the complete signed source envelope on a verified earnings event', async () => {
+    const base = marketFetcher();
+    const event = {
+      date: '2026-10-29', timeEst: '16:00:00', eventTimeUtc: '2026-10-29T20:00:00.000Z',
+      lastUpdated: '2026-08-12T23:30:03.000Z', dateStatus: 'projected',
+    };
+    const envelope = earningsContractEnvelope([event]);
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      fetcher: async (request) => new URL(request.url).pathname === '/v1/earnings-events'
+        ? Response.json(envelope) : base(request),
+    });
+    const result = await provider.events('SPY', { decisionTime: NOW });
+    assert.deepEqual(result.value[0], {
+      type: 'EARNINGS', at: Date.parse(event.eventTimeUtc), source: EARNINGS_SOURCE_ID,
+    });
+    assert.deepEqual(result.sourceEnvelope, envelope);
+    assert.equal(result.contractVersion, EARNINGS_SOURCE_CONTRACT_VERSION);
+  });
+
   test('the clock evaluator never substitutes acquisition time for a missing vendor timestamp', () => {
     assert.deepEqual(evaluateQuoteFreshness({
       vendorAsOf: null,
@@ -438,11 +561,17 @@ describe('Massive production provider', () => {
       now: () => NOW,
       fetcher: async (request) => {
         const url = new URL(request.url);
-        if (url.pathname === '/v1/earnings-events') return Response.json({ status: 'INCOMPLETE' }, { status: 503 });
+        if (url.pathname === '/v1/earnings-events') {
+          return Response.json(earningsContractEnvelope([], {
+            status: 'INCOMPLETE', faultCode: 'EARNINGS_PROVIDER_UNAVAILABLE',
+            faultStage: 'PROVIDER_FETCH',
+          }), { status: 503 });
+        }
         return base(request);
       },
     });
-    assert.match((await provider.events('SPY', { decisionTime: NOW })).error, /INCOMPLETE|HTTP_503/u);
+    assert.equal((await provider.events('SPY', { decisionTime: NOW })).error,
+      'EARNINGS_PROVIDER_UNAVAILABLE');
   });
 
   test('keeps mark-only custody data separate from executable quote requirements', async () => {
@@ -928,6 +1057,8 @@ describe('evidence replay boundaries', () => {
       events: [], eventsAsOf: NOW + 600, eventsAcquiredAt: NOW + 600,
       eventsDecisionTime: NOW - 5000,
       eventsClockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+      eventsContractVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+      eventsSourceEnvelope: earningsContractEnvelope([]),
     } } });
     assert.deepEqual(await provider.quote('SPY'), {
       value: { last: 500 }, asOf: NOW - 1000, source: 'replay',
@@ -942,6 +1073,36 @@ describe('evidence replay boundaries', () => {
     assert.deepEqual(await provider.events('SPY'), {
       value: [], asOf: NOW + 600, source: 'replay', acquiredAt: NOW + 600,
       decisionTime: NOW - 5000, clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+      sourceEnvelope: earningsContractEnvelope([]),
+      contractVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+    });
+  });
+
+  test('replays a named earnings-consumer refusal with its sealed envelope', async () => {
+    const envelope = earningsContractEnvelope([{
+      date: '2026-10-29', timeEst: null, eventTimeUtc: null,
+      lastUpdated: '2026-08-12T23:30:03.000Z', dateStatus: 'projected',
+    }]);
+    const provider = new ReplayProvider({ symbols: { AAPL: {
+      events: null,
+      eventsError: 'EARNINGS_EVENT_TIME_MISSING',
+      eventsFaultCode: 'EARNINGS_EVENT_TIME_MISSING',
+      eventsFaultStage: 'EARNINGS_CONSUMER',
+      eventsAcquiredAt: NOW,
+      eventsDecisionTime: NOW - 5000,
+      eventsClockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
+      eventsContractVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+      eventsSourceEnvelope: envelope,
+    } } });
+    assert.deepEqual(await provider.events('AAPL'), {
+      error: 'EARNINGS_EVENT_TIME_MISSING',
+      faultCode: 'EARNINGS_EVENT_TIME_MISSING',
+      faultStage: 'EARNINGS_CONSUMER',
+      sourceEnvelope: envelope,
+      contractVersion: 'BENZINGA_COMPENSATING_ADAPTER_CONTRACT_V1',
+      acquiredAt: NOW,
+      decisionTime: NOW - 5000,
+      clockContractVersion: 'PRODUCTION_CLOCK_DOMAINS_V1',
     });
   });
 });
