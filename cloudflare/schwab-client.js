@@ -9,6 +9,17 @@ const decoder = new TextDecoder();
 import { normalizedBrokerEventKey } from './guardian.js';
 import { resolveSchwabFillEvidence } from '../src/economic/schwab-fill-identity.js';
 
+export async function fetchLane1PreviewOnly(url, init, fetcher = fetch) {
+  let destination;
+  try { destination = new URL(url); }
+  catch { throw new Error('LANE_1_PREVIEW_DESTINATION_REFUSED'); }
+  if (destination.origin !== 'https://api.schwabapi.com'
+    || !/^\/trader\/v1\/accounts\/[^/]+\/previewOrder$/u.test(destination.pathname)) {
+    throw new Error('LANE_1_PREVIEW_DESTINATION_REFUSED');
+  }
+  return fetcher(destination.toString(), init);
+}
+
 export function buildLane1SchwabOrder({ symbol, side, quantity }) {
   if (symbol !== 'SPY' || !['BUY', 'SELL'].includes(side) || quantity !== 1) {
     throw new Error('LANE_1_ORDER_REFUSED');
@@ -826,20 +837,22 @@ export class SchwabD1Client {
     };
   }
 
-  async previewLane1V21Markets(ownerId, { accountHash = null } = {}) {
+  async previewLane1V21Market(ownerId, { instruction }, { accountHash = null } = {}) {
     if (this.env.NUVO_LANE_1_SPY_ARMED !== 'OFF') {
       throw new Error('LANE_1_MARKET_PREVIEW_REQUIRES_ARMED_OFF');
     }
     if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
     const account = await this._laneAccountHash(ownerId, accountHash);
-    const previews = [];
-    for (const [signal, instruction] of [['LONG', 'BUY'], ['SHORT', 'SELL_SHORT']]) {
-      const requestBody = buildLane1SchwabMarketOrder({ instruction });
-      const requestSha256 = await digest(JSON.stringify(requestBody));
-      let raw = '';
-      let response;
-      try {
-        response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/previewOrder`, {
+    const requestBody = buildLane1SchwabMarketOrder({ instruction });
+    const requestSha256 = await digest(JSON.stringify(requestBody));
+    const signal = instruction === 'BUY' ? 'LONG' : instruction === 'SELL_SHORT' ? 'SHORT'
+      : instruction === 'SELL' || instruction === 'BUY_TO_COVER' ? 'EXIT' : 'UNKNOWN';
+    const prefix = `SCHWAB_LANE_MARKET_PREVIEW_${signal}`;
+    let raw = '';
+    let response;
+    try {
+      response = await fetchLane1PreviewOnly(
+        `${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/previewOrder`, {
           method: 'POST',
           headers: {
             authorization: `Bearer ${account.token}`,
@@ -848,56 +861,65 @@ export class SchwabD1Client {
           },
           body: JSON.stringify(requestBody),
           signal: AbortSignal.timeout(10_000),
-        });
-        raw = await boundedText(response);
-      } catch (error) {
-        if (signal === 'LONG') throw error;
-        previews.push({ signal, instruction, status: 'DISABLED',
-          faultCode: 'SCHWAB_LANE_MARKET_PREVIEW_SHORT_TRANSPORT', requestSha256,
-          rawResponseSha256: await digest(raw), rawResponseBody: raw, warnings: [] });
-        continue;
+        },
+      );
+      raw = await boundedText(response);
+    } catch (error) {
+      if (String(error?.message ?? error) === 'LANE_1_PREVIEW_DESTINATION_REFUSED') throw error;
+      return { signal, instruction, status: 'DISABLED', faultCode: `${prefix}_TRANSPORT`,
+        requestSha256, rawResponseSha256: await digest(raw), rawResponseBody: raw,
+        warnings: [], accountMask: account.accountMask, validatedAt: new Date().toISOString() };
+    }
+    const rawResponseSha256 = await digest(raw);
+    if (!response.ok) return { signal, instruction, status: 'DISABLED',
+      faultCode: `${prefix}_${response.status}`, requestSha256, rawResponseSha256,
+      rawResponseBody: raw, warnings: [], accountMask: account.accountMask,
+      validatedAt: new Date().toISOString() };
+    let preview;
+    try { preview = JSON.parse(raw); }
+    catch { return { signal, instruction, status: 'DISABLED',
+      faultCode: `${prefix}_MALFORMED_JSON`, requestSha256, rawResponseSha256,
+      rawResponseBody: raw, warnings: [], accountMask: account.accountMask,
+      validatedAt: new Date().toISOString() }; }
+    const validation = preview?.orderValidationResult;
+    if (!validation || !Array.isArray(validation.rejects) || !Array.isArray(validation.reviews)
+      || validation.rejects.length > 0 || validation.reviews.length > 0) {
+      return { signal, instruction, status: 'DISABLED', faultCode: `${prefix}_NOT_CLEAR`,
+        requestSha256, rawResponseSha256, rawResponseBody: raw, warnings: [],
+        accountMask: account.accountMask, validatedAt: new Date().toISOString() };
+    }
+    const echoed = preview?.orderStrategy;
+    const leg = echoed?.orderLegCollection?.[0];
+    if (!echoed || echoed.orderType !== 'MARKET' || echoed.orderStrategyType !== 'SINGLE'
+      || echoed.session !== 'NORMAL' || echoed.duration !== 'DAY'
+      || echoed.orderLegCollection?.length !== 1 || echoed.childOrderStrategies?.length
+      || leg?.instruction !== instruction || Number(leg?.quantity) !== 1
+      || leg?.instrument?.symbol !== 'SPY' || leg?.instrument?.assetType !== 'EQUITY') {
+      return { signal, instruction, status: 'DISABLED',
+        faultCode: `${prefix}_CONTRACT_UNVERIFIED`, requestSha256, rawResponseSha256,
+        rawResponseBody: raw, warnings: [], accountMask: account.accountMask,
+        validatedAt: new Date().toISOString() };
+    }
+    return { signal, instruction, status: 'CLEAR', requestSha256, rawResponseSha256,
+      rawResponseBody: raw, orderStrategyType: 'SINGLE',
+      warnings: [...(validation.warns ?? []), ...(validation.alerts ?? [])],
+      accountMask: account.accountMask, validatedAt: new Date().toISOString() };
+  }
+
+  async previewLane1V21Markets(ownerId, { accountHash = null } = {}) {
+    const previews = [];
+    for (const [signal, instruction] of [['LONG', 'BUY'], ['SHORT', 'SELL_SHORT']]) {
+      const preview = await this.previewLane1V21Market(ownerId, { instruction }, { accountHash });
+      if (signal === 'LONG' && preview.status !== 'CLEAR') {
+        throw new Error(`${preview.faultCode}:${preview.rawResponseSha256}`);
       }
-      const rawResponseSha256 = await digest(raw);
-      const fail = (faultCode) => {
-        if (signal === 'LONG') throw new Error(`${faultCode}:${rawResponseSha256}`);
-        previews.push({ signal, instruction, status: 'DISABLED', faultCode,
-          requestSha256, rawResponseSha256, rawResponseBody: raw, warnings: [] });
-      };
-      if (!response.ok) {
-        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_${response.status}`);
-        continue;
-      }
-      let preview;
-      try { preview = JSON.parse(raw); }
-      catch {
-        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_MALFORMED_JSON`);
-        continue;
-      }
-      const validation = preview?.orderValidationResult;
-      if (!validation || !Array.isArray(validation.rejects) || !Array.isArray(validation.reviews)
-        || validation.rejects.length > 0 || validation.reviews.length > 0) {
-        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_NOT_CLEAR`);
-        continue;
-      }
-      const echoed = preview?.orderStrategy;
-      const leg = echoed?.orderLegCollection?.[0];
-      if (!echoed || echoed.orderType !== 'MARKET' || echoed.orderStrategyType !== 'SINGLE'
-        || echoed.session !== 'NORMAL' || echoed.duration !== 'DAY'
-        || echoed.orderLegCollection?.length !== 1 || echoed.childOrderStrategies?.length
-        || leg?.instruction !== instruction || Number(leg?.quantity) !== 1
-        || leg?.instrument?.symbol !== 'SPY' || leg?.instrument?.assetType !== 'EQUITY') {
-        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_CONTRACT_UNVERIFIED`);
-        continue;
-      }
-      previews.push({ signal, instruction, status: 'CLEAR', requestSha256,
-        rawResponseSha256, orderStrategyType: 'SINGLE',
-        warnings: [...(validation.warns ?? []), ...(validation.alerts ?? [])] });
+      previews.push(preview);
     }
     const longEnabled = previews.some((row) => row.signal === 'LONG' && row.status === 'CLEAR');
     const shortEnabled = previews.some((row) => row.signal === 'SHORT' && row.status === 'CLEAR');
     if (!longEnabled) throw new Error('LANE_1_MARKET_PREVIEW_LONG_NOT_CLEAR');
     return { contractVersion: LANE_1_SPY_MARKET_CONTRACT, longEnabled, shortEnabled,
-      accountMask: account.accountMask, previews, validatedAt: new Date().toISOString() };
+      accountMask: previews[0]?.accountMask ?? null, previews, validatedAt: new Date().toISOString() };
   }
 
   async lane1V2NetSpyPosition(ownerId, { accountHash = null } = {}) {

@@ -2,7 +2,10 @@ import {
   appendLane1BrokerEvents, createLane1SpyController, lane1ProposalSeal,
   materializeLane1SpyUnit,
 } from '../src/lane/lane-1-spy.js';
-import { createLane1SpyV2Controller } from '../src/lane/lane-1-spy-v2.js';
+import {
+  bindLane1V21ReplayBody, createLane1SpyV2Controller, lane1V2ProposalSeal,
+  replayBodyFromAuthenticatedLane1V21Signal,
+} from '../src/lane/lane-1-spy-v2.js';
 import { sessionStatus } from '../src/truth/providers/schwab.js';
 import { SchwabD1Client } from './schwab-client.js';
 import { centsToUsd, formatCents, formatExecutionPrice } from '../src/economic/money-cents.js';
@@ -28,15 +31,145 @@ async function secretMatches(supplied, expected) {
 }
 
 async function recordOperationalProof(env, ownerId, eventType, detail) {
-  if (!env.DB?.prepare || !ownerId) return;
+  if (!env.DB?.prepare || !ownerId) return null;
+  const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
   await env.DB.prepare(`INSERT INTO operational_audit
     (id,owner_id,event_type,detail_json,created_at) VALUES (?,?,?,?,?)`).bind(
-    crypto.randomUUID(), ownerId, eventType, JSON.stringify({
+    id, ownerId, eventType, JSON.stringify({
       ...detail,
       workerVersion: env.CF_VERSION_METADATA?.id ?? 'local',
     }), createdAt,
   ).run();
+  return { id, createdAt };
+}
+
+function canonical(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+}
+
+function parseObject(value) {
+  try {
+    const parsed = JSON.parse(String(value ?? ''));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
+async function replayBindingFromIngressDetail(detail) {
+  if (detail?.replayEligible !== true || !detail.replayBody) return null;
+  try {
+    const binding = await bindLane1V21ReplayBody(detail.replayBody);
+    if (binding.tvBodyBindingSha256 !== detail.tvBodyBindingSha256) return null;
+    return binding;
+  } catch { return null; }
+}
+
+export async function latestLane1ReplayIngress(env, ownerId) {
+  if (!env.DB?.prepare || !ownerId) return null;
+  const rows = await env.DB.prepare(`SELECT id,detail_json,created_at FROM operational_audit
+    WHERE owner_id=? AND event_type='LANE_1_TV_INGRESS'
+    ORDER BY created_at DESC LIMIT 50`).bind(ownerId).all();
+  for (const row of rows?.results ?? []) {
+    const detail = parseObject(row.detail_json);
+    const binding = await replayBindingFromIngressDetail(detail);
+    if (!binding) continue;
+    return { ingressId: row.id, receivedAt: detail.receivedAt ?? row.created_at,
+      ticker: binding.replayBody.ticker, side: binding.replayBody.side,
+      qty: binding.replayBody.qty, tvBodyBindingSha256: binding.tvBodyBindingSha256,
+      replayEligible: true };
+  }
+  return null;
+}
+
+export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
+  now = () => Date.now(), uuid = () => crypto.randomUUID(), dependencies = {} }) {
+  const refuse = (faultCode, status = 422) => ({ status, body: {
+    state: 'DISARMED', disposition: 'preview-refused', faultCode, sent: false,
+  } });
+  if (env.NUVO_LANE_1_SPY_ARMED !== 'OFF') {
+    return refuse('LANE_1_MARKET_PREVIEW_REQUIRES_ARMED_OFF');
+  }
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu
+    .test(String(ingressId ?? ''))) return refuse('LANE_1_PREVIEW_SOURCE_ID_INVALID', 400);
+  const row = await env.DB.prepare(`SELECT id,detail_json,created_at FROM operational_audit
+    WHERE id=? AND owner_id=? AND event_type='LANE_1_TV_INGRESS' LIMIT 1`)
+    .bind(ingressId, ownerId).first();
+  if (!row) return refuse('LANE_1_PREVIEW_SOURCE_NOT_FOUND', 404);
+  const detail = parseObject(row.detail_json);
+  const binding = await replayBindingFromIngressDetail(detail);
+  if (!binding) return refuse('LANE_1_PREVIEW_SOURCE_NOT_REPLAYABLE');
+  const coordinator = dependencies.coordinator ?? coordinatorV2Adapter(env, ownerId);
+  const before = await coordinator.status();
+  if (before?.armed === true || before?.stage !== 'DISARMED') {
+    return refuse('LANE_1_PREVIEW_REQUIRES_DURABLE_DISARMED');
+  }
+  const instant = now();
+  if (!Number.isFinite(instant)) return refuse('LANE_1_PREVIEW_TIME_INVALID');
+  const seal = await lane1V2ProposalSeal({ signal: binding.normalized.signal,
+    rawSignalSide: binding.replayBody.side,
+    tvBodyBindingSha256: binding.tvBodyBindingSha256,
+    positionSide: before.positionSide ?? 'FLAT', now: instant, uuid,
+    prior: before.open?.seal ?? null });
+  const client = dependencies.client ?? new SchwabD1Client(env);
+  const preview = await client.previewLane1V21Market(ownerId,
+    { instruction: seal.brokerInstruction },
+    { accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null });
+  if (preview.status !== 'CLEAR') return refuse(preview.faultCode ?? 'LANE_1_PREVIEW_NOT_CLEAR');
+  const after = await coordinator.status();
+  if (canonical(before) !== canonical(after)) {
+    return refuse('LANE_1_PREVIEW_COORDINATOR_MUTATED');
+  }
+  const proof = await recordOperationalProof(env, ownerId, 'LANE_1_ORDER_PREVIEW', {
+    test: true, sent: false, sourceIngressId: row.id,
+    sourceIngressCreatedAt: row.created_at,
+    replayBody: binding.replayBody,
+    tvBodyBindingSha256: binding.tvBodyBindingSha256,
+    proposalHash: seal.proposalHash, clientOrderId: seal.clientOrderId,
+    signal: binding.normalized.signal, brokerInstruction: seal.brokerInstruction,
+    quantity: 1, requestSha256: preview.requestSha256,
+    rawResponseSha256: preview.rawResponseSha256,
+    schwabEndpoint: '/previewOrder', accountMask: preview.accountMask ?? null,
+    coordinatorBefore: { armed: before.armed === true, stage: before.stage,
+      positionSide: before.positionSide ?? 'FLAT', updatedAt: before.updatedAt ?? null },
+    coordinatorAfter: { armed: after.armed === true, stage: after.stage,
+      positionSide: after.positionSide ?? 'FLAT', updatedAt: after.updatedAt ?? null },
+    previewedAt: new Date(instant).toISOString(),
+  });
+  return { status: 200, body: { state: 'DISARMED', disposition: 'previewed',
+    sent: false, test: true, ingressId: row.id, previewProofId: proof?.id ?? null,
+    tvBodyBindingSha256: binding.tvBodyBindingSha256,
+    requestSha256: preview.requestSha256, rawResponseSha256: preview.rawResponseSha256,
+    brokerInstruction: seal.brokerInstruction, quantity: 1,
+    schwabEndpoint: '/previewOrder', armStillDisarmed: true } };
+}
+
+export async function handleLane1PreviewRequest({ request, env, ownerId }) {
+  if (request.method !== 'POST') {
+    return new Response(JSON.stringify({ faultCode: 'METHOD_NOT_ALLOWED' }), { status: 405,
+      headers: { 'content-type': 'application/json; charset=utf-8' } });
+  }
+  let body;
+  try { body = await readBoundedJson(request, 1_024); }
+  catch (error) {
+    return new Response(JSON.stringify({ faultCode: error.message, sent: false }), { status: 400,
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(['ingressId'])) {
+    return new Response(JSON.stringify({ faultCode: 'LANE_1_PREVIEW_REQUEST_INVALID', sent: false }), {
+      status: 400, headers: { 'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store' },
+    });
+  }
+  let result;
+  try { result = await previewStoredLane1Ingress({ env, ownerId, ingressId: body.ingressId }); }
+  catch (error) { result = { status: 422, body: { state: 'DISARMED',
+    disposition: 'preview-refused',
+    faultCode: String(error?.message ?? error).split(':')[0], sent: false } }; }
+  return new Response(JSON.stringify(result.body), { status: result.status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
 }
 
 function easternDate(now) {
@@ -347,9 +480,14 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {
   }
   const authenticated = await secretMatches(body?.secret, env.LANE_1_TV_WEBHOOK_SECRET);
   if (authenticated) {
+    const replayBody = replayBodyFromAuthenticatedLane1V21Signal(body);
+    const binding = replayBody ? await bindLane1V21ReplayBody(replayBody) : null;
     await recordOperationalProof(env, ownerId, 'LANE_1_TV_INGRESS', {
       receivedAt: new Date().toISOString(),
       side: String(body?.side ?? '').trim().toUpperCase() || null,
+      replayEligible: binding !== null,
+      replayBody: binding?.replayBody ?? null,
+      tvBodyBindingSha256: binding?.tvBodyBindingSha256 ?? null,
     }).catch(() => {});
   }
   if (String(body?.kind ?? '').trim().toUpperCase() === 'TAPE') {

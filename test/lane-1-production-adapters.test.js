@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildLane1SchwabBracket, buildLane1SchwabExit, buildLane1SchwabMarketOrder, buildLane1SchwabOrder,
-  extractLane1BracketStop, extractLane1SchwabFill, SchwabD1Client,
+  extractLane1BracketStop, extractLane1SchwabFill, fetchLane1PreviewOnly, SchwabD1Client,
   schwabOrderIdFromLocation,
 } from '../cloudflare/schwab-client.js';
 import { armLane1FromDashboard, disarmLane1FromDashboard } from '../cloudflare/lane-1-runtime.js';
@@ -106,6 +106,16 @@ test('V2.1 market builder distinguishes open short from SELL flatten', () => {
     .orderLegCollection[0].instruction, 'BUY_TO_COVER');
   assert.throws(() => buildLane1SchwabMarketOrder({ instruction: 'SELL', quantity: 2 }),
     /LANE_1_MARKET_ORDER_REFUSED/u);
+});
+
+test('preview-only transport rejects /orders before any network activity', async () => {
+  let calls = 0;
+  const fetcher = async () => { calls += 1; return new Response(); };
+  await assert.rejects(() => fetchLane1PreviewOnly(
+    'https://api.schwabapi.com/trader/v1/accounts/ACCOUNT-HASH/orders',
+    { method: 'POST' }, fetcher,
+  ), /LANE_1_PREVIEW_DESTINATION_REFUSED/u);
+  assert.equal(calls, 0);
 });
 
 test('durable dashboard ARM authorizes fill observation while env stays OFF', async () => {

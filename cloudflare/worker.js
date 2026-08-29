@@ -41,8 +41,8 @@ import {
 } from '../src/dashboard/e3-spine-tab.js';
 import {
   disarmLane1FromDashboard, expireLane1,
-  armLane1FromDashboard, handleLane1TvWebhook, handlePrincipalFlatten, lane1Status,
-  validateLane1V21Market,
+  armLane1FromDashboard, handleLane1PreviewRequest, handleLane1TvWebhook,
+  handlePrincipalFlatten, lane1Status, latestLane1ReplayIngress, validateLane1V21Market,
 } from './lane-1-runtime.js';
 import { buildSystemHealth, proofsForWorker } from './system-health.js';
 
@@ -2051,13 +2051,16 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
         <dl class="e3-spine-facts"><div><dt>Symbol / quantity</dt><dd data-e3="lane-position">SPY · 1</dd></div><div><dt>Buy fill</dt><dd data-e3="lane-buy-fill">—</dd></div><div><dt>Sell fill</dt><dd data-e3="lane-sell-fill">—</dd></div><div><dt>Realized P&amp;L</dt><dd data-e3="lane-pnl">—</dd></div><div><dt>Manifest SHA-256</dt><dd data-e3="lane-hash">—</dd></div><div><dt>Diary updated</dt><dd data-e3="lane-updated">—</dd></div></dl>
         <button class="cc-directive" type="button" data-action="laneArm">ARM LANE_1_SPY</button>
         <button class="cc-directive" type="button" data-action="laneDisarm">DISARM LANE_1_SPY</button>
+        <button class="cc-directive" type="button" data-action="lanePreview" disabled>VALIDATE ORDER</button>
+        <p class="lane-preview-source" data-e3="lane-preview-source">No replayable TradingView ingress row.</p>
+        <p class="lane-preview-result" data-e3="lane-preview-result" role="status" aria-live="polite" hidden></p>
         <p class="lane-control-error" data-e3="lane-error" role="alert" hidden></p>
         <p class="panel-note">Authenticated dashboard control. No Discord chat command is installed.</p>
       </article>
     </div>
   </section>` : '';
   const e3Styles = e3SpineEnabled ? `<style>
-    .e3-spine-panes{display:grid;grid-template-columns:1fr 1fr;gap:16px}.e3-spine-facts{display:grid;grid-template-columns:1fr 1fr;margin:0}.e3-spine-facts>div{padding:13px;border-bottom:1px solid var(--line)}.e3-spine-facts dt{color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.e3-spine-facts dd{margin:7px 0 0;font:700 17px/1.2 var(--mono);font-variant-numeric:tabular-nums}.lane-arm-state{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:7px 11px}.lane-arm-state:before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}.lane-arm-state[data-state="armed"]{color:var(--green);border-color:rgba(96,226,168,.55);background:rgba(35,196,143,.13)}.lane-arm-state[data-state="disarmed"]{color:var(--red);border-color:rgba(242,118,118,.55);background:rgba(242,118,118,.1)}.lane-control-error{margin:10px 0 0;padding:9px 11px;border:1px solid rgba(242,118,118,.45);border-radius:5px;background:rgba(242,118,118,.08);color:var(--red);font:700 10px/1.45 var(--mono)}.lane-control-error[hidden]{display:none}@media(max-width:760px){.e3-spine-panes{grid-template-columns:1fr}.e3-spine-facts{grid-template-columns:1fr}}
+    .e3-spine-panes{display:grid;grid-template-columns:1fr 1fr;gap:16px}.e3-spine-facts{display:grid;grid-template-columns:1fr 1fr;margin:0}.e3-spine-facts>div{padding:13px;border-bottom:1px solid var(--line)}.e3-spine-facts dt{color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.e3-spine-facts dd{margin:7px 0 0;font:700 17px/1.2 var(--mono);font-variant-numeric:tabular-nums}.lane-arm-state{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:7px 11px}.lane-arm-state:before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}.lane-arm-state[data-state="armed"]{color:var(--green);border-color:rgba(96,226,168,.55);background:rgba(35,196,143,.13)}.lane-arm-state[data-state="disarmed"]{color:var(--red);border-color:rgba(242,118,118,.55);background:rgba(242,118,118,.1)}.lane-control-error,.lane-preview-result{margin:10px 0 0;padding:9px 11px;border:1px solid rgba(242,118,118,.45);border-radius:5px;background:rgba(242,118,118,.08);color:var(--red);font:700 10px/1.45 var(--mono)}.lane-preview-result{border-color:rgba(96,226,168,.45);background:rgba(35,196,143,.08);color:var(--green)}.lane-control-error[hidden],.lane-preview-result[hidden]{display:none}.lane-preview-source{margin:10px 0 0;color:var(--muted);font:700 9px/1.45 var(--mono);overflow-wrap:anywhere}@media(max-width:760px){.e3-spine-panes{grid-template-columns:1fr}.e3-spine-facts{grid-template-columns:1fr}}
   </style>` : '';
   const portfolio = `<section class="portfolio-ledger" aria-label="Current Schwab portfolio books">
     <article class="panel expiration-panel"><div class="panel-head"><div><p class="kicker">Open short-option capital by time to expiry</p><h3>Expiration ladder</h3></div><span data-vsim="custody-scope" class="as-of">—</span></div><div class="expiration-ladder" data-vsim="expiration-ladder"></div><div class="panel-note" data-vsim="expiration-note">W1–W4 use current V5 custody and the configured expiration concentration limit.</div></article>
@@ -3480,6 +3483,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     node.hidden = !message;
   }
 
+  function showLanePreviewResult(message) {
+    const node = q('[data-e3="lane-preview-result"]');
+    if (!node) return;
+    text(node, message || '');
+    node.hidden = !message;
+  }
+
   function renderE3Spine(model) {
     if (!E3_SPINE_ENABLED || !model) return;
     const fixture = model.paneA || {};
@@ -3510,6 +3520,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     text(q('[data-e3="lane-pnl"]'), moneyExact(lane.realizedPnlUsd));
     text(q('[data-e3="lane-hash"]'), lane.manifestHash || '—');
     text(q('[data-e3="lane-updated"]'), lane.updatedAt ? when(lane.updatedAt) : '—');
+    const preview = lane.previewSource || null;
+    const previewButton = q('[data-action="lanePreview"]');
+    if (previewButton) {
+      previewButton.dataset.ingressId = preview && preview.ingressId || '';
+      previewButton.disabled = lane.armed === true || !preview;
+    }
+    text(q('[data-e3="lane-preview-source"]'), preview
+      ? 'TV ' + preview.side + ' · ' + preview.ticker + ' · ' + preview.qty + ' · '
+        + when(preview.receivedAt) + ' · ' + preview.tvBodyBindingSha256.slice(0, 16)
+      : 'No replayable TradingView ingress row. Historical rows without a stored body cannot be invented.');
   }
 
   let currentStatus = null;
@@ -3558,6 +3578,14 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       laneArm: () => api('/api/lane-1-spy/arm', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
       }),
+      lanePreview: () => {
+        const source = q('[data-action="lanePreview"]');
+        const ingressId = source && source.dataset.ingressId || '';
+        return api('/api/lane-1-spy/preview-ingress', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ingressId }),
+        });
+      },
     };
     const confirmations = {
       ledger: 'Backfill the append-only Schwab transaction ledger using read-only API history?',
@@ -3583,6 +3611,30 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         showLaneError(outcome.error);
       } finally {
         laneButtons.forEach(node => { node.disabled = false; });
+      }
+      return;
+    }
+    if (action === 'lanePreview') {
+      const stateNode = q('[data-e3="lane-state"]');
+      if (!stateNode || stateNode.dataset.state !== 'disarmed') {
+        showLaneError('VALIDATE failed: LANE_1_PREVIEW_REQUIRES_DURABLE_DISARMED'); return;
+      }
+      const laneButtons = qa('[data-action="laneArm"], [data-action="laneDisarm"], [data-action="lanePreview"]');
+      showLaneError(null); showLanePreviewResult(null);
+      laneButtons.forEach(node => { node.disabled = true; });
+      try {
+        const result = await operations.lanePreview();
+        showLanePreviewResult('PREVIEWED · ' + result.brokerInstruction + ' 1 SPY · request '
+          + result.requestSha256.slice(0, 16) + ' · TV ' + result.tvBodyBindingSha256.slice(0, 16)
+          + ' · ARM DISARMED · orders 0');
+        await refresh();
+      } catch (error) { showLaneError('VALIDATE failed: ' + error.message); }
+      finally {
+        const preview = q('[data-action="lanePreview"]');
+        laneButtons.forEach(node => { node.disabled = false; });
+        const laneState = q('[data-e3="lane-state"]');
+        if (preview) preview.disabled = !preview.dataset.ingressId
+          || !laneState || laneState.dataset.state !== 'disarmed';
       }
       return;
     }
@@ -3699,10 +3751,11 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
   if (url.pathname === '/api/e3-spine' && request.method === 'GET') {
     if (!e3SpineTabEnabled(env)) return json({ error: 'NOT_FOUND' }, 404);
-    const [cycleSnapshot, laneUnit] = await Promise.all([
+    const [cycleSnapshot, laneUnit, lanePreviewSource] = await Promise.all([
       loadLatestCustody(env, owner.id), lane1Status(env, owner.id),
+      latestLane1ReplayIngress(env, owner.id),
     ]);
-    return json(buildE3SpineTab({ cycleSnapshot, laneUnit }));
+    return json(buildE3SpineTab({ cycleSnapshot, laneUnit, lanePreviewSource }));
   }
   if (url.pathname === '/api/lane-1-spy/disarm' && request.method === 'POST') {
     const result = await disarmLane1FromDashboard({ env, ownerId: owner.id });
@@ -3711,6 +3764,9 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/lane-1-spy/arm' && request.method === 'POST') {
     const result = await armLane1FromDashboard({ env, ownerId: owner.id });
     return json(result.body, result.status);
+  }
+  if (url.pathname === '/api/lane-1-spy/preview-ingress' && request.method === 'POST') {
+    return handleLane1PreviewRequest({ request, env, ownerId: owner.id });
   }
   if (url.pathname === '/api/lane-1-spy/validate-bracket' && request.method === 'POST') {
     return json({ state: 'RETIRED', faultCode: 'LANE_1_BRACKET_CONTRACT_RETIRED' }, 410);

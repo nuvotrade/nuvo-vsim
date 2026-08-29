@@ -6,6 +6,7 @@ import { moneyCents } from '../economic/money-cents.js';
 export const LANE_1_SPY_V2 = 'LANE_1_SPY_V2_1_MARKET_ONLY';
 export const LANE_1_SPY_MARKET_V2_1 = 'LANE_1_SPY_MARKET_ONLY_V2_1';
 const EXACT_SIGNAL_KEYS = Object.freeze(['qty', 'secret', 'side', 'ticker']);
+const EXACT_REPLAY_KEYS = Object.freeze(['qty', 'side', 'ticker']);
 const encoder = new TextEncoder();
 
 async function sha256(value) {
@@ -36,11 +37,37 @@ export function normalizeLane1V21Signal(side) {
   return null;
 }
 
+export function lane1V21ReplayBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(EXACT_REPLAY_KEYS)
+    || body.ticker !== 'SPY' || normalizeLane1V21Signal(body.side) === null
+    || body.qty !== 1) return null;
+  return { ticker: body.ticker, side: body.side, qty: body.qty };
+}
+
+function replayBodyFromSignal(body) {
+  return lane1V21ReplayBody({ ticker: body?.ticker, side: body?.side, qty: body?.qty });
+}
+
 function validSignalShape(body) {
   return body && typeof body === 'object' && !Array.isArray(body)
     && JSON.stringify(Object.keys(body).sort()) === JSON.stringify(EXACT_SIGNAL_KEYS)
-    && body.ticker === 'SPY' && normalizeLane1V21Signal(body.side) !== null
-    && body.qty === 1 && typeof body.secret === 'string';
+    && replayBodyFromSignal(body) !== null && typeof body.secret === 'string';
+}
+
+export function replayBodyFromAuthenticatedLane1V21Signal(body) {
+  return validSignalShape(body) ? replayBodyFromSignal(body) : null;
+}
+
+export async function bindLane1V21ReplayBody(body) {
+  const replayBody = lane1V21ReplayBody(body);
+  if (!replayBody) throw new Error('LANE_1_REPLAY_BODY_INVALID');
+  const normalized = normalizeLane1V21Signal(replayBody.side);
+  const signalBinding = { source: 'TRADINGVIEW_WEBHOOK', ticker: replayBody.ticker,
+    rawSide: replayBody.side, signal: normalized.signal, qty: replayBody.qty,
+    secretAuthenticated: true };
+  return { replayBody, normalized,
+    tvBodyBindingSha256: await sha256(canonical(signalBinding)) };
 }
 
 function response(status, body) { return { status, body }; }
@@ -204,10 +231,10 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
       if (!validSignalShape(body) || !await secretMatches(body?.secret, config?.secret)) {
         return response(400, { faultCode: 'LANE_1_INVALID_SIGNAL', sent: false });
       }
-      const normalized = normalizeLane1V21Signal(body.side);
-      const signalBinding = { source: 'TRADINGVIEW_WEBHOOK', ticker: body.ticker,
-        rawSide: body.side, signal: normalized.signal, qty: body.qty, secretAuthenticated: true };
-      const tvBodyBindingSha256 = await sha256(canonical(signalBinding));
+      const binding = await bindLane1V21ReplayBody(
+        replayBodyFromAuthenticatedLane1V21Signal(body),
+      );
+      const { normalized, tvBodyBindingSha256 } = binding;
       const instant = now();
       let state = await coordinator.ensure({ armed: config?.armed === true,
         armedAt: config?.armedAt, expiresAt: Number.isFinite(Date.parse(config?.armedAt ?? ''))

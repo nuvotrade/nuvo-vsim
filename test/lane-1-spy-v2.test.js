@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createLane1SpyV2Controller, normalizeLane1V21Signal,
+  bindLane1V21ReplayBody, createLane1SpyV2Controller, normalizeLane1V21Signal,
+  replayBodyFromAuthenticatedLane1V21Signal,
 } from '../src/lane/lane-1-spy-v2.js';
 
 const SECRET = 'v2-secret';
@@ -9,6 +10,20 @@ const NOW = Date.parse('2026-08-28T15:00:00.000Z');
 function signal(side, extra = {}) {
   return { ticker: 'SPY', side, qty: 1, secret: SECRET, ...extra };
 }
+
+test('TV replay body preserves the authored ticket without persisting the secret', async () => {
+  const original = signal('BUY');
+  const replayBody = replayBodyFromAuthenticatedLane1V21Signal(original);
+  assert.deepEqual(replayBody, { ticker: 'SPY', side: 'BUY', qty: 1 });
+  assert.equal(Object.hasOwn(replayBody, 'secret'), false);
+  const first = await bindLane1V21ReplayBody(replayBody);
+  const second = await bindLane1V21ReplayBody(structuredClone(replayBody));
+  assert.equal(first.tvBodyBindingSha256, second.tvBodyBindingSha256);
+  assert.match(first.tvBodyBindingSha256, /^[a-f0-9]{64}$/u);
+  assert.equal(replayBodyFromAuthenticatedLane1V21Signal({ ...original, note: 'extra' }), null);
+  await assert.rejects(() => bindLane1V21ReplayBody({ ticker: 'SPY', side: 'BUY', qty: 2 }),
+    /LANE_1_REPLAY_BODY_INVALID/u);
+});
 
 function makeHarness({ armed = true, configArmed = armed,
   positionSide = 'FLAT', custodySide = positionSide,

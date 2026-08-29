@@ -50,7 +50,8 @@ function equityMark(positions, symbol) {
 }
 
 /** Read-only E3 tab model. It never promotes custody marks into an economic unit. */
-export function buildE3SpineTab({ cycleSnapshot = null, laneUnit = null } = {}) {
+export function buildE3SpineTab({ cycleSnapshot = null, laneUnit = null,
+  lanePreviewSource = null } = {}) {
   const account = cycleSnapshot?.account ?? {};
   const positions = Array.isArray(cycleSnapshot?.positions) ? cycleSnapshot.positions : [];
   const latest = laneUnit?.latestUnit ?? laneUnit ?? {};
@@ -99,6 +100,14 @@ export function buildE3SpineTab({ cycleSnapshot = null, laneUnit = null } = {}) 
         ? (latest.realizedPnlUsd ?? null) : realizedPnlCents / 100,
       updatedAt: laneUnit?.latestUnit?.updatedAt ?? laneUnit?.updatedAt ?? null,
       armed: laneUnit?.armed === true,
+      previewSource: lanePreviewSource?.replayEligible === true ? {
+        ingressId: lanePreviewSource.ingressId,
+        receivedAt: lanePreviewSource.receivedAt,
+        ticker: lanePreviewSource.ticker,
+        side: lanePreviewSource.side,
+        qty: lanePreviewSource.qty,
+        tvBodyBindingSha256: lanePreviewSource.tvBodyBindingSha256,
+      } : null,
     },
   };
 }
