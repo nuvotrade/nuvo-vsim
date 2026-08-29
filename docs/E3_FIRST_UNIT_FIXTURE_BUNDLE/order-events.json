@@ -1,0 +1,63 @@
+{
+  "acquisitionOrderFillIds": [
+    "FILL-FIXTURE-E3-000002",
+    "FILL-FIXTURE-E3-000001"
+  ],
+  "appendLog": [
+    {
+      "acquiredAt": "2026-09-01T14:30:08.000Z",
+      "appendSequence": 1,
+      "brokerOccurredAt": "2026-09-01T14:30:07.000Z",
+      "brokerOrderId": "BOID-FIXTURE-E3-900001",
+      "clientOrderId": "COID-FIXTURE-E3-000001",
+      "eventId": "BEVT-FIXTURE-FILL-000002",
+      "eventType": "FILL",
+      "fillId": "FILL-FIXTURE-E3-000002",
+      "quantityContracts": 2
+    },
+    {
+      "acknowledgedQuantityContracts": 3,
+      "acquiredAt": "2026-09-01T14:30:09.000Z",
+      "appendSequence": 2,
+      "brokerOccurredAt": "2026-09-01T14:30:04.000Z",
+      "brokerOrderId": "BOID-FIXTURE-E3-900001",
+      "clientOrderId": "COID-FIXTURE-E3-000001",
+      "eventId": "BEVT-FIXTURE-ACK-000001",
+      "eventType": "ACKNOWLEDGEMENT"
+    },
+    {
+      "acquiredAt": "2026-09-01T14:30:10.000Z",
+      "appendSequence": 3,
+      "brokerOccurredAt": "2026-09-01T14:30:05.000Z",
+      "brokerOrderId": "BOID-FIXTURE-E3-900001",
+      "clientOrderId": "COID-FIXTURE-E3-000001",
+      "eventId": "BEVT-FIXTURE-FILL-000001",
+      "eventType": "FILL",
+      "fillId": "FILL-FIXTURE-E3-000001",
+      "quantityContracts": 1
+    }
+  ],
+  "canonicalEconomicAllocationOrderFillIds": [
+    "FILL-FIXTURE-E3-000001",
+    "FILL-FIXTURE-E3-000002"
+  ],
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "order": {
+    "accountId": "ACCT-FIXTURE-CASH-0001",
+    "authorizationRecordId": "AUTH-FIXTURE-HUMAN-000001",
+    "authorizationType": "HUMAN_SUBMIT_FIXTURE_ONLY",
+    "brokerAdapterVersion": "FIXTURE_BROKER_ADAPTER_V1",
+    "brokerOrderId": "BOID-FIXTURE-E3-900001",
+    "canonicalRequestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "clientOrderId": "COID-FIXTURE-E3-000001",
+    "duration": "DAY",
+    "limitUsdPerShare": 1.1,
+    "parentProposalHash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "positionContractHash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "quantityContracts": 3,
+    "submittedAt": "2026-09-01T14:30:00.000Z",
+    "type": "LIMIT"
+  },
+  "recordType": "ORDER_EVENT_LOG",
+  "resolvedUnitId": "RU-FIXTURE-E3-000001"
+}

@@ -7,6 +7,207 @@ const TRANSACTION_TYPES = 'TRADE,RECEIVE_AND_DELIVER,DIVIDEND_OR_INTEREST,ACH_RE
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 import { normalizedBrokerEventKey } from './guardian.js';
+import { resolveSchwabFillEvidence } from '../src/economic/schwab-fill-identity.js';
+
+export function buildLane1SchwabOrder({ symbol, side, quantity }) {
+  if (symbol !== 'SPY' || !['BUY', 'SELL'].includes(side) || quantity !== 1) {
+    throw new Error('LANE_1_ORDER_REFUSED');
+  }
+  return {
+    orderType: 'MARKET',
+    session: 'NORMAL',
+    duration: 'DAY',
+    orderStrategyType: 'SINGLE',
+    orderLegCollection: [{
+      instruction: side,
+      quantity: 1,
+      instrument: { symbol: 'SPY', assetType: 'EQUITY' },
+    }],
+  };
+}
+
+export const LANE_1_SPY_BRACKET_CONTRACT = 'LANE_1_SPY_BRACKET_TRIGGER_OFFSET_V2';
+export const LANE_1_SPY_STOP_OFFSET_USD = 2;
+export const LANE_1_SPY_MARKET_CONTRACT = 'LANE_1_SPY_MARKET_ONLY_V2_1';
+
+function lane1EquityLeg(instruction) {
+  return {
+    instruction,
+    quantity: 1,
+    instrument: { symbol: 'SPY', assetType: 'EQUITY' },
+  };
+}
+
+export function buildLane1SchwabMarketOrder({
+  symbol = 'SPY', instruction, quantity = 1,
+}) {
+  if (symbol !== 'SPY' || quantity !== 1
+    || !['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER'].includes(instruction)) {
+    throw new Error('LANE_1_MARKET_ORDER_REFUSED');
+  }
+  return {
+    orderType: 'MARKET',
+    session: 'NORMAL',
+    duration: 'DAY',
+    orderStrategyType: 'SINGLE',
+    orderLegCollection: [lane1EquityLeg(instruction)],
+  };
+}
+
+/**
+ * A native Schwab first-triggers-second order.  The child STOP is linked to
+ * the parent trigger price, so the broker — not VSIM — derives fill +/- $2.
+ * Both LONG and SHORT payloads must pass the account-scoped preview endpoint
+ * before the V2 lane is allowed to arm.
+ */
+export function buildLane1SchwabBracket({ symbol = 'SPY', signal, quantity = 1 }) {
+  if (symbol !== 'SPY' || quantity !== 1 || !['LONG', 'SHORT'].includes(signal)) {
+    throw new Error('LANE_1_BRACKET_REFUSED');
+  }
+  const openingInstruction = signal === 'LONG' ? 'BUY' : 'SELL_SHORT';
+  const stopInstruction = signal === 'LONG' ? 'SELL' : 'BUY_TO_COVER';
+  const stopPriceOffset = signal === 'LONG'
+    ? -LANE_1_SPY_STOP_OFFSET_USD : LANE_1_SPY_STOP_OFFSET_USD;
+  return {
+    orderType: 'MARKET',
+    session: 'NORMAL',
+    duration: 'DAY',
+    orderStrategyType: 'TRIGGER',
+    orderLegCollection: [lane1EquityLeg(openingInstruction)],
+    childOrderStrategies: [{
+      orderType: 'STOP',
+      session: 'NORMAL',
+      duration: 'GOOD_TILL_CANCEL',
+      orderStrategyType: 'SINGLE',
+      stopPriceLinkBasis: 'TRIGGER',
+      stopPriceLinkType: 'VALUE',
+      stopPriceOffset,
+      orderLegCollection: [lane1EquityLeg(stopInstruction)],
+    }],
+  };
+}
+
+export function buildLane1SchwabExit({ symbol = 'SPY', positionSide, quantity = 1 }) {
+  if (symbol !== 'SPY' || quantity !== 1 || !['LONG', 'SHORT'].includes(positionSide)) {
+    throw new Error('LANE_1_EXIT_REFUSED');
+  }
+  return {
+    orderType: 'MARKET',
+    session: 'NORMAL',
+    duration: 'DAY',
+    orderStrategyType: 'SINGLE',
+    orderLegCollection: [lane1EquityLeg(positionSide === 'LONG' ? 'SELL' : 'BUY_TO_COVER')],
+  };
+}
+
+export function lane1InstructionForSignal(signal, positionSide = null) {
+  if (signal === 'LONG') return 'BUY';
+  if (signal === 'SHORT') return 'SELL_SHORT';
+  if (signal === 'EXIT' && positionSide === 'LONG') return 'SELL';
+  if (signal === 'EXIT' && positionSide === 'SHORT') return 'BUY_TO_COVER';
+  throw new Error('LANE_1_SIGNAL_POSITION_MISMATCH');
+}
+
+export function extractLane1BracketStop(order, signal, { requireOrderId = true } = {}) {
+  const children = order?.childOrderStrategies ?? [];
+  if (children.length !== 1) throw new Error('LANE_1_BRACKET_CHILD_COUNT_INVALID');
+  const stop = children[0];
+  const expectedInstruction = signal === 'LONG' ? 'SELL' : signal === 'SHORT' ? 'BUY_TO_COVER' : null;
+  const expectedOffset = signal === 'LONG' ? -LANE_1_SPY_STOP_OFFSET_USD
+    : signal === 'SHORT' ? LANE_1_SPY_STOP_OFFSET_USD : null;
+  const leg = stop?.orderLegCollection?.[0];
+  if (stop?.orderType !== 'STOP' || stop?.orderStrategyType !== 'SINGLE'
+    || stop?.duration !== 'GOOD_TILL_CANCEL' || stop?.stopPriceLinkBasis !== 'TRIGGER'
+    || stop?.stopPriceLinkType !== 'VALUE' || Number(stop?.stopPriceOffset) !== expectedOffset
+    || leg?.instruction !== expectedInstruction || Number(leg?.quantity) !== 1
+    || leg?.instrument?.symbol !== 'SPY' || leg?.instrument?.assetType !== 'EQUITY') {
+    throw new Error('LANE_1_BRACKET_STOP_CONTRACT_INVALID');
+  }
+  const orderId = String(stop?.orderId ?? '').trim();
+  if (requireOrderId && !orderId) throw new Error('LANE_1_STOP_ORDER_ID_MISSING');
+  return {
+    orderId,
+    status: String(stop?.status ?? 'UNKNOWN').toUpperCase(),
+    instruction: expectedInstruction,
+    stopPriceLinkBasis: 'TRIGGER',
+    stopPriceLinkType: 'VALUE',
+    stopPriceOffset: expectedOffset,
+    duration: 'GOOD_TILL_CANCEL',
+  };
+}
+
+export function schwabOrderIdFromLocation(location) {
+  if (typeof location !== 'string' || !location) throw new Error('MISSING_ORDER_ID');
+  const match = /\/orders\/([^/?#]+)\/?(?:[?#].*)?$/u.exec(location);
+  if (!match?.[1]) throw new Error('MISSING_ORDER_ID');
+  return decodeURIComponent(match[1]);
+}
+
+export function extractLane1SchwabFill(order, context = {}) {
+  const executions = (order?.orderActivityCollection ?? [])
+    .filter((activity) => String(activity?.activityType ?? '').toUpperCase() === 'EXECUTION')
+    .flatMap((activity) => activity.executionLegs ?? []);
+  if (executions.length === 0) throw new Error('LANE_1_FILL_PENDING');
+  if (executions.length !== 1) throw new Error('LANE_1_MULTIPLE_EXECUTION_LEGS_REFUSED');
+  const mapped = resolveSchwabFillEvidence({
+    ...order,
+    orderId: order?.orderId ?? context.brokerOrderId,
+  });
+  if (!mapped.ok) throw new Error(mapped.faultCode);
+  const [fill] = mapped.fills;
+  const leg = executions[0];
+  const quantity = fill.quantity;
+  const price = fill.price;
+  const fee = fill.feeUsd;
+  if (quantity !== 1 || !(price > 0) || fee === null || fee > 0) {
+    throw new Error('LANE_1_FILL_ECONOMICS_INVALID');
+  }
+  if (!context.brokerOrderId || !context.clientOrderId
+    || !['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER'].includes(context.side)) {
+    throw new Error('LANE_1_FILL_CONTEXT_INVALID');
+  }
+  if (!context.acquiredAt || !context.rawBrokerEvidenceSha256) {
+    throw new Error('MISSING_RAW_EVIDENCE_HASH');
+  }
+  const occurredAt = iso(leg.time);
+  if (!occurredAt) throw new Error('MISSING_BROKER_OCCURRED_AT');
+  return {
+    fillId: fill.fillId,
+    brokerOrderId: String(context.brokerOrderId),
+    clientOrderId: String(context.clientOrderId),
+    symbol: 'SPY',
+    side: context.side,
+    quantityShares: 1,
+    executionPriceUsdPerShare: price,
+    feeUsd: fee,
+    brokerOccurredAt: occurredAt,
+    acquiredAt: context.acquiredAt,
+    rawBrokerEvidenceSha256: context.rawBrokerEvidenceSha256,
+  };
+}
+
+async function boundedText(response, maximumBytes = 1_048_576) {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maximumBytes) throw new Error('SCHWAB_RESPONSE_TOO_LARGE');
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new Error('SCHWAB_RESPONSE_TOO_LARGE');
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+  return decoder.decode(joined);
+}
 
 function finite(value, fallback = null) {
   if (value === null || value === undefined || value === '') return fallback;
@@ -488,6 +689,492 @@ export class SchwabD1Client {
     });
     if (!response.ok) throw new Error(`SCHWAB_READ_${response.status}:${path.split('?')[0]}`);
     return response.json();
+  }
+
+  async _laneAccountHash(ownerId, configuredHash = null) {
+    const token = await this._accessToken(ownerId);
+    const accounts = await this._read('/accounts/accountNumbers', token);
+    const hashes = (accounts ?? []).map((account) => String(account?.hashValue ?? '')).filter(Boolean);
+    if (configuredHash) {
+      if (!hashes.includes(String(configuredHash))) throw new Error('LANE_1_ACCOUNT_NOT_FOUND');
+      const selected = (accounts ?? []).find((account) => String(account?.hashValue ?? '')
+        === String(configuredHash));
+      return { accountHash: String(configuredHash), token,
+        accountMask: String(selected?.accountNumber ?? '').slice(-4).padStart(4, '•') };
+    }
+    if (hashes.length !== 1) throw new Error('LANE_1_ACCOUNT_SELECTION_REQUIRED');
+    return { accountHash: hashes[0], token,
+      accountMask: String(accounts?.[0]?.accountNumber ?? '').slice(-4).padStart(4, '•') };
+  }
+
+  async lane1FillFromStoredBrokerEvents(ownerId, {
+    brokerOrderId, executionActivityId, transactionActivityId,
+    clientOrderId, side, expectedPrice, expectedOccurredAt,
+  }) {
+    const rows = await this.env.DB.prepare(`SELECT event_type,activity_id,transaction_id,
+      symbol,side,quantity,price,occurred_at,raw_json,last_seen_at FROM broker_events
+      WHERE owner_id=? AND broker_order_id=? AND event_type IN ('ORDER_STATE','EXECUTION','TRADE')
+      ORDER BY event_type`).bind(ownerId, String(brokerOrderId)).all();
+    const events = rows.results ?? [];
+    const orderRow = events.find((row) => row.event_type === 'ORDER_STATE');
+    const executionRow = events.find((row) => row.event_type === 'EXECUTION'
+      && String(row.activity_id ?? '') === String(executionActivityId));
+    const transactionRow = events.find((row) => row.event_type === 'TRADE'
+      && String(row.transaction_id ?? '') === String(transactionActivityId));
+    if (!orderRow || !executionRow) throw new Error('MISSING_FILL_ID');
+    if (!transactionRow) throw new Error('MISSING_FEE');
+    if (executionRow.symbol !== 'SPY' || executionRow.side !== side
+      || Number(executionRow.quantity) !== 1 || Number(executionRow.price) !== Number(expectedPrice)
+      || iso(executionRow.occurred_at) !== iso(expectedOccurredAt)) {
+      throw new Error('LANE_1_STORED_FILL_MISMATCH');
+    }
+    let order;
+    let transaction;
+    try {
+      order = JSON.parse(orderRow.raw_json);
+      transaction = JSON.parse(transactionRow.raw_json);
+    } catch { throw new Error('LANE_1_STORED_FILL_MALFORMED_JSON'); }
+    order.transactionActivityCollection = [transaction];
+    const acquiredAt = iso([orderRow.last_seen_at, executionRow.last_seen_at,
+      transactionRow.last_seen_at].sort().at(-1));
+    const rawBrokerEvidenceSha256 = await digest(JSON.stringify({ order, transaction }));
+    const fill = extractLane1SchwabFill(order, {
+      brokerOrderId: String(brokerOrderId), clientOrderId, side,
+      acquiredAt, rawBrokerEvidenceSha256,
+    });
+    if (fill.fillId !== String(executionActivityId)) {
+      throw new Error('LANE_1_STORED_FILL_ID_MISMATCH');
+    }
+    return fill;
+  }
+
+  async placeLane1EquityOrder(ownerId, order, { accountHash = null } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON') throw new Error('LANE_1_DISARMED');
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const requestBody = buildLane1SchwabOrder(order);
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`SCHWAB_LANE_ORDER_${response.status}`);
+    return {
+      brokerOrderId: schwabOrderIdFromLocation(response.headers.get('location')),
+      accountHash: account.accountHash,
+      acceptedAt: new Date().toISOString(),
+    };
+  }
+
+  async previewLane1V2Brackets(ownerId, { accountHash = null } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'OFF') {
+      throw new Error('LANE_1_BRACKET_PREVIEW_REQUIRES_ARMED_OFF');
+    }
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const previews = [];
+    for (const signal of ['LONG', 'SHORT']) {
+      const requestBody = buildLane1SchwabBracket({ signal });
+      const requestSha256 = await digest(JSON.stringify(requestBody));
+      const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/previewOrder`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${account.token}`,
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const raw = await boundedText(response);
+      const rawResponseSha256 = await digest(raw);
+      if (!response.ok) {
+        throw new Error(`SCHWAB_LANE_BRACKET_PREVIEW_${signal}_${response.status}:${rawResponseSha256}`);
+      }
+      let preview;
+      try { preview = JSON.parse(raw); }
+      catch { throw new Error(`SCHWAB_LANE_BRACKET_PREVIEW_${signal}_MALFORMED_JSON`); }
+      const validation = preview?.orderValidationResult;
+      if (!validation || !Array.isArray(validation.rejects) || !Array.isArray(validation.reviews)
+        || validation.rejects.length > 0 || validation.reviews.length > 0) {
+        throw new Error(`SCHWAB_LANE_BRACKET_PREVIEW_${signal}_NOT_CLEAR`);
+      }
+      const echoed = preview?.orderStrategy;
+      if (!echoed || echoed.orderStrategyType !== 'TRIGGER') {
+        throw new Error(`SCHWAB_LANE_BRACKET_PREVIEW_${signal}_CONTRACT_UNVERIFIED`);
+      }
+      extractLane1BracketStop(echoed, signal, { requireOrderId: false });
+      previews.push({
+        signal,
+        requestSha256,
+        rawResponseSha256,
+        orderStrategyType: echoed.orderStrategyType,
+        warnings: [...(validation.warns ?? []), ...(validation.alerts ?? [])],
+      });
+    }
+    return {
+      contractVersion: LANE_1_SPY_BRACKET_CONTRACT,
+      stopOffsetUsd: LANE_1_SPY_STOP_OFFSET_USD,
+      accountMask: account.accountMask,
+      previews,
+      validatedAt: new Date().toISOString(),
+    };
+  }
+
+  async previewLane1V21Markets(ownerId, { accountHash = null } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'OFF') {
+      throw new Error('LANE_1_MARKET_PREVIEW_REQUIRES_ARMED_OFF');
+    }
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const previews = [];
+    for (const [signal, instruction] of [['LONG', 'BUY'], ['SHORT', 'SELL_SHORT']]) {
+      const requestBody = buildLane1SchwabMarketOrder({ instruction });
+      const requestSha256 = await digest(JSON.stringify(requestBody));
+      let raw = '';
+      let response;
+      try {
+        response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/previewOrder`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${account.token}`,
+            accept: 'application/json',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+          signal: AbortSignal.timeout(10_000),
+        });
+        raw = await boundedText(response);
+      } catch (error) {
+        if (signal === 'LONG') throw error;
+        previews.push({ signal, instruction, status: 'DISABLED',
+          faultCode: 'SCHWAB_LANE_MARKET_PREVIEW_SHORT_TRANSPORT', requestSha256,
+          rawResponseSha256: await digest(raw), rawResponseBody: raw, warnings: [] });
+        continue;
+      }
+      const rawResponseSha256 = await digest(raw);
+      const fail = (faultCode) => {
+        if (signal === 'LONG') throw new Error(`${faultCode}:${rawResponseSha256}`);
+        previews.push({ signal, instruction, status: 'DISABLED', faultCode,
+          requestSha256, rawResponseSha256, rawResponseBody: raw, warnings: [] });
+      };
+      if (!response.ok) {
+        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_${response.status}`);
+        continue;
+      }
+      let preview;
+      try { preview = JSON.parse(raw); }
+      catch {
+        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_MALFORMED_JSON`);
+        continue;
+      }
+      const validation = preview?.orderValidationResult;
+      if (!validation || !Array.isArray(validation.rejects) || !Array.isArray(validation.reviews)
+        || validation.rejects.length > 0 || validation.reviews.length > 0) {
+        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_NOT_CLEAR`);
+        continue;
+      }
+      const echoed = preview?.orderStrategy;
+      const leg = echoed?.orderLegCollection?.[0];
+      if (!echoed || echoed.orderType !== 'MARKET' || echoed.orderStrategyType !== 'SINGLE'
+        || echoed.session !== 'NORMAL' || echoed.duration !== 'DAY'
+        || echoed.orderLegCollection?.length !== 1 || echoed.childOrderStrategies?.length
+        || leg?.instruction !== instruction || Number(leg?.quantity) !== 1
+        || leg?.instrument?.symbol !== 'SPY' || leg?.instrument?.assetType !== 'EQUITY') {
+        fail(`SCHWAB_LANE_MARKET_PREVIEW_${signal}_CONTRACT_UNVERIFIED`);
+        continue;
+      }
+      previews.push({ signal, instruction, status: 'CLEAR', requestSha256,
+        rawResponseSha256, orderStrategyType: 'SINGLE',
+        warnings: [...(validation.warns ?? []), ...(validation.alerts ?? [])] });
+    }
+    const longEnabled = previews.some((row) => row.signal === 'LONG' && row.status === 'CLEAR');
+    const shortEnabled = previews.some((row) => row.signal === 'SHORT' && row.status === 'CLEAR');
+    if (!longEnabled) throw new Error('LANE_1_MARKET_PREVIEW_LONG_NOT_CLEAR');
+    return { contractVersion: LANE_1_SPY_MARKET_CONTRACT, longEnabled, shortEnabled,
+      accountMask: account.accountMask, previews, validatedAt: new Date().toISOString() };
+  }
+
+  async lane1V2NetSpyPosition(ownerId, { accountHash = null } = {}) {
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const packet = await this._read(`/accounts/${encodeURIComponent(account.accountHash)}?fields=positions`, account.token);
+    const positions = packet?.securitiesAccount?.positions ?? [];
+    const rows = positions.filter((row) => String(row?.instrument?.symbol ?? '').trim().toUpperCase() === 'SPY');
+    const longQuantity = rows.reduce((sum, row) => sum + Number(row?.longQuantity ?? 0), 0);
+    const shortQuantity = rows.reduce((sum, row) => sum + Number(row?.shortQuantity ?? 0), 0);
+    const netQuantity = longQuantity - shortQuantity;
+    if (!Number.isInteger(netQuantity) || Math.abs(netQuantity) > 1) {
+      throw new Error(`LANE_1_POSITION_LIMIT_FAULT:${netQuantity}`);
+    }
+    return {
+      symbol: 'SPY', netQuantity,
+      positionSide: netQuantity === 1 ? 'LONG' : netQuantity === -1 ? 'SHORT' : 'FLAT',
+      acquiredAt: new Date().toISOString(),
+      accountHash: account.accountHash,
+    };
+  }
+
+  async placeLane1V2Bracket(ownerId, { signal }, { accountHash = null } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON') throw new Error('LANE_1_DISARMED');
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const requestBody = buildLane1SchwabBracket({ signal });
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`SCHWAB_LANE_BRACKET_${response.status}`);
+    return {
+      brokerOrderId: schwabOrderIdFromLocation(response.headers.get('location')),
+      accountHash: account.accountHash,
+      acceptedAt: new Date().toISOString(),
+      requestSha256: await digest(JSON.stringify(requestBody)),
+    };
+  }
+
+  async placeLane1V21Market(ownerId, { instruction }, {
+    accountHash = null, durableArm = false,
+  } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON' && durableArm !== true) {
+      throw new Error('LANE_1_DISARMED');
+    }
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const requestBody = buildLane1SchwabMarketOrder({ instruction });
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`SCHWAB_LANE_MARKET_ORDER_${instruction}_${response.status}`);
+    return { brokerOrderId: schwabOrderIdFromLocation(response.headers.get('location')),
+      accountHash: account.accountHash, acceptedAt: new Date().toISOString(),
+      requestSha256: await digest(JSON.stringify(requestBody)), instruction };
+  }
+
+  async readLane1V2BracketStop(ownerId, {
+    signal, brokerOrderId, accountHash = null, attempts = 20, pollMs = 250,
+  } = {}) {
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    let lastFault = 'LANE_1_STOP_ORDER_ID_MISSING';
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const order = await this._read(`/accounts/${encodeURIComponent(account.accountHash)}/orders/${encodeURIComponent(brokerOrderId)}`, account.token);
+      if (String(order?.orderStrategyType ?? '').toUpperCase() !== 'TRIGGER') {
+        throw new Error('LANE_1_BRACKET_PARENT_CONTRACT_INVALID');
+      }
+      try {
+        const stop = extractLane1BracketStop(order, signal);
+        if (['CANCELED', 'EXPIRED', 'REJECTED', 'FILLED'].includes(stop.status)) {
+          throw new Error(`LANE_1_PROTECTIVE_STOP_TERMINAL_${stop.status}`);
+        }
+        return { ...stop, acceptedAt: new Date().toISOString(), accountHash: account.accountHash };
+      } catch (error) {
+        if (error.message !== 'LANE_1_STOP_ORDER_ID_MISSING') throw error;
+        lastFault = error.message;
+      }
+      if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    throw new Error(lastFault);
+  }
+
+  async placeLane1V2Exit(ownerId, { positionSide }, { accountHash = null } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON') throw new Error('LANE_1_DISARMED');
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const requestBody = buildLane1SchwabExit({ positionSide });
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`SCHWAB_LANE_EXIT_${response.status}`);
+    return {
+      brokerOrderId: schwabOrderIdFromLocation(response.headers.get('location')),
+      accountHash: account.accountHash,
+      acceptedAt: new Date().toISOString(),
+    };
+  }
+
+  async cancelLane1V2Stop(ownerId, { stopOrderId, accountHash = null } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON') throw new Error('LANE_1_DISARMED');
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders/${encodeURIComponent(stopOrderId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${account.token}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`SCHWAB_LANE_STOP_CANCEL_${response.status}`);
+    return { stopOrderId: String(stopOrderId), canceledAt: new Date().toISOString(),
+      accountHash: account.accountHash };
+  }
+
+  async waitForLane1V2StopCancellation(ownerId, {
+    stopOrderId, accountHash = null, attempts = 20, pollMs = 250,
+  } = {}) {
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    let lastStatus = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const order = await this._read(`/accounts/${encodeURIComponent(account.accountHash)}/orders/${encodeURIComponent(stopOrderId)}`, account.token);
+      lastStatus = String(order?.status ?? 'UNKNOWN').toUpperCase();
+      if (['CANCELED', 'REPLACED', 'EXPIRED'].includes(lastStatus)) {
+        return { stopOrderId: String(stopOrderId), status: lastStatus,
+          confirmedAt: new Date().toISOString(), accountHash: account.accountHash };
+      }
+      if (['FILLED', 'REJECTED'].includes(lastStatus)) {
+        throw new Error(`LANE_1_STOP_CANCEL_TERMINAL_${lastStatus}`);
+      }
+      if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    throw new Error(`LANE_1_STOP_CANCEL_TIMEOUT:${lastStatus ?? 'UNKNOWN'}`);
+  }
+
+  async placeLane1PrincipalFlattenOrder(ownerId, order, {
+    accountHash = null, principalToken = null,
+  } = {}) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'OFF') {
+      throw new Error('LANE_1_FLATTEN_REQUIRES_ARMED_OFF');
+    }
+    if (principalToken !== 'FLATTEN_1_SPY' || order?.side !== 'SELL') {
+      throw new Error('LANE_1_FLATTEN_AUTHORIZATION_REFUSED');
+    }
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const requestBody = buildLane1SchwabOrder(order);
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`SCHWAB_LANE_FLATTEN_ORDER_${response.status}`);
+    return {
+      brokerOrderId: schwabOrderIdFromLocation(response.headers.get('location')),
+      accountHash: account.accountHash,
+      acceptedAt: new Date().toISOString(),
+    };
+  }
+
+  async waitForLane1PrincipalFlattenFill(ownerId, {
+    brokerOrderId, clientOrderId, accountHash = null,
+    attempts = 30, pollMs = 500,
+  }) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'OFF') {
+      throw new Error('LANE_1_FLATTEN_REQUIRES_ARMED_OFF');
+    }
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    let lastStatus = null;
+    let lastIdentityFault = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const order = await this._read(`/accounts/${encodeURIComponent(account.accountHash)}/orders/${encodeURIComponent(brokerOrderId)}`, account.token);
+      lastStatus = String(order?.status ?? 'UNKNOWN').toUpperCase();
+      const acquiredAt = new Date().toISOString();
+      const startDate = new Date(Date.parse(acquiredAt) - 60 * 60_000).toISOString();
+      const transactions = await this._read(`/accounts/${encodeURIComponent(account.accountHash)}/transactions?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(acquiredAt)}&types=TRADE`, account.token);
+      const matching = (transactions ?? []).filter((row) =>
+        String(row?.orderId ?? '') === String(brokerOrderId));
+      const composite = { ...order, transactionActivityCollection: matching };
+      const rawBrokerEvidenceSha256 = await digest(JSON.stringify({ order, transactions: matching }));
+      const brokerEvents = [
+        ...flattenOrderEvents(order, account.accountMask, acquiredAt),
+        ...matching.flatMap((row) => normalizeTransactions(row, account.accountMask, acquiredAt)),
+      ];
+      await this._persistBrokerEvents(ownerId, brokerEvents, acquiredAt);
+      try {
+        return extractLane1SchwabFill(composite, {
+          brokerOrderId, clientOrderId, side: 'SELL', acquiredAt, rawBrokerEvidenceSha256,
+        });
+      } catch (error) {
+        if (error.message === 'LANE_1_FILL_PENDING' || error.message === 'MISSING_FEE') {
+          lastIdentityFault = error.message;
+        } else {
+          throw error;
+        }
+      }
+      if (['CANCELED', 'REJECTED', 'EXPIRED', 'REPLACED'].includes(lastStatus)) {
+        throw new Error(`SCHWAB_LANE_FLATTEN_TERMINAL_${lastStatus}`);
+      }
+      if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    throw new Error(lastIdentityFault ?? `SCHWAB_LANE_FLATTEN_FILL_TIMEOUT:${lastStatus ?? 'UNKNOWN'}`);
+  }
+
+  async waitForLane1EquityFill(ownerId, {
+    brokerOrderId, clientOrderId, side, accountHash = null,
+    attempts = 20, pollMs = 500, durableArm = false,
+  }) {
+    if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON' && durableArm !== true) {
+      throw new Error('LANE_1_DISARMED');
+    }
+    return this._waitForLane1Fill(ownerId, { brokerOrderId, clientOrderId, side,
+      accountHash, attempts, pollMs });
+  }
+
+  /** Read-only reconciliation remains available after authority is disarmed. */
+  async waitForLane1V2RecordedFill(ownerId, {
+    brokerOrderId, clientOrderId, side, accountHash = null,
+    attempts = 1, pollMs = 0,
+  }) {
+    return this._waitForLane1Fill(ownerId, { brokerOrderId, clientOrderId, side,
+      accountHash, attempts, pollMs });
+  }
+
+  async _waitForLane1Fill(ownerId, {
+    brokerOrderId, clientOrderId, side, accountHash = null,
+    attempts = 20, pollMs = 500,
+  }) {
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    let lastStatus = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders/${encodeURIComponent(brokerOrderId)}`, {
+        headers: { authorization: `Bearer ${account.token}`, accept: 'application/json' },
+        signal: AbortSignal.timeout(8_000),
+      });
+      const raw = await boundedText(response);
+      if (!response.ok) throw new Error(`SCHWAB_LANE_ORDER_READ_${response.status}`);
+      let order;
+      try { order = JSON.parse(raw); } catch { throw new Error('SCHWAB_LANE_ORDER_MALFORMED_JSON'); }
+      lastStatus = String(order?.status ?? 'UNKNOWN').toUpperCase();
+      const acquiredAt = new Date().toISOString();
+      const rawBrokerEvidenceSha256 = await digest(raw);
+      try {
+        return extractLane1SchwabFill(order, {
+          brokerOrderId, clientOrderId, side, acquiredAt, rawBrokerEvidenceSha256,
+        });
+      } catch (error) {
+        if (error.message !== 'LANE_1_FILL_PENDING') throw error;
+      }
+      if (['CANCELED', 'REJECTED', 'EXPIRED', 'REPLACED'].includes(lastStatus)) {
+        throw new Error(`SCHWAB_LANE_ORDER_TERMINAL_${lastStatus}`);
+      }
+      if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    throw new Error(`SCHWAB_LANE_FILL_TIMEOUT:${lastStatus ?? 'UNKNOWN'}`);
   }
 
   async _marketRead(path, token) {

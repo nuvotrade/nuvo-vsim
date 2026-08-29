@@ -1,0 +1,106 @@
+{
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "closingLots": [
+    {
+      "quantityShares": 100,
+      "reservedShares": 0,
+      "shareLotId": "LOT-FIXTURE-SPY-000001",
+      "state": "AVAILABLE",
+      "totalLotCostUsd": 5002.5
+    },
+    {
+      "quantityShares": 100,
+      "reservedShares": 0,
+      "shareLotId": "LOT-FIXTURE-SPY-000002",
+      "state": "AVAILABLE",
+      "totalLotCostUsd": 5002.5
+    }
+  ],
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "movements": [
+    {
+      "action": "RESERVE_COVERED_CALL",
+      "appendSequence": 1,
+      "effectiveAt": "2026-09-21T14:29:59.000Z",
+      "idempotencyKey": "SHARE-IDEM-CC-RESERVE-000001",
+      "positionId": "POS-FIXTURE-E3-CC-000002",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000001",
+      "shareMovementId": "SHARE-RESERVE-FIXTURE-CC-000001"
+    },
+    {
+      "action": "RESERVE_COVERED_CALL",
+      "appendSequence": 2,
+      "effectiveAt": "2026-09-21T14:29:59.000Z",
+      "idempotencyKey": "SHARE-IDEM-CC-RESERVE-000002",
+      "positionId": "POS-FIXTURE-E3-CC-000002",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000002",
+      "shareMovementId": "SHARE-RESERVE-FIXTURE-CC-000002"
+    },
+    {
+      "action": "RELEASE_COVERED_CALL",
+      "appendSequence": 3,
+      "effectiveAt": "2026-10-16T20:02:00.000Z",
+      "idempotencyKey": "SHARE-IDEM-CC-RELEASE-000001",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000001",
+      "shareMovementId": "SHARE-RELEASE-FIXTURE-CC-000001",
+      "sourceEventId": "TERM-FIXTURE-E3-CC-EXPIRE-000002"
+    },
+    {
+      "action": "RELEASE_COVERED_CALL",
+      "appendSequence": 4,
+      "effectiveAt": "2026-10-16T20:02:00.000Z",
+      "idempotencyKey": "SHARE-IDEM-CC-RELEASE-000002",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000002",
+      "shareMovementId": "SHARE-RELEASE-FIXTURE-CC-000002",
+      "sourceEventId": "TERM-FIXTURE-E3-CC-EXPIRE-000002"
+    }
+  ],
+  "newShareLotIds": [],
+  "openingLots": [
+    {
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000001",
+      "state": "AVAILABLE",
+      "totalLotCostUsd": 5002.5
+    },
+    {
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000002",
+      "state": "AVAILABLE",
+      "totalLotCostUsd": 5002.5
+    }
+  ],
+  "openingShareLotIds": [
+    "LOT-FIXTURE-SPY-000001",
+    "LOT-FIXTURE-SPY-000002"
+  ],
+  "parentResolvedUnitId": "RU-FIXTURE-E3-000001",
+  "recordType": "SHARE_INVENTORY_LEDGER_CONTINUATION",
+  "resolvedUnitId": "RU-FIXTURE-E3-CC-000002",
+  "shareDeliveryMovementIds": [],
+  "shareMovementIds": [
+    "SHARE-RESERVE-FIXTURE-CC-000001",
+    "SHARE-RESERVE-FIXTURE-CC-000002",
+    "SHARE-RELEASE-FIXTURE-CC-000001",
+    "SHARE-RELEASE-FIXTURE-CC-000002"
+  ],
+  "shareSaleMovementIds": [],
+  "summary": {
+    "deliverableShares": 200,
+    "durableLotCount": 2,
+    "episodeStatus": "OPEN_SHARES",
+    "newShareLotsCreated": 0,
+    "remainingShareInventoryCostUsd": 10005.0,
+    "reservedShares": 0,
+    "sharesAtStart": 200,
+    "sharesCreated": 0,
+    "sharesDelivered": 0,
+    "sharesRemaining": 200,
+    "sharesSold": 0
+  },
+  "symbol": "SPY"
+}

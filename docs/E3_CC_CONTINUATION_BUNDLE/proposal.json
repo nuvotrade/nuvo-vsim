@@ -1,0 +1,60 @@
+{
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "contract": {
+    "contractMultiplierShares": 100,
+    "expirationDate": "2026-10-16",
+    "occSymbol": "SPY261016C00055000",
+    "openingSide": "SELL_TO_OPEN",
+    "quantityContracts": 2,
+    "right": "CALL",
+    "strikeUsdPerShare": 55.0,
+    "symbol": "SPY"
+  },
+  "coverage": {
+    "inventedShares": 0,
+    "referencedShareLotIds": [
+      "LOT-FIXTURE-SPY-000001",
+      "LOT-FIXTURE-SPY-000002"
+    ],
+    "referencedShares": 200,
+    "requiredShares": 200,
+    "result": "PASS"
+  },
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "estimatedMinimumGrossCredit": {
+    "amount": 150.0,
+    "bookedCash": false,
+    "currency": "USD"
+  },
+  "orderInstruction": {
+    "duration": "DAY",
+    "limitUsdPerShare": 0.75,
+    "type": "LIMIT"
+  },
+  "parentDecisionId": "DEC-FIXTURE-E3-CC-000002",
+  "policyVersion": "FIXTURE_COVERED_CALL_POLICY_V1",
+  "positionContractHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "positionContractId": "PC-FIXTURE-SPY-20261016-C55",
+  "proposalHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "proposalId": "PROP-FIXTURE-E3-CC-000002",
+  "proposalSchemaVersion": "FIXTURE_CC_PROPOSAL_V1",
+  "recordType": "PROPOSAL",
+  "rejectedThirdCallAttempt": {
+    "deliverableShares": 200,
+    "faultClass": "CONTRACT_FAULT",
+    "faultCode": "COVERED_CALL_INSUFFICIENT_DELIVERABLE_SHARES",
+    "faultId": "FAULT-FIXTURE-E3-CC-000001",
+    "faultStage": "SHARE_RESERVATION",
+    "orderCreated": false,
+    "outcome": "FAULT",
+    "proposalAttemptId": "PROP-ATTEMPT-FIXTURE-E3-CC-000003",
+    "proposalCreated": false,
+    "requestedContracts": 3,
+    "requiredShares": 300,
+    "reservationCreated": false,
+    "shortfallShares": 100
+  },
+  "resolvedUnitId": "RU-FIXTURE-E3-CC-000002",
+  "sealedAt": "2026-09-21T14:29:58.000Z",
+  "signerId": "ACTOR-FIXTURE-PRINCIPAL-0001"
+}

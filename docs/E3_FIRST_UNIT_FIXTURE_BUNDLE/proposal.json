@@ -1,0 +1,39 @@
+{
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "contract": {
+    "contractMultiplierShares": 100,
+    "expirationDate": "2026-09-18",
+    "occSymbol": "SPY260918P00050000",
+    "openingSide": "SELL_TO_OPEN",
+    "quantityContracts": 3,
+    "right": "PUT",
+    "strikeUsdPerShare": 50.0,
+    "symbol": "SPY"
+  },
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "estimatedMinimumGrossCredit": {
+    "amount": 330.0,
+    "bookedCash": false,
+    "currency": "USD"
+  },
+  "maximumStrikeObligation": {
+    "amount": 15000.0,
+    "currency": "USD"
+  },
+  "orderInstruction": {
+    "duration": "DAY",
+    "limitUsdPerShare": 1.1,
+    "type": "LIMIT"
+  },
+  "parentDecisionId": "DEC-FIXTURE-E3-000001",
+  "policyVersion": "FIXTURE_CSP_POLICY_V1",
+  "positionContractHash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "positionContractId": "PC-FIXTURE-SPY-20260918-P50",
+  "pricingVersion": "FIXTURE_LIMIT_PRICE_V1",
+  "proposalHash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "proposalId": "PROP-FIXTURE-E3-000001",
+  "proposalSchemaVersion": "FIXTURE_PROPOSAL_V1",
+  "recordType": "PROPOSAL",
+  "sealedAt": "2026-09-01T14:29:58.000Z",
+  "signerId": "ACTOR-FIXTURE-PRINCIPAL-0001"
+}

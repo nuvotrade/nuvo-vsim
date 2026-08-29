@@ -1,12 +1,10 @@
-PRAGMA foreign_keys = ON;
+PRAGMA foreign_keys = OFF;
 
--- Authority is policy enforced by the runtime. These tables only preserve
--- what authority produced a record, so storage must accept the complete
--- constitutional ladder instead of silently breaking at promotion time.
-
-DROP INDEX IF EXISTS evidence_index_owner_created;
-ALTER TABLE evidence_index RENAME TO evidence_index_authority_legacy;
-CREATE TABLE evidence_index (
+-- Rebuild through uniquely named staging tables. This succeeds from both the
+-- original authority-limited schema and an already-upgraded production schema,
+-- and a partial prior attempt cannot leave a conflicting legacy table behind.
+DROP TABLE IF EXISTS evidence_index_authority_v2;
+CREATE TABLE evidence_index_authority_v2 (
   owner_id TEXT NOT NULL,
   cycle_id TEXT NOT NULL,
   sequence INTEGER NOT NULL,
@@ -21,21 +19,19 @@ CREATE TABLE evidence_index (
   PRIMARY KEY(owner_id, cycle_id),
   UNIQUE(owner_id, sequence)
 );
-INSERT INTO evidence_index (
+INSERT INTO evidence_index_authority_v2 (
   owner_id,cycle_id,sequence,evidence_hash,previous_hash,chain_hash,
   decision_fingerprint,decision,authority_level,object_key,created_at
 )
-SELECT
-  owner_id,cycle_id,sequence,evidence_hash,previous_hash,chain_hash,
+SELECT owner_id,cycle_id,sequence,evidence_hash,previous_hash,chain_hash,
   decision_fingerprint,decision,authority_level,object_key,created_at
-FROM evidence_index_authority_legacy;
-DROP TABLE evidence_index_authority_legacy;
-CREATE INDEX evidence_index_owner_created
-  ON evidence_index(owner_id, created_at DESC);
+FROM evidence_index;
+DROP TABLE evidence_index;
+ALTER TABLE evidence_index_authority_v2 RENAME TO evidence_index;
+CREATE INDEX evidence_index_owner_created ON evidence_index(owner_id, created_at DESC);
 
-DROP INDEX IF EXISTS cycle_context_index_owner_created;
-ALTER TABLE cycle_context_index RENAME TO cycle_context_index_authority_legacy;
-CREATE TABLE cycle_context_index (
+DROP TABLE IF EXISTS cycle_context_index_authority_v2;
+CREATE TABLE cycle_context_index_authority_v2 (
   owner_id TEXT NOT NULL,
   cycle_id TEXT NOT NULL,
   authority_level INTEGER NOT NULL CHECK(authority_level BETWEEN 0 AND 5),
@@ -51,16 +47,18 @@ CREATE TABLE cycle_context_index (
   created_at TEXT NOT NULL,
   PRIMARY KEY(owner_id, cycle_id)
 );
-INSERT INTO cycle_context_index (
+INSERT INTO cycle_context_index_authority_v2 (
   owner_id,cycle_id,authority_level,engine_version,constitution_version,
   account_snapshot_hash,session,massive_status,decision,evidence_fingerprint,
   context_hash,object_key,created_at
 )
-SELECT
-  owner_id,cycle_id,authority_level,engine_version,constitution_version,
+SELECT owner_id,cycle_id,authority_level,engine_version,constitution_version,
   account_snapshot_hash,session,massive_status,decision,evidence_fingerprint,
   context_hash,object_key,created_at
-FROM cycle_context_index_authority_legacy;
-DROP TABLE cycle_context_index_authority_legacy;
+FROM cycle_context_index;
+DROP TABLE cycle_context_index;
+ALTER TABLE cycle_context_index_authority_v2 RENAME TO cycle_context_index;
 CREATE INDEX cycle_context_index_owner_created
   ON cycle_context_index(owner_id, created_at DESC);
+
+PRAGMA foreign_keys = ON;

@@ -1,0 +1,44 @@
+{
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "cashEntryIds": [
+    "CASH-FIXTURE-CC-PREMIUM-000001",
+    "CASH-FIXTURE-CC-FILL-FEE-000001"
+  ],
+  "currency": "USD",
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "entries": [
+    {
+      "amount": 160.0,
+      "appendSequence": 1,
+      "cashEntryId": "CASH-FIXTURE-CC-PREMIUM-000001",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-CC-PREMIUM-000001",
+      "line": "COVERED_CALL_PREMIUM_RECEIPT",
+      "runningContinuationNetUsd": 160.0,
+      "sourceEventId": "FILL-FIXTURE-E3-CC-000001"
+    },
+    {
+      "amount": -1.3,
+      "appendSequence": 2,
+      "cashEntryId": "CASH-FIXTURE-CC-FILL-FEE-000001",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-CC-FILL-FEE-000001",
+      "line": "COVERED_CALL_OPENING_FILL_FEE",
+      "runningContinuationNetUsd": 158.7,
+      "sourceEventId": "FILL-FIXTURE-E3-CC-000001"
+    }
+  ],
+  "recordType": "ECONOMIC_CASH_LEDGER",
+  "resolvedUnitId": "RU-FIXTURE-E3-CC-000002",
+  "shareSaleCashEntryIds": [],
+  "summary": {
+    "continuationNetCashMovementUsd": 158.7,
+    "coveredCallPremiumGrossUsd": 160.0,
+    "cumulativeEpisodeNetCashMovementUsd": -9498.25,
+    "openingFillFeesUsd": -1.3,
+    "parentNetCashMovementUsd": -9656.95,
+    "shareSaleProceedsUsd": 0.0
+  }
+}

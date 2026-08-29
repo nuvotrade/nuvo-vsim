@@ -1139,6 +1139,23 @@ describe('custody risk mapping', () => {
     assert.match(mapped.reasons[0], /CUSTODY_POSITION_INCOMPLETE/u);
   });
 
+  test('uses the exact option quote when the expiration-day chain is unavailable', async () => {
+    const exactProvider = {
+      ...provider,
+      async optionChain() { return { error: 'CHAIN_EMPTY_AT_EXPIRY' }; },
+      async optionQuote(symbol) {
+        return { value: { symbol, mid: 1.1, iv: 0.23, delta: 0.2,
+          gamma: 0.01, vega: 0.1, theta: -0.03 } };
+      },
+    };
+    const mapped = await mapCustodyRisk({ provider: exactProvider, now: NOW, positions: [
+      { symbol: 'SPY-C110', underlying: 'SPY', type: 'OPTION', right: 'call', strike: 110,
+        expiration, quantity: 1, multiplier: 100, marketValue: 110 },
+    ] });
+    assert.equal(mapped.ok, true);
+    assert.equal(mapped.positions[0].iv, 0.23);
+  });
+
   test('maps the SPXW option root to Schwab market symbol $SPX', async () => {
     const requested = [];
     const indexProvider = {

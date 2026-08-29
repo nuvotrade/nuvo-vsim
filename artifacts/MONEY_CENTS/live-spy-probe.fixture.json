@@ -1,0 +1,24 @@
+{
+  "fixtureId": "LIVE_SPY_PROBE_2026_08_28",
+  "moneyContractVersion": "MONEY_CENTS_V1",
+  "roundingRule": "NET_EXACT_SUBCENT_THEN_HALF_AWAY_FROM_ZERO_TO_CENT",
+  "quantityShares": 1,
+  "buy": {
+    "executionActivityId": "129347484620",
+    "executionPriceUsdPerShare": "771.785",
+    "feeCents": 0
+  },
+  "sell": {
+    "executionActivityId": "129366600925",
+    "executionPriceUsdPerShare": "774.305",
+    "feeCents": -2
+  },
+  "expected": {
+    "netCents": 250,
+    "display": "$2.50"
+  },
+  "forbidden": {
+    "netCents": 251,
+    "display": "$2.51"
+  }
+}

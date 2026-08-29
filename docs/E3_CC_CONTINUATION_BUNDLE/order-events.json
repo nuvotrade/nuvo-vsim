@@ -1,0 +1,51 @@
+{
+  "appendLog": [
+    {
+      "acknowledgedQuantityContracts": 2,
+      "acquiredAt": "2026-09-21T14:30:03.000Z",
+      "appendSequence": 1,
+      "brokerOccurredAt": "2026-09-21T14:30:02.000Z",
+      "brokerOrderId": "BOID-FIXTURE-E3-CC-900002",
+      "clientOrderId": "COID-FIXTURE-E3-CC-000002",
+      "eventId": "BEVT-FIXTURE-CC-ACK-000002",
+      "eventType": "ACKNOWLEDGEMENT"
+    },
+    {
+      "acquiredAt": "2026-09-21T14:30:06.000Z",
+      "appendSequence": 2,
+      "brokerOccurredAt": "2026-09-21T14:30:05.000Z",
+      "brokerOrderId": "BOID-FIXTURE-E3-CC-900002",
+      "clientOrderId": "COID-FIXTURE-E3-CC-000002",
+      "eventId": "BEVT-FIXTURE-CC-FILL-000001",
+      "eventType": "FILL",
+      "fillId": "FILL-FIXTURE-E3-CC-000001",
+      "quantityContracts": 2
+    }
+  ],
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "fillIds": [
+    "FILL-FIXTURE-E3-CC-000001"
+  ],
+  "order": {
+    "accountId": "ACCT-FIXTURE-CASH-0001",
+    "authorizationRecordId": "AUTH-FIXTURE-HUMAN-CC-000002",
+    "authorizationType": "HUMAN_SUBMIT_FIXTURE_ONLY",
+    "brokerAdapterVersion": "FIXTURE_BROKER_ADAPTER_V1",
+    "brokerOrderId": "BOID-FIXTURE-E3-CC-900002",
+    "canonicalRequestSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "clientOrderId": "COID-FIXTURE-E3-CC-000002",
+    "duration": "DAY",
+    "limitUsdPerShare": 0.75,
+    "parentProposalHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "positionContractHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "quantityContracts": 2,
+    "reservedShareMovementIds": [
+      "SHARE-RESERVE-FIXTURE-CC-000001",
+      "SHARE-RESERVE-FIXTURE-CC-000002"
+    ],
+    "submittedAt": "2026-09-21T14:30:00.000Z",
+    "type": "LIMIT"
+  },
+  "recordType": "ORDER_EVENT_LOG",
+  "resolvedUnitId": "RU-FIXTURE-E3-CC-000002"
+}

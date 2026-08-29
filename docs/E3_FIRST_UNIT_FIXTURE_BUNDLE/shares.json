@@ -1,0 +1,75 @@
+{
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "coveredCallInventoryRule": {
+    "inventedShareQuantityPermitted": false,
+    "requiredReferencedShareLotIds": [
+      "LOT-FIXTURE-SPY-000001",
+      "LOT-FIXTURE-SPY-000002"
+    ]
+  },
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "lots": [
+    {
+      "allocatedAssignmentFeeUsd": 2.5,
+      "costPerShareUsd": 50.025,
+      "parentAssignmentEventId": "TERM-FIXTURE-E3-ASSIGN-000001",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000001",
+      "sourceMovementId": "SHARE-MOVE-FIXTURE-000001",
+      "state": "AVAILABLE",
+      "strikeCostUsd": 5000.0,
+      "totalLotCostUsd": 5002.5
+    },
+    {
+      "allocatedAssignmentFeeUsd": 2.5,
+      "costPerShareUsd": 50.025,
+      "parentAssignmentEventId": "TERM-FIXTURE-E3-ASSIGN-000001",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000002",
+      "sourceMovementId": "SHARE-MOVE-FIXTURE-000002",
+      "state": "AVAILABLE",
+      "strikeCostUsd": 5000.0,
+      "totalLotCostUsd": 5002.5
+    }
+  ],
+  "movements": [
+    {
+      "effectiveAt": "2026-09-18T01:30:00.000Z",
+      "idempotencyKey": "SHARE-IDEM-ASSIGN-000001",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000001",
+      "shareMovementId": "SHARE-MOVE-FIXTURE-000001",
+      "sourceEventId": "TERM-FIXTURE-E3-ASSIGN-000001"
+    },
+    {
+      "effectiveAt": "2026-09-18T01:30:00.000Z",
+      "idempotencyKey": "SHARE-IDEM-ASSIGN-000002",
+      "quantityShares": 100,
+      "shareLotId": "LOT-FIXTURE-SPY-000002",
+      "shareMovementId": "SHARE-MOVE-FIXTURE-000002",
+      "sourceEventId": "TERM-FIXTURE-E3-ASSIGN-000001"
+    }
+  ],
+  "parentAssignmentEventId": "TERM-FIXTURE-E3-ASSIGN-000001",
+  "recordType": "SHARE_INVENTORY_LEDGER",
+  "resolvedUnitId": "RU-FIXTURE-E3-000001",
+  "shareLotIds": [
+    "LOT-FIXTURE-SPY-000001",
+    "LOT-FIXTURE-SPY-000002"
+  ],
+  "shareMovementIds": [
+    "SHARE-MOVE-FIXTURE-000001",
+    "SHARE-MOVE-FIXTURE-000002"
+  ],
+  "summary": {
+    "assignmentFeesAllocatedUsd": 5.0,
+    "coveredCallReservedShares": 0,
+    "deliverableShares": 200,
+    "episodeStatus": "OPEN_SHARES",
+    "remainingShareInventoryCostUsd": 10005.0,
+    "sharesCreated": 200,
+    "sharesRemaining": 200,
+    "strikeCostUsd": 10000.0
+  },
+  "symbol": "SPY"
+}

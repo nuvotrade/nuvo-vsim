@@ -139,14 +139,12 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
       }));
     }
     const chain = await chainCache.get(cacheKey);
-    if (chain?.error || !Array.isArray(chain?.value?.contracts)) {
-      reasons.push(`CUSTODY_CHAIN_UNAVAILABLE:${position.symbol}`);
-      continue;
-    }
-    let contract = chain.value.contracts.find((candidate) =>
-      candidate.right === position.right
-      && candidate.expiration === position.expiration
-      && Math.abs(candidate.strike - position.strike) < 1e-6);
+    let contract = Array.isArray(chain?.value?.contracts)
+      ? chain.value.contracts.find((candidate) =>
+        candidate.right === position.right
+        && candidate.expiration === position.expiration
+        && Math.abs(candidate.strike - position.strike) < 1e-6)
+      : null;
     if ((!contract || ![contract.iv, contract.delta, contract.gamma, contract.vega, contract.theta]
       .every((value) => finite(value) != null)) && typeof provider.optionQuote === 'function') {
       const exact = await provider.optionQuote(position.symbol);
@@ -156,6 +154,12 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
         strike: position.strike,
         expiration: position.expiration,
       };
+    }
+    if ((chain?.error || !Array.isArray(chain?.value?.contracts))
+      && (!contract || ![contract.iv, contract.delta, contract.gamma, contract.vega, contract.theta]
+        .every((value) => finite(value) != null))) {
+      reasons.push(`CUSTODY_CHAIN_UNAVAILABLE:${position.symbol}`);
+      continue;
     }
     if (!contract || ![contract.iv, contract.delta, contract.gamma, contract.vega, contract.theta]
       .every((value) => finite(value) != null)) {

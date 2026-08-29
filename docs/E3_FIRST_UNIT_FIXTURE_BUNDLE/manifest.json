@@ -1,0 +1,93 @@
+{
+  "authority": "2 / PROPOSE ONLY",
+  "bundleSchemaVersion": "E3_RESOLVED_UNIT_BUNDLE_V1",
+  "canonicalSerializationVersion": "CANONICAL_JSON_SORTED_KEYS_V1",
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "engineVersion": "FIXTURE_ENGINE_0.0.0",
+  "episodeStatus": "OPEN_SHARES",
+  "executableArtifactSha256": "00000000000000000000000000000000000000000000000000000000000000e3",
+  "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+  "fixtureSource": {
+    "path": "docs/E3_FIRST_UNIT_FIXTURE.md",
+    "sha256": "16589e4c45523b97ec6eebe1f6c6eb43608ea326aeb7334b832fbfe40145b003"
+  },
+  "governingContract": {
+    "path": "docs/E3_RESOLVED_UNIT_CONTRACT.md",
+    "sha256": "c6aaef205bb20980e4075f5b3ef7f4d5a6699bc2f78081f867699dfdb031edf3"
+  },
+  "manifestFile": {
+    "path": "manifest.json",
+    "sha256Publication": "OUT_OF_BAND_TO_AVOID_SELF_REFERENTIAL_HASH"
+  },
+  "orderedFiles": [
+    {
+      "byteLength": 1394,
+      "path": "decision.json",
+      "sequence": 1,
+      "sha256": "031972ec0985b58e221f02d2330436868149777906bf3bfd95ac3858b768046e"
+    },
+    {
+      "byteLength": 1228,
+      "path": "proposal.json",
+      "sequence": 2,
+      "sha256": "4d1cdde2291e82cb6751488f8f48d0db54ebc2dd60cd1217616478b777d47a3a"
+    },
+    {
+      "byteLength": 2244,
+      "path": "order-events.json",
+      "sequence": 3,
+      "sha256": "4a1648a83a2e96467d584cc3c1bfd90e8e0753784f935354aacbf439c19c20b1"
+    },
+    {
+      "byteLength": 5836,
+      "path": "fills.json",
+      "sequence": 4,
+      "sha256": "790e256905630e03edcd261ed80e0724466b54f4f2ceb277160abe4ca53deede"
+    },
+    {
+      "byteLength": 2918,
+      "path": "cash.json",
+      "sequence": 5,
+      "sha256": "2237097229a6a12e941adb5a6db8e7389054f03ecb99013795101878049acdb4"
+    },
+    {
+      "byteLength": 2295,
+      "path": "shares.json",
+      "sequence": 6,
+      "sha256": "1319d3bbbb1eda2e417609030a3b21e312d4e8ddd046ec51c2b98e74c51574c3"
+    },
+    {
+      "byteLength": 3350,
+      "path": "pnl.json",
+      "sequence": 7,
+      "sha256": "91191bb0b6e05ad976f935d73c9514ddcbbb340806e4b52766938b88e909036b"
+    }
+  ],
+  "pnlFormulaVersion": "E3_COMPONENT_PNL_V1",
+  "positionContractVersion": "OPTION_POSITION_CONTRACT_V1",
+  "productionEffect": "NONE",
+  "recordType": "RESOLVED_UNIT_BUNDLE_MANIFEST",
+  "resolvedUnitId": "RU-FIXTURE-E3-000001",
+  "rootDecisionId": "DEC-FIXTURE-E3-000001",
+  "rootIdentifiers": {
+    "assignmentEventId": "TERM-FIXTURE-E3-ASSIGN-000001",
+    "authorizationRecordId": "AUTH-FIXTURE-HUMAN-000001",
+    "brokerOrderId": "BOID-FIXTURE-E3-900001",
+    "clientOrderId": "COID-FIXTURE-E3-000001",
+    "decisionId": "DEC-FIXTURE-E3-000001",
+    "economicEpisodeId": "EP-FIXTURE-E3-000001",
+    "expiryEventId": "TERM-FIXTURE-E3-EXPIRE-000001",
+    "lifecycleId": "LC-FIXTURE-E3-000001",
+    "pnlRecordId": "PNL-FIXTURE-E3-000001",
+    "positionContractHash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "positionContractId": "PC-FIXTURE-SPY-20260918-P50",
+    "positionId": "POS-FIXTURE-E3-000001",
+    "proposalHash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "proposalId": "PROP-FIXTURE-E3-000001",
+    "resolvedUnitId": "RU-FIXTURE-E3-000001",
+    "terminalEventId": "TERM-FIXTURE-E3-FINAL-000001"
+  },
+  "settlementFormulaVersion": "OCC_EQUITY_OPTION_100_SHARE_FIXTURE_V1",
+  "syntheticFixture": true,
+  "unitStatus": "RESOLVED_ASSIGNMENT_TO_INVENTORY"
+}

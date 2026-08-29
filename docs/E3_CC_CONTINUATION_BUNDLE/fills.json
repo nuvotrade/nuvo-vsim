@@ -1,0 +1,102 @@
+{
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "fillIds": [
+    "FILL-FIXTURE-E3-CC-000001"
+  ],
+  "fillReconciliation": {
+    "filledContracts": 2,
+    "grossPremiumUsd": 160.0,
+    "grossWeightedFillPriceUsdPerShare": 0.8,
+    "openingFillFeesUsd": -1.3,
+    "remainingOrderContracts": 0,
+    "submittedContracts": 2
+  },
+  "fills": [
+    {
+      "acquiredAt": "2026-09-21T14:30:06.000Z",
+      "brokerAdapterVersion": "FIXTURE_BROKER_ADAPTER_V1",
+      "brokerExecutionId": "EXEC-FIXTURE-E3-CC-700001",
+      "brokerOccurredAt": "2026-09-21T14:30:05.000Z",
+      "brokerOrderId": "BOID-FIXTURE-E3-CC-900002",
+      "canonicalDeduplicationSha256": "1212121212121212121212121212121212121212121212121212121212121212",
+      "clientOrderId": "COID-FIXTURE-E3-CC-000002",
+      "contractMultiplierShares": 100,
+      "executionPriceUsdPerShare": 0.8,
+      "feeCashEntryId": "CASH-FIXTURE-CC-FILL-FEE-000001",
+      "feeUsd": -1.3,
+      "fillId": "FILL-FIXTURE-E3-CC-000001",
+      "grossPremiumUsd": 160.0,
+      "positionContractHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "premiumCashEntryId": "CASH-FIXTURE-CC-PREMIUM-000001",
+      "quantityContracts": 2,
+      "rawBrokerEvidenceSha256": "1313131313131313131313131313131313131313131313131313131313131313",
+      "reservedShareLotIds": [
+        "LOT-FIXTURE-SPY-000001",
+        "LOT-FIXTURE-SPY-000002"
+      ],
+      "side": "SELL_TO_OPEN"
+    }
+  ],
+  "lifecycle": {
+    "lifecycleId": "LC-FIXTURE-E3-CC-000002",
+    "positionId": "POS-FIXTURE-E3-CC-000002",
+    "terminalEvents": [
+      {
+        "acquiredAt": "2026-10-16T20:02:00.000Z",
+        "cashEntryIds": [],
+        "effectiveAt": "2026-10-16T20:00:00.000Z",
+        "eventType": "COVERED_CALL_EXPIRY",
+        "expiredContracts": 2,
+        "feeEntryIds": [],
+        "releaseShareMovementIds": [
+          "SHARE-RELEASE-FIXTURE-CC-000001",
+          "SHARE-RELEASE-FIXTURE-CC-000002"
+        ],
+        "remainingContracts": 0,
+        "settlementFormulaVersion": "OCC_EQUITY_OPTION_100_SHARE_FIXTURE_V1",
+        "shareSaleProceedsUsd": 0.0,
+        "sharesCreated": 0,
+        "sharesDelivered": 0,
+        "sourceEventId": "BROKER-FIXTURE-CC-EXPIRE-800002",
+        "sourceEvidenceSha256": "1414141414141414141414141414141414141414141414141414141414141414",
+        "terminalEventId": "TERM-FIXTURE-E3-CC-EXPIRE-000002"
+      }
+    ],
+    "terminalSummary": {
+      "assignedContracts": 0,
+      "childTerminalEventIds": [
+        "TERM-FIXTURE-E3-CC-EXPIRE-000002"
+      ],
+      "episodeStatus": "OPEN_SHARES",
+      "expiredContracts": 2,
+      "openedContracts": 2,
+      "remainingContracts": 0,
+      "sharesCreated": 0,
+      "sharesDelivered": 0,
+      "sharesRemaining": 200,
+      "terminalEventId": "TERM-FIXTURE-E3-CC-FINAL-000002",
+      "unitStatus": "RESOLVED_EXPIRED"
+    }
+  },
+  "position": {
+    "assignedContracts": 0,
+    "contributingFillIds": [
+      "FILL-FIXTURE-E3-CC-000001"
+    ],
+    "expiredContracts": 2,
+    "grossPremiumUsd": 160.0,
+    "lifecycleStatus": "TERMINAL",
+    "openedShortContracts": 2,
+    "openingFeesUsd": -1.3,
+    "positionContractHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "positionContractId": "PC-FIXTURE-SPY-20261016-C55",
+    "positionId": "POS-FIXTURE-E3-CC-000002",
+    "remainingOptionContracts": 0,
+    "reservedShareLotIds": [
+      "LOT-FIXTURE-SPY-000001",
+      "LOT-FIXTURE-SPY-000002"
+    ]
+  },
+  "recordType": "FILLS_POSITION_AND_LIFECYCLE",
+  "resolvedUnitId": "RU-FIXTURE-E3-CC-000002"
+}

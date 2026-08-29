@@ -1,0 +1,90 @@
+{
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "cashEntryIds": [
+    "CASH-FIXTURE-PREMIUM-000002",
+    "CASH-FIXTURE-FILL-FEE-000002",
+    "CASH-FIXTURE-PREMIUM-000001",
+    "CASH-FIXTURE-FILL-FEE-000001",
+    "CASH-FIXTURE-ASSIGN-DEBIT-000001",
+    "CASH-FIXTURE-ASSIGN-FEE-000001"
+  ],
+  "currency": "USD",
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "entries": [
+    {
+      "amount": 230.0,
+      "appendSequence": 1,
+      "cashEntryId": "CASH-FIXTURE-PREMIUM-000002",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-PREMIUM-000002",
+      "line": "OPTION_PREMIUM_RECEIPT",
+      "runningNetMovementUsd": 230.0,
+      "sourceEventId": "FILL-FIXTURE-E3-000002"
+    },
+    {
+      "amount": -1.3,
+      "appendSequence": 2,
+      "cashEntryId": "CASH-FIXTURE-FILL-FEE-000002",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-FILL-FEE-000002",
+      "line": "OPENING_FILL_FEE",
+      "runningNetMovementUsd": 228.7,
+      "sourceEventId": "FILL-FIXTURE-E3-000002"
+    },
+    {
+      "amount": 120.0,
+      "appendSequence": 3,
+      "cashEntryId": "CASH-FIXTURE-PREMIUM-000001",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-PREMIUM-000001",
+      "line": "OPTION_PREMIUM_RECEIPT",
+      "runningNetMovementUsd": 348.7,
+      "sourceEventId": "FILL-FIXTURE-E3-000001"
+    },
+    {
+      "amount": -0.65,
+      "appendSequence": 4,
+      "cashEntryId": "CASH-FIXTURE-FILL-FEE-000001",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-FILL-FEE-000001",
+      "line": "OPENING_FILL_FEE",
+      "runningNetMovementUsd": 348.05,
+      "sourceEventId": "FILL-FIXTURE-E3-000001"
+    },
+    {
+      "amount": -10000.0,
+      "appendSequence": 5,
+      "cashEntryId": "CASH-FIXTURE-ASSIGN-DEBIT-000001",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-ASSIGN-DEBIT-000001",
+      "line": "PUT_ASSIGNMENT_STRIKE_DEBIT",
+      "runningNetMovementUsd": -9651.95,
+      "sourceEventId": "TERM-FIXTURE-E3-ASSIGN-000001"
+    },
+    {
+      "amount": -5.0,
+      "appendSequence": 6,
+      "cashEntryId": "CASH-FIXTURE-ASSIGN-FEE-000001",
+      "currency": "USD",
+      "feeFormulaVersion": "FIXTURE_FEE_FORMULA_V1",
+      "idempotencyKey": "CASH-IDEM-ASSIGN-FEE-000001",
+      "line": "PUT_ASSIGNMENT_FEE",
+      "runningNetMovementUsd": -9656.95,
+      "sourceEventId": "TERM-FIXTURE-E3-ASSIGN-000001"
+    }
+  ],
+  "recordType": "ECONOMIC_CASH_LEDGER",
+  "resolvedUnitId": "RU-FIXTURE-E3-000001",
+  "summary": {
+    "grossOptionPremiumUsd": 350.0,
+    "netCashMovementUsd": -9656.95,
+    "openingFillFeesUsd": -1.95,
+    "putAssignmentFeeUsd": -5.0,
+    "putAssignmentStrikeDebitUsd": -10000.0
+  }
+}

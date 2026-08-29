@@ -1,0 +1,113 @@
+{
+  "cashEntryIds": [
+    "CASH-FIXTURE-PREMIUM-000002",
+    "CASH-FIXTURE-FILL-FEE-000002",
+    "CASH-FIXTURE-PREMIUM-000001",
+    "CASH-FIXTURE-FILL-FEE-000001",
+    "CASH-FIXTURE-ASSIGN-DEBIT-000001",
+    "CASH-FIXTURE-ASSIGN-FEE-000001"
+  ],
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "formulas": {
+    "optionRealizedPnl": "350.00 - 1.95 = 348.05",
+    "remainingShareInventoryCost": "10000.00 + 5.00 = 10005.00",
+    "remainingShareMarkValue": "200 * 49.00 = 9800.00",
+    "totalMarkedEpisodePnl": "348.05 - 205.00 = 143.05",
+    "unrealizedSharePnl": "9800.00 - 10005.00 = -205.00"
+  },
+  "lines": [
+    {
+      "amountUsd": 350.0,
+      "name": "OPTION_PREMIUM_GROSS",
+      "pnlLineId": "PNL-LINE-FIXTURE-OPTION-PREMIUM"
+    },
+    {
+      "amountUsd": -1.95,
+      "name": "OPENING_FILL_FEES",
+      "pnlLineId": "PNL-LINE-FIXTURE-OPENING-FEES"
+    },
+    {
+      "amountUsd": 348.05,
+      "name": "OPTION_REALIZED_PNL",
+      "pnlLineId": "PNL-LINE-FIXTURE-OPTION-REALIZED"
+    },
+    {
+      "amountUsd": -10000.0,
+      "name": "SHARE_ACQUISITION_STRIKE_CASH",
+      "pnlLineId": "PNL-LINE-FIXTURE-SHARE-CASH"
+    },
+    {
+      "amountUsd": -5.0,
+      "name": "ASSIGNMENT_FEE_CAPITALIZED",
+      "pnlLineId": "PNL-LINE-FIXTURE-ASSIGN-FEE"
+    },
+    {
+      "amountUsd": 10005.0,
+      "name": "REMAINING_SHARE_INVENTORY_COST",
+      "pnlLineId": "PNL-LINE-FIXTURE-INVENTORY-COST"
+    },
+    {
+      "amountUsd": 9800.0,
+      "name": "REMAINING_SHARE_MARK_VALUE",
+      "pnlLineId": "PNL-LINE-FIXTURE-INVENTORY-MARK"
+    },
+    {
+      "amountUsd": -205.0,
+      "name": "UNREALIZED_SHARE_PNL",
+      "pnlLineId": "PNL-LINE-FIXTURE-SHARE-UNREALIZED"
+    },
+    {
+      "amountUsd": 348.05,
+      "name": "TOTAL_REALIZED_PNL",
+      "pnlLineId": "PNL-LINE-FIXTURE-TOTAL-REALIZED"
+    },
+    {
+      "amountUsd": 143.05,
+      "name": "TOTAL_MARKED_EPISODE_PNL",
+      "pnlLineId": "PNL-LINE-FIXTURE-TOTAL-MARKED"
+    }
+  ],
+  "markEvidence": {
+    "acquiredAt": "2026-09-18T20:01:01.000Z",
+    "markEvidenceId": "MARK-FIXTURE-SPY-000001",
+    "markUsdPerShare": 49.0,
+    "marketAdapterVersion": "FIXTURE_MARKET_ADAPTER_V1",
+    "rawEvidenceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "symbol": "SPY",
+    "vendorAsOf": "2026-09-18T20:01:00.000Z"
+  },
+  "optionBranchAllocation": {
+    "assigned": {
+      "openingFillFeesUsd": -1.3,
+      "optionPremiumGrossUsd": 235.0,
+      "optionRealizedPnlUsd": 233.7
+    },
+    "expired": {
+      "openingFillFeesUsd": -0.65,
+      "optionPremiumGrossUsd": 115.0,
+      "optionRealizedPnlUsd": 114.35
+    }
+  },
+  "pnlFormulaVersion": "E3_COMPONENT_PNL_V1",
+  "pnlRecordId": "PNL-FIXTURE-E3-000001",
+  "recordType": "PNL",
+  "resolvedUnitId": "RU-FIXTURE-E3-000001",
+  "shareLotIds": [
+    "LOT-FIXTURE-SPY-000001",
+    "LOT-FIXTURE-SPY-000002"
+  ],
+  "summary": {
+    "episodeStatus": "OPEN_SHARES",
+    "optionRealizedPnlUsd": 348.05,
+    "pnlPayloadSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "remainingShareInventoryCostUsd": 10005.0,
+    "totalMarkedEpisodePnlUsd": 143.05,
+    "unitStatus": "RESOLVED_ASSIGNMENT_TO_INVENTORY",
+    "unrealizedSharePnlUsd": -205.0
+  },
+  "terminalEventIds": [
+    "TERM-FIXTURE-E3-ASSIGN-000001",
+    "TERM-FIXTURE-E3-EXPIRE-000001",
+    "TERM-FIXTURE-E3-FINAL-000001"
+  ]
+}

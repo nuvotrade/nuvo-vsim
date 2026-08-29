@@ -1,0 +1,55 @@
+{
+  "acceptedCoverageEvaluation": {
+    "deliverableShares": 200,
+    "requestedContracts": 2,
+    "requiredShares": 200,
+    "reservedShareLotIds": [
+      "LOT-FIXTURE-SPY-000001",
+      "LOT-FIXTURE-SPY-000002"
+    ],
+    "result": "PASS"
+  },
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "authority": {
+    "level": 2,
+    "name": "PROPOSE_ONLY"
+  },
+  "availableShareInventory": {
+    "contractMultiplierShares": 100,
+    "deliverableShares": 200,
+    "maxCoveredContracts": 2,
+    "parentSharesSha256": "1319d3bbbb1eda2e417609030a3b21e312d4e8ddd046ec51c2b98e74c51574c3",
+    "reservedShares": 0,
+    "shareLotIds": [
+      "LOT-FIXTURE-SPY-000001",
+      "LOT-FIXTURE-SPY-000002"
+    ],
+    "sharesPerLot": 100
+  },
+  "decision": "PROPOSE_TWO_COVERED_CALLS",
+  "decisionAt": "2026-09-21T14:29:55.000Z",
+  "decisionId": "DEC-FIXTURE-E3-CC-000002",
+  "decisionPayloadSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "parentResolvedUnitId": "RU-FIXTURE-E3-000001",
+  "recordType": "DECISION",
+  "resolvedUnitId": "RU-FIXTURE-E3-CC-000002",
+  "sealedAt": "2026-09-21T14:29:56.000Z",
+  "strategy": "COVERED_CALL",
+  "symbol": "SPY",
+  "thirdCallFault": {
+    "deliverableShares": 200,
+    "faultClass": "CONTRACT_FAULT",
+    "faultCode": "COVERED_CALL_INSUFFICIENT_DELIVERABLE_SHARES",
+    "faultId": "FAULT-FIXTURE-E3-CC-000001",
+    "faultStage": "SHARE_RESERVATION",
+    "orderCreated": false,
+    "outcome": "FAULT",
+    "proposalAttemptId": "PROP-ATTEMPT-FIXTURE-E3-CC-000003",
+    "proposalCreated": false,
+    "requestedContracts": 3,
+    "requiredShares": 300,
+    "reservationCreated": false,
+    "shortfallShares": 100
+  }
+}

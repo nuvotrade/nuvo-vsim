@@ -1,6 +1,6 @@
 import { NuvoEngine } from '../src/engine.js';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
-import { SchwabMarketProvider } from '../src/truth/providers/schwab.js';
+import { SchwabMarketProvider, sessionStatus } from '../src/truth/providers/schwab.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { EvidenceStore } from '../src/evidence/store.js';
 import { buildEvidence, verifyEvidence, verifyFingerprint } from '../src/evidence/package.js';
@@ -36,6 +36,15 @@ import {
 import {
   BUNDLED_DESIGN_APP, BUNDLED_DESIGN_HTML, BUNDLED_DESIGN_STYLES,
 } from './design-assets.js';
+import {
+  buildE3SpineTab, E3_SPINE_TAB_FLAG,
+} from '../src/dashboard/e3-spine-tab.js';
+import {
+  disarmLane1FromDashboard, expireLane1,
+  armLane1FromDashboard, handleLane1TvWebhook, handlePrincipalFlatten, lane1Status,
+  validateLane1V21Market,
+} from './lane-1-runtime.js';
+import { buildSystemHealth, proofsForWorker } from './system-health.js';
 
 const JSON_HEADERS = Object.freeze({
   'content-type': 'application/json; charset=utf-8',
@@ -50,6 +59,10 @@ const configuredAuthority = (env) => validateAuthorityLevel(env.NUVO_AUTHORITY_L
   source: 'NUVO_AUTHORITY_LEVEL',
 });
 const operationalAuthority = (env) => capAuthority(configuredAuthority(env), AUTHORITY.PROPOSE);
+
+export function e3SpineTabEnabled(env = {}) {
+  return String(env[E3_SPINE_TAB_FLAG] ?? 'OFF').trim().toUpperCase() === 'ON';
+}
 
 export function systemFault(error, stage = 'AUTHORITY_BOUNDARY') {
   return {
@@ -105,6 +118,7 @@ function publicStatus(env) {
     broker_mode: 'READ_ONLY',
     broker_execution_mode: 'SHADOW_ONLY',
     mutation_routes: false,
+    features: { e3SpineTab: e3SpineTabEnabled(env) },
     canonical_dashboard: 'vsim.nuvotrade.co',
     schedule: 'Guardian every minute · VSIM every 15 minutes',
     version: env.CF_VERSION_METADATA?.id ?? 'local',
@@ -124,6 +138,193 @@ async function audit(env, ownerId, type, detail = {}) {
     (id,owner_id,event_type,detail_json,created_at) VALUES (?,?,?,?,?)`).bind(
     crypto.randomUUID(), ownerId, type, JSON.stringify(detail), nowIso(),
   ).run();
+}
+
+async function boundedResponseJson(response, maximumBytes = 65_536) {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    throw new Error('SYSTEM_HEALTH_RESPONSE_TOO_LARGE');
+  }
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new Error('SYSTEM_HEALTH_RESPONSE_TOO_LARGE');
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return total ? JSON.parse(new TextDecoder().decode(bytes)) : null;
+}
+
+async function marketServiceProbe(env, path) {
+  const at = nowIso();
+  if (!env.MARKET?.fetch) return { attempted: false, ok: false, at, error: 'MARKET_BINDING_UNAVAILABLE' };
+  try {
+    const response = await env.MARKET.fetch(new Request(`https://market.internal${path}`), {
+      signal: AbortSignal.timeout(8_000),
+    });
+    const body = await boundedResponseJson(response);
+    if (!response.ok || body?.error || body?.status === 'INCOMPLETE') {
+      return { attempted: true, ok: false, at,
+        error: body?.error ?? (body?.status === 'INCOMPLETE'
+          ? 'MARKET_SERVICE_INCOMPLETE' : `MARKET_SERVICE_HTTP_${response.status}`) };
+    }
+    const asOf = body?.quote_as_of ?? body?.as_of ?? body?.observed_at
+      ?? (Number.isFinite(Number(body?.response_ts))
+        ? new Date(Number(body.response_ts)).toISOString() : null);
+    const pathname = new URL(`https://market.internal${path}`).pathname;
+    const validPayload = pathname === '/v1/spot'
+      ? Number.isFinite(Number(body?.spot ?? body?.last)) && Number.isFinite(Date.parse(asOf ?? ''))
+      : pathname === '/v1/vix'
+        ? Number.isFinite(Number(body?.vix)) && Number.isFinite(Date.parse(asOf ?? ''))
+      : pathname === '/v1/market-status'
+        ? Boolean(body?.market ?? body?.session ?? body?.market_status)
+          && Number.isFinite(Date.parse(asOf ?? ''))
+        : false;
+    if (!validPayload) return { attempted: true, ok: false, at,
+      error: 'MARKET_SERVICE_PAYLOAD_UNVERIFIED' };
+    return { attempted: true, ok: true, at, asOf,
+      value: pathname === '/v1/vix' ? Number(body.vix) : Number(body?.spot ?? body?.last),
+      source: String(body?.source ?? (pathname === '/v1/vix' ? 'MASSIVE' : 'POLYGON')).toUpperCase() };
+  } catch (error) {
+    return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
+  }
+}
+
+export async function marketIdentityProbe(env) {
+  const at = nowIso();
+  if (!env.MARKET?.fetch) return { attempted: false, ok: false, at, error: 'MARKET_BINDING_UNAVAILABLE' };
+  try {
+    const response = await env.MARKET.fetch(new Request('https://market.internal/health'), {
+      signal: AbortSignal.timeout(8_000),
+    });
+    const body = await boundedResponseJson(response);
+    if (!response.ok || body?.ok === false) return { attempted: true, ok: false, at,
+      error: body?.error ?? `MARKET_SERVICE_HTTP_${response.status}` };
+    return {
+      attempted: true,
+      ok: true,
+      at,
+      versionId: body?.versionId ?? env.NUVO_MARKET_VERSION_ID ?? 'unknown',
+    };
+  } catch (error) {
+    return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
+  }
+}
+
+export async function tradingViewEndpointProbe(env, fetcher = fetch) {
+  const at = nowIso();
+  const origin = String(env.PUBLIC_ORIGIN ?? '').replace(/\/$/u, '');
+  if (!origin) return { attempted: false, ok: false, at, error: 'PUBLIC_ORIGIN_UNAVAILABLE' };
+  try {
+    const response = await fetcher(`${origin}/lane/tv`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      signal: AbortSignal.timeout(8_000),
+    });
+    const body = await boundedResponseJson(response);
+    const ok = response.status === 400 && body?.faultCode === 'LANE_1_INVALID_SIGNAL';
+    return { attempted: true, ok, at,
+      error: ok ? null : (body?.faultCode ?? `TV_ENDPOINT_HTTP_${response.status}`) };
+  } catch (error) {
+    return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
+  }
+}
+
+export async function discordWebhookProbe(env, fetcher = fetch) {
+  const at = nowIso();
+  const raw = String(env.LANE_1_DISCORD_WEBHOOK_URL ?? '').trim();
+  if (!raw) return { attempted: false, ok: false, at, error: 'NEVER_PROBED' };
+  let url;
+  try { url = new URL(raw); } catch { return { attempted: true, ok: false, at, error: 'DISCORD_WEBHOOK_URL_INVALID' }; }
+  if (url.protocol !== 'https:' || url.hostname !== 'discord.com'
+    || !/^\/api\/webhooks\/[^/]+\/[^/]+$/u.test(url.pathname)) {
+    return { attempted: true, ok: false, at, error: 'DISCORD_WEBHOOK_URL_INVALID' };
+  }
+  try {
+    const response = await fetcher(url, { method: 'GET', signal: AbortSignal.timeout(8_000) });
+    const body = await boundedResponseJson(response);
+    const ok = response.ok && Boolean(body?.id);
+    return { attempted: true, ok, at,
+      error: ok ? null : (body?.message ?? `DISCORD_WEBHOOK_HTTP_${response.status}`) };
+  } catch (error) {
+    return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
+  }
+}
+
+export async function storageHealthProbe(env, ownerId) {
+  const at = nowIso();
+  try {
+    if (!env.DB?.prepare || !env.EVIDENCE?.list || !env.ACCOUNT_COORDINATOR?.getByName) {
+      throw new Error('STORAGE_BINDING_UNAVAILABLE');
+    }
+    const durable = env.ACCOUNT_COORDINATOR.getByName(ownerId);
+    const [d1, r2, durableState] = await Promise.all([
+      env.DB.prepare('SELECT 1 AS ok').first(),
+      env.EVIDENCE.list({ limit: 1 }),
+      durable.laneV2Status(),
+    ]);
+    if (Number(d1?.ok) !== 1 || !Array.isArray(r2?.objects) || !durableState) {
+      throw new Error('STORAGE_PROBE_INCOMPLETE');
+    }
+    return { attempted: true, ok: true, at };
+  } catch (error) {
+    return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
+  }
+}
+
+async function persistConnectorProbes(env, ownerId, probes) {
+  const dashboardVersion = env.CF_VERSION_METADATA?.id ?? 'local';
+  await Promise.all(Object.entries(probes).map(async ([connector, probe]) => {
+    const status = probe?.ok ? 'GREEN' : 'RED';
+    await env.DB.prepare(`INSERT INTO connector_health
+      (owner_id,connector,status,last_probe_at,last_success_at,failure_code,detail_json,
+       dashboard_version,upstream_version,consecutive_failures,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(owner_id,connector) DO UPDATE SET
+       status=excluded.status,last_probe_at=excluded.last_probe_at,
+       last_success_at=CASE WHEN excluded.status='GREEN' THEN excluded.last_success_at
+         ELSE connector_health.last_success_at END,
+       failure_code=excluded.failure_code,detail_json=excluded.detail_json,
+       dashboard_version=excluded.dashboard_version,upstream_version=excluded.upstream_version,
+       consecutive_failures=CASE WHEN excluded.status='GREEN' THEN 0
+         ELSE connector_health.consecutive_failures+1 END,updated_at=excluded.updated_at`).bind(
+      ownerId, connector, status, probe?.at ?? nowIso(), probe?.ok ? probe.at : null,
+      probe?.error ?? null, JSON.stringify(probe ?? {}), dashboardVersion,
+      probe?.versionId ?? null, probe?.ok ? 0 : 1, nowIso(),
+    ).run();
+  })).catch(() => {});
+}
+
+async function currentWorkerProofs(env, ownerId) {
+  const workerVersion = env.CF_VERSION_METADATA?.id ?? 'local';
+  try {
+    const rows = await env.DB.prepare(`SELECT event_type,detail_json,created_at
+      FROM operational_audit WHERE owner_id=? AND event_type IN
+      ('LANE_1_TV_INGRESS','LANE_1_TV_TAPE','LANE_1_DISCORD_DELIVERED','LANE_1_DISCORD_FAILED')
+      ORDER BY created_at DESC LIMIT 50`).bind(ownerId).all();
+    return proofsForWorker(rows?.results ?? [], workerVersion);
+  } catch {
+    return {};
+  }
+}
+
+async function schwabAuthProbe(client, ownerId) {
+  const at = nowIso();
+  try {
+    const hours = await client.marketHours(ownerId, { markets: ['equity'] });
+    return { attempted: true, ok: true, at, session: sessionStatus(hours, Date.now()) };
+  } catch (error) {
+    return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
+  }
 }
 
 async function loadBaseline(env, ownerId) {
@@ -864,7 +1065,8 @@ export async function runShadowCycle(env, ownerId, {
 async function apiStatus(env, ownerId) {
   const client = new SchwabD1Client(env);
   const [connection, baseline, custody, latest, evidenceCount, marketCheck, controls, guardian,
-    ledgerStatus, reconciliation] = await Promise.all([
+    ledgerStatus, reconciliation, schwabAuth, laneState, workerProofs, spyProbe,
+    vixProbe, marketIdentity, tvEndpoint, discord, storage] = await Promise.all([
     client.status(ownerId),
     loadBaseline(env, ownerId),
     loadLatestCustody(env, ownerId),
@@ -879,7 +1081,37 @@ async function apiStatus(env, ownerId) {
     env.DB.prepare(`SELECT reconciliation_id,snapshot_hash,status,position_count,
       open_order_count,event_count,detail_json,reconciled_at FROM broker_reconciliation_runs
       WHERE owner_id=? ORDER BY reconciled_at DESC LIMIT 1`).bind(ownerId).first(),
+    schwabAuthProbe(client, ownerId),
+    lane1Status(env, ownerId).catch(() => null),
+    currentWorkerProofs(env, ownerId),
+    marketServiceProbe(env, '/v1/spot?ticker=SPY'),
+    marketServiceProbe(env, '/v1/vix'),
+    marketIdentityProbe(env),
+    tradingViewEndpointProbe(env),
+    discordWebhookProbe(env),
+    storageHealthProbe(env, ownerId),
   ]);
+  const systemHealth = buildSystemHealth({
+    dashboardVersion: env.CF_VERSION_METADATA?.id ?? 'local',
+    marketVersion: marketIdentity.versionId ?? 'unknown',
+    storageProbe: storage,
+    schwabAuth,
+    schwabConnection: { ...connection, updatedAt: connection.updated_at,
+      error: connection.last_error_code },
+    custody,
+    laneState,
+    tradingViewEndpointProbe: tvEndpoint,
+    tradingViewTape: workerProofs.LANE_1_TV_TAPE,
+    spyProbe,
+    vixProbe,
+    marketIdentityProbe: marketIdentity,
+    discordProbe: discord,
+  });
+  await persistConnectorProbes(env, ownerId, Object.fromEntries(systemHealth.rows.map((entry) => [
+    entry.label, { attempted: true, ok: entry.color === 'GREEN', at: systemHealth.checkedAt,
+      error: entry.color === 'RED' ? entry.detail : null,
+      versionId: entry.label === 'MARKET' ? systemHealth.versions.market : null },
+  ])));
   return {
     ...publicStatus(env),
     access: 'VERIFIED',
@@ -909,6 +1141,7 @@ async function apiStatus(env, ownerId) {
     brokerLedger: ledgerStatus,
     evidence: { records: Number(evidenceCount?.count ?? 0), storage: 'D1_INDEX_R2_IMMUTABLE_OBJECT' },
     marketCheck: marketCheck ? parseJson(marketCheck.detail_json, null) : null,
+    systemHealth,
     controls,
     guardian: guardian ? {
       state: guardian.state, reviewId: guardian.id, reviewedAt: guardian.createdAt,
@@ -1793,13 +2026,39 @@ export function dashboardHtml() {
 const DASHBOARD_HEADERS = Object.freeze({
   'content-type': 'text/html; charset=utf-8',
   'cache-control': 'private, no-store',
-  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'content-security-policy': "default-src 'self'; script-src 'self' https://www.tradingview-widget.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://www.tradingview-widget.com https://*.tradingview.com wss://*.tradingview.com; img-src 'self' data: https://*.tradingview.com https://s3.tradingview.com; frame-src https://*.tradingview.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
 });
 
-export function rewriteDesignHtml(source) {
+export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
+  const e3SpineEnabled = e3SpineTab === true;
+  const e3Nav = e3SpineEnabled
+    ? '<button class="nav-button" data-view="e3-spine">Engine spine</button>' : '';
+  const e3View = e3SpineEnabled ? `<section class="view" id="e3-spine" aria-labelledby="e3-spine-title">
+    <div class="page-heading"><div><p class="kicker">Replayable economic chain · controlled lane</p><h2 id="e3-spine-title">E3 engine spine</h2></div><span class="readonly-tag">LANE 1 · DEFAULT OFF</span></div>
+    <div class="e3-spine-panes">
+      <article class="panel" data-e3-pane="fixture"><div class="panel-head"><div><p class="kicker">Synthetic replay bundle</p><h3>Resolved fixture episode</h3></div><span class="readonly-tag">FIXTURE</span></div>
+        <dl class="e3-spine-facts"><div><dt>Put net cash</dt><dd data-e3="put-net-cash">—</dd></div><div><dt>Put option realized</dt><dd data-e3="put-option-realized">—</dd></div><div><dt>Shares after assignment</dt><dd data-e3="put-shares">—</dd></div><div><dt>Covered-call net cash</dt><dd data-e3="call-net-cash">—</dd></div><div><dt>Cumulative cash</dt><dd data-e3="cumulative-cash">—</dd></div><div><dt>Cumulative option realized</dt><dd data-e3="cumulative-option-realized">—</dd></div></dl>
+        <p class="panel-note" data-e3="third-call">Third-call result unavailable.</p>
+      </article>
+      <article class="panel" data-e3-pane="live"><div class="panel-head"><div><p class="kicker">Stored custody snapshot</p><h3>Current account marks</h3></div><span class="readonly-tag">LIVE MARKS · NOT A UNIT</span></div>
+        <dl class="e3-spine-facts"><div><dt>NAV</dt><dd data-e3="live-nav">—</dd></div><div><dt>Cash-derived</dt><dd data-e3="live-cash-derived">—</dd></div><div><dt>CBRS · LAST PRICE</dt><dd data-e3="live-cbrs">—</dd></div><div><dt>SPCX · LAST PRICE</dt><dd data-e3="live-spcx">—</dd></div></dl>
+        <p class="panel-note" data-e3="live-asof">No stored custody snapshot.</p>
+      </article>
+      <article class="panel" data-e3-pane="lane"><div class="panel-head"><div><p class="kicker">Durable economic diary</p><h3 data-e3="lane-label">LANE_1_SPY unit</h3></div><span class="readonly-tag lane-arm-state" data-e3="lane-state" data-state="disarmed" role="status" aria-live="polite">DISARMED</span></div>
+        <dl class="e3-spine-facts"><div><dt>Symbol / quantity</dt><dd data-e3="lane-position">SPY · 1</dd></div><div><dt>Buy fill</dt><dd data-e3="lane-buy-fill">—</dd></div><div><dt>Sell fill</dt><dd data-e3="lane-sell-fill">—</dd></div><div><dt>Realized P&amp;L</dt><dd data-e3="lane-pnl">—</dd></div><div><dt>Manifest SHA-256</dt><dd data-e3="lane-hash">—</dd></div><div><dt>Diary updated</dt><dd data-e3="lane-updated">—</dd></div></dl>
+        <button class="cc-directive" type="button" data-action="laneArm">ARM LANE_1_SPY</button>
+        <button class="cc-directive" type="button" data-action="laneDisarm">DISARM LANE_1_SPY</button>
+        <p class="lane-control-error" data-e3="lane-error" role="alert" hidden></p>
+        <p class="panel-note">Authenticated dashboard control. No Discord chat command is installed.</p>
+      </article>
+    </div>
+  </section>` : '';
+  const e3Styles = e3SpineEnabled ? `<style>
+    .e3-spine-panes{display:grid;grid-template-columns:1fr 1fr;gap:16px}.e3-spine-facts{display:grid;grid-template-columns:1fr 1fr;margin:0}.e3-spine-facts>div{padding:13px;border-bottom:1px solid var(--line)}.e3-spine-facts dt{color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.e3-spine-facts dd{margin:7px 0 0;font:700 17px/1.2 var(--mono);font-variant-numeric:tabular-nums}.lane-arm-state{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:7px 11px}.lane-arm-state:before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}.lane-arm-state[data-state="armed"]{color:var(--green);border-color:rgba(96,226,168,.55);background:rgba(35,196,143,.13)}.lane-arm-state[data-state="disarmed"]{color:var(--red);border-color:rgba(242,118,118,.55);background:rgba(242,118,118,.1)}.lane-control-error{margin:10px 0 0;padding:9px 11px;border:1px solid rgba(242,118,118,.45);border-radius:5px;background:rgba(242,118,118,.08);color:var(--red);font:700 10px/1.45 var(--mono)}.lane-control-error[hidden]{display:none}@media(max-width:760px){.e3-spine-panes{grid-template-columns:1fr}.e3-spine-facts{grid-template-columns:1fr}}
+  </style>` : '';
   const portfolio = `<section class="portfolio-ledger" aria-label="Current Schwab portfolio books">
     <article class="panel expiration-panel"><div class="panel-head"><div><p class="kicker">Open short-option capital by time to expiry</p><h3>Expiration ladder</h3></div><span data-vsim="custody-scope" class="as-of">—</span></div><div class="expiration-ladder" data-vsim="expiration-ladder"></div><div class="panel-note" data-vsim="expiration-note">W1–W4 use current V5 custody and the configured expiration concentration limit.</div></article>
     <article class="panel"><div class="panel-head"><div><p class="kicker">Open-position economics · Schwab custody</p><h3>Portfolio economics</h3></div><span class="readonly-tag">READ ONLY</span></div>
@@ -1846,7 +2105,10 @@ export function rewriteDesignHtml(source) {
     .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}}
   </style>`;
   const operationalStyles = `<style>
-    #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
+    #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}#overview .system-brief .health-list li{align-items:center;gap:10px;padding:8px 0}#overview .system-brief .health-label{display:grid;grid-template-columns:10px 1fr;align-items:center;min-width:0}#overview .system-brief .health-label small{grid-column:2;color:var(--muted);font-size:7px;margin-top:2px;font-family:ui-monospace,monospace}#overview .system-brief .health-value{text-align:right;font-size:8px}#overview .system-brief .health-green{background:var(--green);box-shadow:0 0 6px rgba(96,226,168,.6)}#overview .system-brief .health-red{background:var(--red);box-shadow:0 0 6px rgba(242,118,118,.45)}#overview .system-brief .health-amber{background:var(--amber)}#overview .system-brief .health-tape{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font:8px/1.45 ui-monospace,monospace;white-space:normal}#overview .system-brief .tv-live-widget{margin-top:8px;min-height:44px;overflow:hidden;border:1px solid var(--line);border-radius:5px;background:#07110e}#overview .system-brief .tv-live-widget .tv-placeholder{padding:13px;color:var(--red);font:8px ui-monospace,monospace}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
+  </style>`;
+  const systemHealthStyles = `<style>
+    #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-red{color:var(--red)}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
   </style>`;
   const calculatorStyles = `<style>
     .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}
@@ -1858,11 +2120,13 @@ export function rewriteDesignHtml(source) {
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
-    .replace('</head>', additions + operationalStyles + calculatorStyles + calendarStyles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + e3Styles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
     .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
     .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button>')
+    .replace('<button class="nav-button" data-view="system">System</button>', e3Nav + '<button class="nav-button" data-view="system">System</button>')
     .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
     .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + '\n      <section class="view" id="decisions"')
+    .replace('</main>', e3View + '</main>')
     .replace('</body>', '<script src="/design/live.js"></script></body>');
 }
 
@@ -1880,9 +2144,9 @@ export function designAsset(path) {
   } });
 }
 
-export function fullDashboard(source = BUNDLED_DESIGN_HTML) {
+export function fullDashboard(source = BUNDLED_DESIGN_HTML, options = {}) {
   if (!source) throw new Error('DESIGN_UNAVAILABLE');
-  return new Response(rewriteDesignHtml(source), { headers: DASHBOARD_HEADERS });
+  return new Response(rewriteDesignHtml(source, options), { headers: DASHBOARD_HEADERS });
 }
 
 export async function serveDashboard(render = fullDashboard, reportError = console.error) {
@@ -1896,9 +2160,24 @@ export async function serveDashboard(render = fullDashboard, reportError = conso
   }
 }
 
-export function liveDashboardScript() {
+export function resolveLaneControlOutcome({ action, previousArmed, result = null, error = null }) {
+  const arming = action === 'laneArm';
+  const verb = arming ? 'ARM' : 'DISARM';
+  const prior = previousArmed === true;
+  const failure = error?.message ?? error ?? result?.faultCode ?? result?.error
+    ?? result?.message ?? null;
+  if (failure) return { armed: prior, error: `${verb} failed: ${String(failure)}` };
+  const accepted = arming ? result?.armed === true
+    : result?.armed === false || result?.state === 'DISARMED';
+  if (!accepted) return { armed: prior, error: `${verb} failed: LANE_1_${verb}_REJECTED` };
+  return { armed: arming, error: null };
+}
+
+export function liveDashboardScript({ e3SpineTab = false } = {}) {
   return `(() => {
   'use strict';
+  const E3_SPINE_ENABLED = ${e3SpineTab === true};
+  const resolveLaneControlOutcome = ${resolveLaneControlOutcome.toString()};
   const q = (selector, root = document) => root.querySelector(selector);
   const qa = (selector, root = document) => [...root.querySelectorAll(selector)];
   const present = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
@@ -1906,11 +2185,11 @@ export function liveDashboardScript() {
   const moneyExact = value => present(value) ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value)) : '—';
   const number = value => present(value) ? Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—';
   const percent = value => present(value) ? (Number(value) * 100).toFixed(1) + '%' : '—';
-  const when = value => value ? new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) : 'Not available';
+  const when = value => value ? new Date(value).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short', timeZone: 'America/Los_Angeles' }) : 'Not available';
   const text = (node, value) => { if (node) node.textContent = value; };
   const clear = node => { if (node) node.replaceChildren(); };
   const make = (tag, value, className) => { const node = document.createElement(tag); if (value !== undefined) node.textContent = value; if (className) node.className = className; return node; };
-  const api = async (path, options) => { const response = await fetch(path, options); const body = await response.json(); if (!response.ok) throw new Error(body.error || body.reason || ('HTTP ' + response.status)); return body; };
+  const api = async (path, options) => { const response = await fetch(path, options); const body = await response.json(); if (!response.ok) throw new Error(body.error || body.reason || body.faultCode || body.message || ('HTTP ' + response.status)); return body; };
   const connectorOk = status => status === 'CONNECTED' || status === 'LIVE_READ_ONLY';
   const structure = value => ({ CSP: 'Cash-secured put', BULL_PUT_SPREAD: 'Bull put spread', CASH_SECURED_PUT: 'Cash-secured put' }[value] || value || '—');
   const marketDateKey = value => {
@@ -1939,6 +2218,30 @@ export function liveDashboardScript() {
       ? requestedCalendarMonth : marketDateKey(new Date()).slice(0, 7),
   };
   let underwriteMode = 'scan';
+  let tradingViewWidgetLoad = null;
+
+  async function ensureTradingViewWidget(root) {
+    if (!root) return;
+    let widget = q('tv-ticker-tape', root);
+    if (!widget) {
+      widget = make('tv-ticker-tape');
+      widget.setAttribute('symbols', 'AMEX:SPY,CBOE:VIX');
+      widget.setAttribute('direction', 'horizontal');
+      widget.setAttribute('item-size', 'compact');
+      widget.append(make('div', 'TRADINGVIEW DATA DISCONNECTED', 'tv-placeholder'));
+      root.append(widget);
+    }
+    try {
+      tradingViewWidgetLoad ||= import('https://www.tradingview-widget.com/w/en/tv-ticker-tape.js');
+      await tradingViewWidgetLoad;
+      await customElements.whenDefined('tv-ticker-tape');
+      root.dataset.widget = 'loaded';
+    } catch {
+      root.dataset.widget = 'failed';
+      const placeholder = q('.tv-placeholder', root);
+      text(placeholder, 'TRADINGVIEW DATA DISCONNECTED');
+    }
+  }
 
   const marketSourceName = value => {
     const source = String(value || '').toUpperCase();
@@ -2988,18 +3291,46 @@ export function liveDashboardScript() {
       else { const wrap = make('div', undefined, 'table-wrap'); const table = make('table'); const thead = make('thead'); const hr = make('tr'); ['Symbol','Type','Quantity','Market value'].forEach(label => hr.append(make('th', label))); thead.append(hr); const body = make('tbody'); positions.forEach(position => { const row = make('tr'); [position.symbol || '—', position.type || '—', number(position.quantity), money(position.marketValue)].forEach(value => row.append(make('td', value))); body.append(row); }); table.append(thead, body); wrap.append(table); positionPanel.append(wrap); }
     }
 
-    const health = q('#overview .health-list');
-    if (health) {
-      clear(health);
-      const entries = [
-        ['Evidence chain', status.evidence && status.evidence.records + ' RECORDS', true],
-        ['Constitution', 'AUTHORITY 2 · PROPOSE', true],
-        ['Market adapter', market ? (market.ok ? 'LIVE' : 'BLOCKED') : 'NOT CHECKED', Boolean(market && market.ok)],
-        ['Broker adapter', status.schwab && status.schwab.status || 'UNKNOWN', connectorOk(status.schwab && status.schwab.status)],
-        ['Order mutation', 'DISABLED', true],
-      ];
-      entries.forEach(entry => { const li = make('li'); const label = make('span'); label.append(make('i', undefined, 'health ' + (entry[2] ? 'green' : 'amber')), document.createTextNode(entry[0])); li.append(label, make('strong', entry[1])); health.append(li); });
-      text(q('#overview .system-brief .status-badge'), 'LIVE SHADOW');
+    const systemCard = q('#overview .system-brief');
+    if (systemCard) {
+      const model = status.systemHealth || { rows: [
+        'D1','SCHWAB','MARKET','TV','DISCORD','BOT',
+      ].map(label => ({ label, color: 'RED', status: label === 'BOT' ? 'OFF' : 'DOWN',
+        asOf: null, detail: 'NOT PROBED' })), status: 'ACTION REQUIRED', color: 'RED',
+      checkedAt: null, versions: { dashboard: 'unknown', market: 'unknown' },
+      tape: { spy: null, vix: null, source: 'UNPROVEN', asOf: null } };
+      clear(systemCard);
+      const head = make('div', undefined, 'panel-head system-health-head');
+      const title = make('div');
+      title.append(make('p', 'Operational integrity', 'kicker'), make('h3', 'System'));
+      const overall = make('strong', model.status, 'system-overall system-' + String(model.color).toLowerCase());
+      head.append(title, overall);
+      const grid = make('div', undefined, 'system-health-grid');
+      model.rows.forEach(entry => {
+        const tile = make('div', undefined, 'system-health-tile system-' + String(entry.color).toLowerCase());
+        const name = make('span', entry.label);
+        const state = make('strong');
+        state.append(make('i', undefined, 'health-light'), document.createTextNode(entry.status));
+        tile.append(name, state);
+        grid.append(tile);
+      });
+      const tape = model.tape || {};
+      const details = make('details', undefined, 'system-health-details');
+      details.append(make('summary', 'Diagnostics'));
+      model.rows.forEach(entry => {
+        const line = make('p');
+        line.append(make('strong', entry.label + ' · ' + entry.status),
+          make('span', (entry.detail || 'No detail') + ' · ' + (entry.asOf ? when(entry.asOf) : 'not yet checked')));
+        details.append(line);
+      });
+      details.append(make('p', 'SPY ' + (present(tape.spy) ? Number(tape.spy).toFixed(2) : '—')
+        + ' · VIX ' + (present(tape.vix) ? Number(tape.vix).toFixed(2) : '—')
+        + ' · SOURCE ' + (tape.source || 'UNPROVEN')));
+      const versions = model.versions || {};
+      const footer = make('p', 'Dashboard v' + String(versions.dashboard || 'unknown').slice(0, 12)
+        + ' · Market v' + String(versions.market || 'unknown').slice(0, 12)
+        + ' · Checked ' + (model.checkedAt ? when(model.checkedAt) : 'not yet'), 'system-health-meta');
+      systemCard.append(head, grid, details, footer);
       text(q('#overview .readiness'), '1 / 5');
       const scoreNotes = qa('#overview .scorecard .score-rows small');
       ['Collecting shadow outcomes','Uncalibrated · non-blocking','Mutation intentionally disabled','Clean','Collecting survival evidence'].forEach((value, index) => text(scoreNotes[index], value));
@@ -3135,14 +3466,63 @@ export function liveDashboardScript() {
       make('p', 'Append-only Schwab order, execution, cash, assignment, exercise, and transfer events. Raw broker packets remain protected.', 'connector-note'));
   }
 
+  function setLaneState(armed) {
+    const node = q('[data-e3="lane-state"]');
+    if (!node) return;
+    node.dataset.state = armed ? 'armed' : 'disarmed';
+    text(node, armed ? 'ARMED' : 'DISARMED');
+  }
+
+  function showLaneError(message) {
+    const node = q('[data-e3="lane-error"]');
+    if (!node) return;
+    text(node, message || '');
+    node.hidden = !message;
+  }
+
+  function renderE3Spine(model) {
+    if (!E3_SPINE_ENABLED || !model) return;
+    const fixture = model.paneA || {};
+    const put = fixture.putUnit || {};
+    const call = fixture.coveredCallUnit || {};
+    const live = model.paneB || {};
+    const values = live.values || {};
+    const lane = model.paneC || {};
+    text(q('[data-e3="put-net-cash"]'), moneyExact(put.netCashUsd));
+    text(q('[data-e3="put-option-realized"]'), moneyExact(put.optionRealizedPnlUsd));
+    text(q('[data-e3="put-shares"]'), number(put.shares));
+    text(q('[data-e3="call-net-cash"]'), moneyExact(call.callNetCashUsd));
+    text(q('[data-e3="cumulative-cash"]'), moneyExact(call.cumulativeEpisodeCashUsd));
+    text(q('[data-e3="cumulative-option-realized"]'), moneyExact(call.cumulativeOptionRealizedPnlUsd));
+    text(q('[data-e3="third-call"]'), call.thirdCallOutcome || 'Third-call result unavailable.');
+    text(q('[data-e3="live-nav"]'), moneyExact(values.nav && values.nav.value));
+    text(q('[data-e3="live-cash-derived"]'), moneyExact(values.cashDerived && values.cashDerived.value));
+    text(q('[data-e3="live-cbrs"]'), moneyExact(values.CBRS && values.CBRS.value));
+    text(q('[data-e3="live-spcx"]'), moneyExact(values.SPCX && values.SPCX.value));
+    text(q('[data-e3="live-asof"]'), live.observedAt
+      ? 'Stored custody as of ' + when(live.observedAt) + ' · marks only, not a resolved unit.'
+      : 'No stored custody snapshot.');
+    setLaneState(lane.armed === true);
+    text(q('[data-e3="lane-label"]'), lane.label || 'LANE_1_SPY');
+    text(q('[data-e3="lane-position"]'), (lane.symbol || 'SPY') + ' · ' + number(lane.quantity || 1));
+    text(q('[data-e3="lane-buy-fill"]'), lane.buyFillId || '—');
+    text(q('[data-e3="lane-sell-fill"]'), lane.sellFillId || '—');
+    text(q('[data-e3="lane-pnl"]'), moneyExact(lane.realizedPnlUsd));
+    text(q('[data-e3="lane-hash"]'), lane.manifestHash || '—');
+    text(q('[data-e3="lane-updated"]'), lane.updatedAt ? when(lane.updatedAt) : '—');
+  }
+
   let currentStatus = null;
   async function refresh() {
-    const payloads = await Promise.all([api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
-      api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope))]);
+    const requests = [api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
+      api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope))];
+    if (E3_SPINE_ENABLED) requests.push(api('/api/e3-spine'));
+    const payloads = await Promise.all(requests);
     currentStatus = payloads[0];
     performanceState.calendar = payloads[5];
     renderOverview(currentStatus, payloads[3]); renderOpportunities(currentStatus); renderSystem(currentStatus, payloads[4]); await renderEvidence(currentStatus);
     renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3], payloads[4]); renderBrokerActivity(payloads[4], payloads[2]); renderPerformance(payloads[4], payloads[3]);
+    if (E3_SPINE_ENABLED) renderE3Spine(payloads[6]);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
     const market = currentStatus.marketCheck;
@@ -3150,7 +3530,9 @@ export function liveDashboardScript() {
       ? 'Live Schwab custody, verified market data, and D1/R2 evidence are connected. Broker order mutation is disabled.'
       : 'Schwab custody and D1/R2 evidence are connected. New-trade market data is '
         + (market ? 'blocked or stale' : 'not yet verified') + '; broker order mutation is disabled.');
-    text(q('footer span:nth-child(3)'), 'Worker ' + String(currentStatus.version || '').slice(0, 12));
+    const versions = currentStatus.systemHealth && currentStatus.systemHealth.versions || {};
+    text(q('footer span:nth-child(3)'), 'Dashboard ' + String(versions.dashboard || currentStatus.version || '').slice(0, 12)
+      + ' · Market ' + String(versions.market || 'unknown').slice(0, 12));
   }
 
   async function operate(action, button) {
@@ -3170,6 +3552,12 @@ export function liveDashboardScript() {
       resume: () => control('RESUME', 'RESUME_SHADOW_CYCLES'),
       kill: () => control('KILL', 'TRIP_INDEPENDENT_KILL_SWITCH'),
       clearKill: () => control('CLEAR_KILL', 'CLEAR_INDEPENDENT_KILL_SWITCH'),
+      laneDisarm: () => api('/api/lane-1-spy/disarm', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      }),
+      laneArm: () => api('/api/lane-1-spy/arm', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      }),
     };
     const confirmations = {
       ledger: 'Backfill the append-only Schwab transaction ledger using read-only API history?',
@@ -3179,6 +3567,25 @@ export function liveDashboardScript() {
       kill: 'Trip the independent kill switch and block every new cycle?',
       clearKill: 'Clear the independent kill switch after verifying its cause is gone?',
     };
+    if (action === 'laneArm' || action === 'laneDisarm') {
+      const stateNode = q('[data-e3="lane-state"]');
+      const previousArmed = stateNode && stateNode.dataset.state === 'armed';
+      const laneButtons = qa('[data-action="laneArm"], [data-action="laneDisarm"]');
+      showLaneError(null);
+      laneButtons.forEach(node => { node.disabled = true; });
+      try {
+        const result = await operations[action]();
+        const outcome = resolveLaneControlOutcome({ action, previousArmed, result });
+        if (outcome.error) showLaneError(outcome.error);
+        else setLaneState(outcome.armed);
+      } catch (error) {
+        const outcome = resolveLaneControlOutcome({ action, previousArmed, error });
+        showLaneError(outcome.error);
+      } finally {
+        laneButtons.forEach(node => { node.disabled = false; });
+      }
+      return;
+    }
     if (['pause','resume','kill','clearKill'].includes(action) && reason.length < 8) {
       text(output, 'REFUSED: enter a reason of at least 8 characters.'); return;
     }
@@ -3248,6 +3655,14 @@ async function route(request, env, ctx) {
       reviewGuardian: (options) => runGuardianReview(env, env.ACCESS_OWNER_ID, options),
     });
   }
+  if (url.pathname === '/lane/tv') {
+    if (!env.ACCESS_OWNER_ID) return json({ error: 'LANE_1_OWNER_NOT_CONFIGURED' }, 503);
+    return handleLane1TvWebhook({ request, env, ownerId: env.ACCESS_OWNER_ID });
+  }
+  if (url.pathname === '/lane/principal-flatten') {
+    if (!env.ACCESS_OWNER_ID) return json({ error: 'LANE_1_OWNER_NOT_CONFIGURED' }, 503);
+    return handlePrincipalFlatten({ request, env, ownerId: env.ACCESS_OWNER_ID });
+  }
   if (url.pathname === '/mcp') {
     let owner;
     try { owner = await authenticateAccess(request, env, { allowServiceToken: true }); }
@@ -3261,14 +3676,18 @@ async function route(request, env, ctx) {
     catch (error) { return json({ error: error.message }, 401); }
     if (url.pathname === '/design/styles.css') return designAsset('styles.css');
     if (url.pathname === '/design/app.js') return designAsset('app.js');
-    if (url.pathname === '/design/live.js') return new Response(liveDashboardScript(), { headers: {
+    if (url.pathname === '/design/live.js') return new Response(liveDashboardScript({
+      e3SpineTab: e3SpineTabEnabled(env),
+    }), { headers: {
       'content-type': 'text/javascript; charset=utf-8',
       'cache-control': 'private, no-store',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
     } });
     if (url.pathname !== '/') return json({ error: 'NOT_FOUND' }, 404);
-    return serveDashboard();
+    return serveDashboard(() => fullDashboard(BUNDLED_DESIGN_HTML, {
+      e3SpineTab: e3SpineTabEnabled(env),
+    }));
   }
   if (!url.pathname.startsWith('/api/')) return json({ error: 'NOT_FOUND' }, 404);
 
@@ -3278,6 +3697,30 @@ async function route(request, env, ctx) {
 
   const client = new SchwabD1Client(env);
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
+  if (url.pathname === '/api/e3-spine' && request.method === 'GET') {
+    if (!e3SpineTabEnabled(env)) return json({ error: 'NOT_FOUND' }, 404);
+    const [cycleSnapshot, laneUnit] = await Promise.all([
+      loadLatestCustody(env, owner.id), lane1Status(env, owner.id),
+    ]);
+    return json(buildE3SpineTab({ cycleSnapshot, laneUnit }));
+  }
+  if (url.pathname === '/api/lane-1-spy/disarm' && request.method === 'POST') {
+    const result = await disarmLane1FromDashboard({ env, ownerId: owner.id });
+    return json(result.body, result.status);
+  }
+  if (url.pathname === '/api/lane-1-spy/arm' && request.method === 'POST') {
+    const result = await armLane1FromDashboard({ env, ownerId: owner.id });
+    return json(result.body, result.status);
+  }
+  if (url.pathname === '/api/lane-1-spy/validate-bracket' && request.method === 'POST') {
+    return json({ state: 'RETIRED', faultCode: 'LANE_1_BRACKET_CONTRACT_RETIRED' }, 410);
+  }
+  if (url.pathname === '/api/lane-1-spy/validate-market' && request.method === 'POST') {
+    return json({ state: 'RETIRED', faultCode: 'LANE_1_PREVIEW_GATE_RETIRED' }, 410);
+  }
+  if (url.pathname === '/api/lane-1-spy/principal-flatten' && request.method === 'POST') {
+    return json({ state: 'DISABLED', faultCode: 'LANE_1_FLATTEN_ROUTE_RETIRED' }, 410);
+  }
   if (url.pathname === '/api/portfolio' && request.method === 'GET') {
     return json(await portfolioDashboard(env, owner.id));
   }
@@ -3464,7 +3907,16 @@ export default {
       const owners = await env.DB.prepare(`SELECT owner_id FROM broker_connections
         WHERE status IN ('CONNECTED','DEGRADED') ORDER BY updated_at ASC`).all();
       const clock = easternClock(controller.scheduledTime);
+      if (controller.cron === '*/5 * * * *') {
+        for (const owner of owners.results ?? []) {
+          try { await apiStatus(env, owner.owner_id); }
+          catch (error) { await audit(env, owner.owner_id, 'CONNECTOR_HEARTBEAT_FAILED', { error: error.message }); }
+        }
+        return;
+      }
       for (const owner of owners.results ?? []) {
+        try { await expireLane1(env, owner.owner_id); }
+        catch (error) { await audit(env, owner.owner_id, 'LANE_1_TTL_DISARM_FAILED', { error: error.message }); }
         if (clock.session === 'RTH' && clock.minute % 15 === 2) {
           try {
             const ledger = await new SchwabD1Client(env).backfillLedger(owner.owner_id, {

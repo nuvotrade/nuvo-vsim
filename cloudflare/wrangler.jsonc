@@ -11,7 +11,7 @@
     "logs": { "enabled": true, "invocation_logs": true }
   },
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
-  "triggers": { "crons": ["* 13-22 * * 1-5"] },
+  "triggers": { "crons": ["* 13-22 * * MON-FRI", "*/5 * * * *"] },
   "durable_objects": {
     "bindings": [
       { "name": "ACCOUNT_COORDINATOR", "class_name": "VsimAccountCoordinator" }
@@ -62,6 +62,11 @@
     "NUVO_AUTHORITY_LEVEL": "2",
     "NUVO_BROKER_MODE": "READ_ONLY",
     "NUVO_BROKER_EXECUTION_MODE": "SHADOW_ONLY",
+    "NUVO_E3_SPINE_TAB": "ON",
+    "NUVO_LANE_1_SPY_ARMED": "OFF",
+    "NUVO_LANE_1_PRINCIPAL_FLATTEN": "OFF",
+    "NUVO_LANE_1_DISCORD_SERVER": "NUVO VSIM",
+    "NUVO_LANE_1_DISCORD_CHANNEL": "test",
     "NUVO_ALLOWED_STRUCTURES": "CSP,SHARES,COVERED_CALL",
     "NUVO_SYMBOLS": "SPY,QQQ,IWM",
     "NUVO_FUND_SYMBOLS": "SPY,QQQ,IWM",
@@ -76,6 +81,7 @@
     "NUVO_DECISION_SAMPLES": "8000",
     "NUVO_REFINE_TOP": "8",
     "NUVO_AI_MODEL": "@cf/openai/gpt-oss-120b",
+    "NUVO_MARKET_VERSION_ID": "3e8c51cf-afb0-4b9f-a927-dcaea11b6627",
     "TELEGRAM_BOT_USERNAME": "nuvovsim_bot",
     "PUBLIC_ORIGIN": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev",
     "SCHWAB_CALLBACK_URL": "https://nuvo-vsim-v5-shadow.yulgutierrez.workers.dev/api/integrations/schwab/callback",

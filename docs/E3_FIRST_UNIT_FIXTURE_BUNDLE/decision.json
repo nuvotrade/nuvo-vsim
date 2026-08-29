@@ -1,0 +1,47 @@
+{
+  "accountId": "ACCT-FIXTURE-CASH-0001",
+  "authority": {
+    "level": 2,
+    "name": "PROPOSE_ONLY"
+  },
+  "capitalGate": {
+    "availableUsd": 20000.0,
+    "requiredUsd": 15000.0,
+    "result": "PASS"
+  },
+  "capitalInput": {
+    "adapterVersion": "FIXTURE_CAPITAL_ADAPTER_V1",
+    "amount": 20000.0,
+    "currency": "USD",
+    "kind": "VERIFIED_SETTLED_UNBORROWED_CASH"
+  },
+  "citedRawEvidenceSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "clocks": {
+    "acquiredAt": "2026-09-01T14:29:52.000Z",
+    "requestedAt": "2026-09-01T14:29:50.000Z",
+    "vendorAsOf": "2026-09-01T14:29:49.500Z"
+  },
+  "decision": "PROPOSE",
+  "decisionAt": "2026-09-01T14:29:55.000Z",
+  "decisionId": "DEC-FIXTURE-E3-000001",
+  "decisionPayloadSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "economicEpisodeId": "EP-FIXTURE-E3-000001",
+  "marketAdapterVersion": "FIXTURE_MARKET_ADAPTER_V1",
+  "maximumStrikeObligation": {
+    "amount": 15000.0,
+    "currency": "USD"
+  },
+  "recordType": "DECISION",
+  "requestedStructure": {
+    "contractMultiplierShares": 100,
+    "expirationDate": "2026-09-18",
+    "occSymbol": "SPY260918P00050000",
+    "quantityContracts": 3,
+    "right": "PUT",
+    "side": "SELL_TO_OPEN",
+    "strikeUsdPerShare": 50.0
+  },
+  "sealedAt": "2026-09-01T14:29:56.000Z",
+  "strategy": "CASH_SECURED_PUT",
+  "symbol": "SPY"
+}
