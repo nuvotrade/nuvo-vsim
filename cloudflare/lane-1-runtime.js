@@ -7,7 +7,7 @@ import {
   replayBodyFromAuthenticatedLane1V21Signal,
 } from '../src/lane/lane-1-spy-v2.js';
 import { sessionStatus } from '../src/truth/providers/schwab.js';
-import { SchwabD1Client } from './schwab-client.js';
+import { LANE_1_PREVIEW_ASSET_TYPES, SchwabD1Client } from './schwab-client.js';
 import { capturePreviewResponse } from './preview-response-evidence.js';
 import { centsToUsd, formatCents, formatExecutionPrice } from '../src/economic/money-cents.js';
 
@@ -58,25 +58,39 @@ function parseObject(value) {
   } catch { return null; }
 }
 
-function previewOrderContractEvidence(response, instruction) {
+function previewOrderContractEvidence(response, instruction, originalResponse) {
   const order = response?.orderStrategy;
   const leg = order?.orderLegs?.[0];
   // Explicit allowlist: no account, token, full response, or arbitrary objects.
   const scalar = (value) => typeof value === 'string' ? value.slice(0, 128)
     : typeof value === 'number' || typeof value === 'boolean' ? value : null;
+  const fieldType = (value) => value === undefined ? 'missing' : value === null ? 'null'
+    : Array.isArray(value) ? 'array' : typeof value;
+  const originalOrder = originalResponse?.orderStrategy;
+  const originalLeg = originalOrder?.orderLegs?.[0];
   return {
     responseLegSource: 'orderStrategy.orderLegs',
+    mappedPaths: { quantity: 'orderStrategy.quantity',
+      symbol: 'orderStrategy.orderLegs[0].instrument.symbol',
+      assetType: 'orderStrategy.orderLegs[0].assetType',
+      instrumentAssetType: 'orderStrategy.orderLegs[0].instrument.assetType' },
+    fieldTypes: { quantity: fieldType(originalOrder?.quantity),
+      symbol: fieldType(originalLeg?.instrument?.symbol),
+      assetType: fieldType(originalLeg?.assetType),
+      instrumentAssetType: fieldType(originalLeg?.instrument?.assetType) },
+    assetPolicy: { allowed: LANE_1_PREVIEW_ASSET_TYPES, bothPathsMustAgree: true },
     expected: { orderType: 'MARKET', orderStrategyType: 'SINGLE', session: 'NORMAL',
       duration: 'DAY', legCount: 1, childCount: 0, instruction, quantity: 1,
-      symbol: 'SPY', assetType: 'EQUITY' },
+      symbol: 'SPY' },
     actual: {
       orderType: scalar(order?.orderType), orderStrategyType: scalar(order?.orderStrategyType),
       session: scalar(order?.session), duration: scalar(order?.duration),
       legCount: Array.isArray(order?.orderLegs) ? order.orderLegs.length : null,
       childCount: order?.childOrderStrategies === undefined ? 0
         : Array.isArray(order.childOrderStrategies) ? order.childOrderStrategies.length : null,
-      instruction: scalar(leg?.instruction), quantity: scalar(leg?.quantity),
-      symbol: scalar(leg?.finalSymbol), assetType: scalar(leg?.assetType),
+      instruction: scalar(leg?.instruction), quantity: scalar(order?.quantity),
+      symbol: scalar(leg?.instrument?.symbol), assetType: scalar(leg?.assetType),
+      instrumentAssetType: scalar(leg?.instrument?.assetType),
     },
   };
 }
@@ -175,7 +189,7 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
       .map((key) => [key, originalValidation?.[key] === undefined ? 'missing'
         : originalValidation[key] === null ? 'null'
           : Array.isArray(originalValidation[key]) ? 'array' : typeof originalValidation[key]])),
-    orderContract: previewOrderContractEvidence(response, seal.brokerInstruction),
+    orderContract: previewOrderContractEvidence(response, seal.brokerInstruction, originalResponse),
   };
   if (preview.status !== 'CLEAR' || !rawResponseEvidence?.complete) {
     const faultCode = preview.faultCode ?? (rawResponseEvidence?.complete

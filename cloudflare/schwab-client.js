@@ -40,6 +40,7 @@ export function buildLane1SchwabOrder({ symbol, side, quantity }) {
 export const LANE_1_SPY_BRACKET_CONTRACT = 'LANE_1_SPY_BRACKET_TRIGGER_OFFSET_V2';
 export const LANE_1_SPY_STOP_OFFSET_USD = 2;
 export const LANE_1_SPY_MARKET_CONTRACT = 'LANE_1_SPY_MARKET_ONLY_V2_1';
+export const LANE_1_PREVIEW_ASSET_TYPES = Object.freeze(['EQUITY', 'COLLECTIVE_INVESTMENT']);
 
 function lane1EquityLeg(instruction) {
   return {
@@ -908,17 +909,23 @@ export class SchwabD1Client {
         accountMask: account.accountMask, validatedAt: new Date().toISOString() };
     }
     const echoed = preview?.orderStrategy;
-    // PreviewOrder returns OrderStrategy.orderLegs, not the outgoing request's
-    // orderLegCollection. Only accept the documented, unambiguous response shape.
+    // Bound to captured original 73646c14... (2026-08-31), not request-shaped
+    // fixtures: quantity belongs to the order, symbol to the leg's instrument.
+    // Order-level quantity is valid here ONLY together with exactly one leg.
     const leg = echoed?.orderLegs?.[0];
+    const instrument = leg?.instrument;
     if (!echoed || echoed.orderType !== 'MARKET' || echoed.orderStrategyType !== 'SINGLE'
       || echoed.session !== 'NORMAL' || echoed.duration !== 'DAY'
       || !Array.isArray(echoed.orderLegs) || echoed.orderLegs.length !== 1
+      || typeof echoed.quantity !== 'number' || echoed.quantity !== 1
       || echoed.orderLegCollection !== undefined
       || (echoed.childOrderStrategies !== undefined
         && (!Array.isArray(echoed.childOrderStrategies) || echoed.childOrderStrategies.length > 0))
-      || leg?.instruction !== instruction || leg?.quantity !== 1
-      || leg?.finalSymbol !== 'SPY' || leg?.assetType !== 'EQUITY') {
+      || leg?.instruction !== instruction
+      || typeof instrument?.symbol !== 'string' || instrument.symbol !== 'SPY'
+      || !LANE_1_PREVIEW_ASSET_TYPES.includes(leg?.assetType)
+      || !LANE_1_PREVIEW_ASSET_TYPES.includes(instrument?.assetType)
+      || leg.assetType !== instrument.assetType) {
       return { signal, instruction, status: 'DISABLED',
         faultCode: `${prefix}_CONTRACT_UNVERIFIED`, requestSha256, rawResponseSha256,
         rawResponseBody: raw, warnings: [], accountMask: account.accountMask,
