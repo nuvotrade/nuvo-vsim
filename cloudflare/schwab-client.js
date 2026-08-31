@@ -894,12 +894,17 @@ export class SchwabD1Client {
         accountMask: account.accountMask, validatedAt: new Date().toISOString() };
     }
     const echoed = preview?.orderStrategy;
-    const leg = echoed?.orderLegCollection?.[0];
+    // PreviewOrder returns OrderStrategy.orderLegs, not the outgoing request's
+    // orderLegCollection. Only accept the documented, unambiguous response shape.
+    const leg = echoed?.orderLegs?.[0];
     if (!echoed || echoed.orderType !== 'MARKET' || echoed.orderStrategyType !== 'SINGLE'
       || echoed.session !== 'NORMAL' || echoed.duration !== 'DAY'
-      || echoed.orderLegCollection?.length !== 1 || echoed.childOrderStrategies?.length
-      || leg?.instruction !== instruction || Number(leg?.quantity) !== 1
-      || leg?.instrument?.symbol !== 'SPY' || leg?.instrument?.assetType !== 'EQUITY') {
+      || !Array.isArray(echoed.orderLegs) || echoed.orderLegs.length !== 1
+      || echoed.orderLegCollection !== undefined
+      || (echoed.childOrderStrategies !== undefined
+        && (!Array.isArray(echoed.childOrderStrategies) || echoed.childOrderStrategies.length > 0))
+      || leg?.instruction !== instruction || leg?.quantity !== 1
+      || leg?.finalSymbol !== 'SPY' || leg?.assetType !== 'EQUITY') {
       return { signal, instruction, status: 'DISABLED',
         faultCode: `${prefix}_CONTRACT_UNVERIFIED`, requestSha256, rawResponseSha256,
         rawResponseBody: raw, warnings: [], accountMask: account.accountMask,

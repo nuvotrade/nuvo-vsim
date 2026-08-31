@@ -59,22 +59,23 @@ function parseObject(value) {
 
 function previewOrderContractEvidence(response, instruction) {
   const order = response?.orderStrategy;
-  const leg = order?.orderLegCollection?.[0];
+  const leg = order?.orderLegs?.[0];
   // Explicit allowlist: no account, token, full response, or arbitrary objects.
   const scalar = (value) => typeof value === 'string' ? value.slice(0, 128)
     : typeof value === 'number' || typeof value === 'boolean' ? value : null;
   return {
+    responseLegSource: 'orderStrategy.orderLegs',
     expected: { orderType: 'MARKET', orderStrategyType: 'SINGLE', session: 'NORMAL',
       duration: 'DAY', legCount: 1, childCount: 0, instruction, quantity: 1,
       symbol: 'SPY', assetType: 'EQUITY' },
     actual: {
       orderType: scalar(order?.orderType), orderStrategyType: scalar(order?.orderStrategyType),
       session: scalar(order?.session), duration: scalar(order?.duration),
-      legCount: Array.isArray(order?.orderLegCollection) ? order.orderLegCollection.length : null,
+      legCount: Array.isArray(order?.orderLegs) ? order.orderLegs.length : null,
       childCount: order?.childOrderStrategies === undefined ? 0
         : Array.isArray(order.childOrderStrategies) ? order.childOrderStrategies.length : null,
       instruction: scalar(leg?.instruction), quantity: scalar(leg?.quantity),
-      symbol: scalar(leg?.instrument?.symbol), assetType: scalar(leg?.instrument?.assetType),
+      symbol: scalar(leg?.finalSymbol), assetType: scalar(leg?.assetType),
     },
   };
 }

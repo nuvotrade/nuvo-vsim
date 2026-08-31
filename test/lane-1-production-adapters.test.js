@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { documentedPreviewOrder } from './helpers/schwab-preview-order.js';
 import {
   buildLane1SchwabBracket, buildLane1SchwabExit, buildLane1SchwabMarketOrder, buildLane1SchwabOrder,
   extractLane1BracketStop, extractLane1SchwabFill, fetchLane1PreviewOnly, SchwabD1Client,
@@ -172,7 +173,7 @@ test('market preview clears BUY and disables only SHORT on a SELL_SHORT failure 
       }
       return new Response(JSON.stringify({ orderValidationResult: {
         rejects: [], reviews: [], warns: [], alerts: [],
-      }, orderStrategy }), { status: 200 });
+      }, orderStrategy: documentedPreviewOrder(orderStrategy.orderLegCollection[0].instruction) }), { status: 200 });
     };
     const client = new SchwabD1Client({ NUVO_LANE_1_SPY_ARMED: 'OFF' });
     client.configured = () => true;
@@ -208,7 +209,7 @@ test('market preview retains SHORT only when BUY and SELL_SHORT both clear exact
       const orderStrategy = JSON.parse(init.body);
       return new Response(JSON.stringify({ orderValidationResult: {
         rejects: [], reviews: [], warns: [], alerts: [],
-      }, orderStrategy }), { status: 200 });
+      }, orderStrategy: documentedPreviewOrder(orderStrategy.orderLegCollection[0].instruction) }), { status: 200 });
     };
     const client = new SchwabD1Client({ NUVO_LANE_1_SPY_ARMED: 'OFF' });
     client.configured = () => true;

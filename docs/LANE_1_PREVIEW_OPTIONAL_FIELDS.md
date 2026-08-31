@@ -1,6 +1,6 @@
 # Lane-1 omission-only preview parser candidate — 2026-08-31
 
-## Status: LOCAL ONLY; schema reveals a second parser mismatch — deployment held
+## Status: response mapping approved; tested candidate ready for controlled deployment
 
 The Principal signed into Schwab's Developer Portal. Its authenticated OAS3
 reference was inspected on 2026-08-31 around 16:14Z. `OrderValidationResult`
@@ -21,9 +21,14 @@ Inspected PreviewOrder, OrderValidationResult, OrderValidationDetail,
 OrderStrategy, OrderLeg, and the POST previewOrder operation. No Try it out,
 Authorize, or Execute action was used.
 
-Do not upload or run another live preview merely to rediscover this known local
-mismatch. The omission-only scope has not been expanded to alter response-leg
-mapping; report this finding to the Principal before doing so.
+The Principal subsequently approved including that exact response mapping and
+deployment, followed by exactly one VALIDATE on the existing morning row.
+The candidate now reads `orderLegs[].finalSymbol` and `assetType` while requiring
+the same instruction, SPY, numeric quantity exactly 1, MARKET, NORMAL, DAY, and
+SINGLE strategy. It rejects malformed/extra legs or children and refuses mixed
+request/response leg shapes. No legacy fallback is added; the outgoing request
+builder is unchanged. ARM remains a separate later action and is not authorized
+as part of this deployment/validation sequence.
 No credential, authentication policy, broker order, ARM state, or ingress was
 changed during this work. No alert was sent. No live VALIDATE was pressed.
 
@@ -33,13 +38,18 @@ changed during this work. No alert was sent. No live VALIDATE was pressed.
   object validation result may omit lists. Present lists must be arrays; null,
   scalar, and object values still refuse. Any nonempty rejects or reviews still
   refuse, even if their contents say WARN. Warnings and alerts remain evidence,
-  not newly waived reviews. Existing echoed-order checks are unchanged.
+  not newly waived reviews. Echoed-order semantic requirements are retained;
+  their response-field mapping is corrected against Schwab's schema.
 - `cloudflare/lane-1-runtime.js`: keep returned validation fields and types on
   successful proofs as well as refusal receipts. Add a bounded allowlisted
   expected/actual order summary so the next contract mismatch is diagnosable.
   Do not save the full response, account identity, token, or ingress secret.
 - `test/lane-1-ingress-preview.test.js`: omission, malformed shape, explicit
   reject/review, warning retention, raw hash, and echoed-order mismatch tests.
+- `test/lane-1-production-adapters.test.js`: two preview response mocks now use
+  Schwab's documented response shape rather than echoing the outgoing request.
+- `test/helpers/schwab-preview-order.js`: one shared, synthetic schema-derived
+  response fixture independent of the outgoing order builder.
 - This document records the hold and handoff.
 
 No route, authorization check, order builder, coordinator operation, live order
@@ -55,9 +65,11 @@ The retired routes remain 410. The same-row binding and two ARM guards remain.
 - Parent bundle SHA-256:
   `09d73e0ab872f30299ec3dd127354a7efa2c10f20110bab7e20492e3ef012790`.
 - Parent bundle bytes: 1,954,379.
-- Candidate bundle SHA-256:
+- Omission-only pre-mapping bundle SHA-256:
   `73a22d76e5b75603bc7245db00dcf40fce6acf2432d73c9ceb20aec82e687c71`.
-- Candidate bundle bytes: 1,955,995; increase 1,616 bytes.
+- Final mapping candidate bundle SHA-256:
+  `2a9fb432796b9e6409c856e8eb78ec0ac39551104b8e225117f147a212a20223`.
+- Candidate bundle bytes: 1,956,123; increase 1,744 bytes over live baseline.
 - Two independent Wrangler 4.125.0 dry runs produced identical `entry.js` bytes.
 - No version was uploaded; no candidate Cloudflare version ID exists.
 
@@ -67,7 +79,12 @@ Baseline: 476 tests, 66 suites, all passing.
 Candidate before schema audit: 518 tests, 66 suites, all passing.
 Schema-audit candidate: 519 tests, 66 suites, all passing; zero skipped or pending.
 The additional test asserts that the documented response shape is currently
-refused. A passing test here proves the blocker, not successful preview.
+refused in that earlier candidate. It reproduced the blocker, not successful preview.
+Final mapping candidate: 532 tests, 66 suites, all passing, zero skipped/pending.
+That schema test now asserts success and matching expected/actual proof fields.
+Thirteen added negative cases cover malformed quantities/legs/children and
+legacy-only or mixed response/request shapes. All prior echoed-order negatives
+now exercise the documented response format. Net change from live: +56 tests.
 
 The prior missing-lists refusal case is replaced by four omission success cases.
 Added: 20 explicit malformed-list cases, five malformed validation-object cases,
@@ -97,11 +114,8 @@ preview proof is append-only and remains history after rollback.
 
 ## Remaining sequence — do not skip the first condition
 
-1. Schema inspection is complete. Obtain direction on the newly identified
-   response-leg mapping before expanding the omission-only patch. The proposed
-   repair reads the documented response fields while preserving exact
-   instruction, symbol, quantity, type, session, duration, and single-leg checks;
-   it does not rewrite the order request or waive any rejects/reviews.
+1. Schema inspection and Principal approval of the response mapping are complete.
+   No request rewrite or rejection/review waiver is included.
 2. Recheck clean Git, reproduce the committed bundle, and preserve the rollback.
 3. Confirm live version and unchanged bindings, environment ARM OFF and durable
    DISARMED. Upload/deploy only this candidate under the existing authorization.
