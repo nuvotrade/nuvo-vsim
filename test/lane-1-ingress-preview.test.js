@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { SchwabD1Client, buildLane1SchwabMarketOrder } from '../cloudflare/schwab-client.js';
 import { documentedPreviewOrder } from './helpers/schwab-preview-order.js';
+import { previewEvidenceBucket } from './helpers/preview-evidence-bucket.js';
 import { bindLane1V21ReplayBody } from '../src/lane/lane-1-spy-v2.js';
 import {
   handleLane1PreviewRequest, handleLane1TvWebhook, latestLane1ReplayIngress,
@@ -113,15 +114,16 @@ test('stored-ingress preview binds that TV body to one Schwab preview without cl
     tvBodyBindingSha256: binding.tvBodyBindingSha256 });
   db.rows[0].detail_json = source.detail_json;
   const result = await previewStoredLane1Ingress({
-    env: { DB: db, NUVO_LANE_1_SPY_ARMED: 'OFF',
+    env: { DB: db, EVIDENCE: previewEvidenceBucket(), NUVO_LANE_1_SPY_ARMED: 'OFF',
       CF_VERSION_METADATA: { id: 'candidate-version' } },
     ownerId: OWNER, ingressId: INGRESS_ID,
     now: () => Date.parse('2026-08-28T23:50:00.000Z'),
     uuid: () => '22222222-2222-4222-8222-222222222222',
     dependencies: {
       coordinator: { async status() { statusReads += 1; return structuredClone(state); } },
-      client: { async previewLane1V21Market(_ownerId, order) {
+      client: { async previewLane1V21Market(_ownerId, order, { captureResponse }) {
         previewCalls += 1; assert.deepEqual(order, { instruction: 'BUY' });
+        await captureResponse(new Response('{}'), { requestSha256: 'cd'.repeat(32) });
         return { status: 'CLEAR', requestSha256: 'cd'.repeat(32),
           rawResponseSha256: 'ef'.repeat(32), accountMask: '•4315' };
       } },
@@ -191,7 +193,8 @@ test('authenticated preview route accepts only ingressId and returns a named inl
   assert.equal((await failed.json()).faultCode, 'D1_PREVIEW_READ_FAILED');
 });
 
-async function previewReceiptFixture(t, raw, { status = 200, failWrite = false } = {}) {
+async function previewReceiptFixture(t, raw, { status = 200, failWrite = false,
+  failCapture = false } = {}) {
   const binding = await bindLane1V21ReplayBody({ ticker: 'SPY', side: 'BUY', qty: 1 });
   const db = memoryDb([{ id: INGRESS_ID, owner_id: OWNER, event_type: 'LANE_1_TV_INGRESS',
     created_at: '2026-08-31T15:33:13.437Z', detail_json: JSON.stringify({
@@ -216,7 +219,9 @@ async function previewReceiptFixture(t, raw, { status = 200, failWrite = false }
     assert.ok(url.endsWith('/previewOrder'), 'no /orders request may reach the network');
     return new Response(raw, { status });
   };
-  const env = { DB: db, NUVO_LANE_1_SPY_ARMED: 'OFF',
+  const bucket = previewEvidenceBucket();
+  if (failCapture) bucket.put = async () => { throw new Error('R2_UNAVAILABLE'); };
+  const env = { DB: db, EVIDENCE: bucket, NUVO_LANE_1_SPY_ARMED: 'OFF',
     CF_VERSION_METADATA: { id: 'receipt-candidate' } };
   const client = new SchwabD1Client(env);
   client.configured = () => true;
@@ -234,8 +239,42 @@ async function previewReceiptFixture(t, raw, { status = 200, failWrite = false }
   assert.deepEqual(state, before);
   assert.deepEqual(db.rows[0], sourceBefore, 'stored ingress is never edited');
   assert.equal(result.body.sent, false);
-  return { db, result, binding };
+  return { db, result, binding, bucket };
 }
+
+test('complete broker response is saved before refusal, not just our scalar summary', async (t) => {
+  const raw = '{\n  "orderStrategy": {"orderLegs":[{"quantity":{"value":1},"symbol":"SPY"}]},\n'
+    + '  "unknownBrokerField": {"nested":"preserve me"}, "accountNumber":"PRIVATE-ACCOUNT"\n}\n';
+  const { db, result, bucket } = await previewReceiptFixture(t, raw);
+  assert.equal(result.status, 422);
+  const proof = JSON.parse(db.rows[1].detail_json);
+  const ref = proof.rawResponseEvidence;
+  assert.equal(ref.complete, true);
+  assert.equal(ref.httpStatus, 200);
+  assert.equal(ref.sourceIngressId, INGRESS_ID);
+  assert.equal(ref.bytes, Buffer.byteLength(raw));
+  assert.equal(ref.sha256, createHash('sha256').update(raw).digest('hex'));
+  assert.equal(Buffer.from(bucket.objects.get(ref.bodyKey).bytes).toString(), raw);
+  assert.deepEqual(JSON.parse(Buffer.from(bucket.objects.get(ref.manifestKey).bytes)), ref);
+  assert.equal(JSON.stringify(result).includes('PRIVATE-ACCOUNT'), false);
+  assert.equal(db.rows[1].detail_json.includes('PRIVATE-ACCOUNT'), false);
+});
+
+test('capture failure never clears a preview and never retries Schwab', async (t) => {
+  const raw = JSON.stringify({ orderValidationResult: {}, orderStrategy: documentedPreviewOrder() });
+  const { result, db } = await previewReceiptFixture(t, raw, { failCapture: true });
+  assert.equal(result.status, 422);
+  assert.equal(result.body.faultCode, 'LANE_1_PREVIEW_CAPTURE_FAILED');
+  assert.equal(JSON.parse(db.rows[1].detail_json).rawResponseEvidence, null);
+});
+
+test('D1 failure cannot discard the already saved complete broker response', async (t) => {
+  const raw = '{"orderValidationResult":{"reviews":["Needs review"]}}';
+  const { result, bucket } = await previewReceiptFixture(t, raw, { failWrite: true });
+  assert.equal(result.body.faultCode, 'LANE_1_PREVIEW_RECEIPT_WRITE_FAILED');
+  const body = [...bucket.objects].find(([key]) => key.endsWith('/response.body'))[1];
+  assert.equal(Buffer.from(body.bytes).toString(), raw);
+});
 
 for (const [name, validation, expectedTypes] of [
   ['reject', { rejects: [{ message: 'Broker reject sentence' }], reviews: [], warns: [], alerts: [] },

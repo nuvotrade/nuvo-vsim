@@ -837,7 +837,9 @@ export class SchwabD1Client {
     };
   }
 
-  async previewLane1V21Market(ownerId, { instruction }, { accountHash = null } = {}) {
+  async previewLane1V21Market(ownerId, { instruction }, {
+    accountHash = null, captureResponse = null,
+  } = {}) {
     if (this.env.NUVO_LANE_1_SPY_ARMED !== 'OFF') {
       throw new Error('LANE_1_MARKET_PREVIEW_REQUIRES_ARMED_OFF');
     }
@@ -863,7 +865,19 @@ export class SchwabD1Client {
           signal: AbortSignal.timeout(10_000),
         },
       );
-      raw = await boundedText(response);
+      if (captureResponse) {
+        let capture;
+        try { capture = await captureResponse(response, { requestSha256 }); }
+        catch (error) { return { signal, instruction, status: 'DISABLED',
+          faultCode: error?.message === 'LANE_1_PREVIEW_CAPTURE_LIMIT_EXCEEDED'
+            ? error.message : 'LANE_1_PREVIEW_CAPTURE_FAILED', requestSha256,
+          rawResponseSha256: null, warnings: [], validatedAt: new Date().toISOString() }; }
+        if (capture.faultCode) return { signal, instruction, status: 'DISABLED',
+          faultCode: capture.faultCode, requestSha256,
+          rawResponseSha256: capture.evidence.sha256, warnings: [],
+          validatedAt: new Date().toISOString() };
+        raw = capture.raw;
+      } else raw = await boundedText(response);
     } catch (error) {
       if (String(error?.message ?? error) === 'LANE_1_PREVIEW_DESTINATION_REFUSED') throw error;
       return { signal, instruction, status: 'DISABLED', faultCode: `${prefix}_TRANSPORT`,

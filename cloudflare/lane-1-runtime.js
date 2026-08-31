@@ -8,6 +8,7 @@ import {
 } from '../src/lane/lane-1-spy-v2.js';
 import { sessionStatus } from '../src/truth/providers/schwab.js';
 import { SchwabD1Client } from './schwab-client.js';
+import { capturePreviewResponse } from './preview-response-evidence.js';
 import { centsToUsd, formatCents, formatExecutionPrice } from '../src/economic/money-cents.js';
 
 const encoder = new TextEncoder();
@@ -135,15 +136,28 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
     tvBodyBindingSha256: binding.tvBodyBindingSha256,
     positionSide: before.positionSide ?? 'FLAT', now: instant, uuid,
     prior: before.open?.seal ?? null });
+  if (!env.EVIDENCE?.put || !env.EVIDENCE?.get) {
+    return refuse('LANE_1_PREVIEW_CAPTURE_BUCKET_REQUIRED');
+  }
+  let rawResponseEvidence = null;
   const client = dependencies.client ?? new SchwabD1Client(env);
   const preview = await client.previewLane1V21Market(ownerId,
     { instruction: seal.brokerInstruction },
-    { accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null });
+    { accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null,
+      captureResponse: async (response, { requestSha256 }) => {
+        const captured = await capturePreviewResponse({ bucket: env.EVIDENCE, response,
+          context: { ownerId, sourceIngressId: row.id, sourceIngressCreatedAt: row.created_at,
+            tvBodyBindingSha256: binding.tvBodyBindingSha256, requestSha256,
+            workerVersion: env.CF_VERSION_METADATA?.id ?? 'local' } });
+        rawResponseEvidence = captured.evidence;
+        return captured;
+      } });
   const raw = typeof preview.rawResponseBody === 'string' ? preview.rawResponseBody : null;
   const response = parseObject(raw);
   const validation = response?.orderValidationResult;
   // Record the returned shape, never the parser's normalized empty lists.
   const responseEvidence = {
+    rawResponseEvidence,
     responseObjectPresent: response !== null,
     validationPresent: validation !== undefined && validation !== null,
     rejects: validation?.rejects ?? null,
@@ -156,9 +170,10 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
           : Array.isArray(validation[key]) ? 'array' : typeof validation[key]])),
     orderContract: previewOrderContractEvidence(response, seal.brokerInstruction),
   };
-  if (preview.status !== 'CLEAR') {
-    const faultCode = preview.faultCode ?? 'LANE_1_PREVIEW_NOT_CLEAR';
-    // Preserve refusal evidence, not the full broker payload or credentials.
+  if (preview.status !== 'CLEAR' || !rawResponseEvidence?.complete) {
+    const faultCode = preview.faultCode ?? (rawResponseEvidence?.complete
+      ? 'LANE_1_PREVIEW_NOT_CLEAR' : 'LANE_1_PREVIEW_CAPTURE_MISSING');
+    // Full response is private in R2; D1 holds its reference and bounded summary.
     let receipt;
     try {
       receipt = await recordOperationalProof(env, ownerId, 'LANE_1_ORDER_PREVIEW_REFUSED', {
@@ -166,7 +181,7 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
         sourceIngressId: row.id, sourceIngressCreatedAt: row.created_at,
         replayBody: binding.replayBody, tvBodyBindingSha256: binding.tvBodyBindingSha256,
         requestSha256: preview.requestSha256 ?? null,
-        rawResponseSha256: raw === null ? null : await sha256(raw),
+        rawResponseSha256: rawResponseEvidence?.sha256 ?? (raw === null ? null : await sha256(raw)),
         ...responseEvidence,
         schwabEndpoint: '/previewOrder', brokerInstruction: seal.brokerInstruction,
         quantity: 1, previewedAt: new Date(instant).toISOString(),
