@@ -39,6 +39,10 @@ const cases = [
   { name: 'old receipt quantity projection restored', target: '/cloudflare/lane-1-runtime.js',
     test: 'production-byte mapping: unchanged redacted live BUY SPY one-share body with warns only clears',
     edits: [['quantity: scalar(order?.quantity)', 'quantity: scalar(leg?.quantity)']] },
+  { name: 'OPTION refusal guard removed',
+    test: 'omitted lists cannot bypass echoed contract: option asset; mismatch is retained',
+    edits: [['|| !LANE_1_PREVIEW_ASSET_TYPES.includes(leg?.assetType)', ''],
+      ['|| !LANE_1_PREVIEW_ASSET_TYPES.includes(instrument?.assetType)', '']] },
 ];
 
 const active = process.env.NUVO_PREVIEW_TEST_MUTANT;

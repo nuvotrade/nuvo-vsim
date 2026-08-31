@@ -16,7 +16,25 @@ const OWNER = 'OWNER-1';
 const INGRESS_ID = '11111111-1111-4111-8111-111111111111';
 const SECRET = 'real-tv-secret';
 
+function ownValue(root, path) {
+  let value = root;
+  for (const part of path.split('.')) {
+    assert.ok(value !== null && typeof value === 'object', `object required at ${path}`);
+    assert.equal(Object.hasOwn(value, part), true, `own field required at ${path}`);
+    value = value[part];
+  }
+  assert.notEqual(value, undefined, `defined value required at ${path}`);
+  return value;
+}
+
 function assertClearContract(contract) {
+  for (const field of ['orderType', 'orderStrategyType', 'session', 'duration',
+    'legCount', 'childCount', 'instruction', 'quantity', 'symbol']) {
+    ownValue(contract.actual, field);
+    ownValue(contract.expected, field);
+  }
+  ownValue(contract.actual, 'assetType');
+  ownValue(contract.actual, 'instrumentAssetType');
   const { assetType, instrumentAssetType, ...actual } = contract.actual;
   assert.deepEqual(actual, contract.expected);
   assert.deepEqual(contract.assetPolicy, {
@@ -469,7 +487,10 @@ for (const [name, mutate, field, actual] of [
   ['SELL instruction', (o) => { o.orderLegs[0].instruction = 'SELL'; }, 'instruction', 'SELL'],
   ['quantity two', (o) => { o.quantity = 2; }, 'quantity', 2],
   ['wrong symbol', (o) => { o.orderLegs[0].instrument.symbol = 'WRONG'; }, 'symbol', 'WRONG'],
-  ['option asset', (o) => { o.orderLegs[0].assetType = 'OPTION'; }, 'assetType', 'OPTION'],
+  ['option asset', (o) => {
+    o.orderLegs[0].assetType = 'OPTION';
+    o.orderLegs[0].instrument.assetType = 'OPTION';
+  }, 'assetType', 'OPTION'],
   ['missing symbol', (o) => { delete o.orderLegs[0].instrument.symbol; }, 'symbol', null],
 ]) {
   test(`omitted lists cannot bypass echoed contract: ${name}; mismatch is retained`, async (t) => {
@@ -481,8 +502,24 @@ for (const [name, mutate, field, actual] of [
     assert.equal(result.status, 422);
     assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_CONTRACT_UNVERIFIED');
     const proof = JSON.parse(db.rows[1].detail_json);
-    assert.equal(proof.orderContract.actual[field], actual);
-    assert.notEqual(proof.orderContract.expected[field], actual);
+    assert.equal(db.rows[1].event_type, 'LANE_1_ORDER_PREVIEW_REFUSED');
+    assert.equal(ownValue(proof.orderContract.actual, field), actual);
+    if (field === 'assetType') {
+      // Both fields exist in the live shape. Mutate both so asset agreement
+      // cannot mask a broken OPTION allowlist guard.
+      assert.equal(ownValue(order, 'orderLegs.0.assetType'), 'OPTION');
+      assert.equal(ownValue(order, 'orderLegs.0.instrument.assetType'), 'OPTION');
+      assert.equal(ownValue(proof.orderContract.actual, 'instrumentAssetType'), 'OPTION');
+      assert.equal(proof.orderContract.mappedPaths.assetType, 'orderStrategy.orderLegs[0].assetType');
+      assert.equal(proof.orderContract.mappedPaths.instrumentAssetType,
+        'orderStrategy.orderLegs[0].instrument.assetType');
+      assert.deepEqual(proof.orderContract.assetPolicy, {
+        allowed: ['EQUITY', 'COLLECTIVE_INVESTMENT'], bothPathsMustAgree: true,
+      });
+      assert.equal(proof.orderContract.assetPolicy.allowed.includes(actual), false);
+    } else {
+      assert.notEqual(ownValue(proof.orderContract.expected, field), actual);
+    }
     assert.equal(proof.rawResponseSha256, createHash('sha256').update(raw).digest('hex'));
     assert.equal(db.rows[1].detail_json.includes('PRIVATE-ACCOUNT'), false);
   });
@@ -554,6 +591,28 @@ test('live inspection fixture reproduces its canonical hash and names the encryp
   assert.equal(Object.hasOwn(leg, 'finalSymbol'), false);
   assert.equal(livePreviewInspection.removedPaths.includes('/orderStrategy/orderLegs/0/quantity'), false);
   assert.equal(livePreviewInspection.removedPaths.includes('/orderStrategy/orderLegs/0/finalSymbol'), false);
+});
+
+test('live fixture owns every order field used by the six positive and eight path-only mapping cases', () => {
+  const order = livePreviewBody().orderStrategy;
+  for (const [path, expected] of [
+    ['orderType', 'MARKET'], ['orderStrategyType', 'SINGLE'],
+    ['session', 'NORMAL'], ['duration', 'DAY'], ['quantity', 1],
+    ['orderLegs.0.instruction', 'BUY'], ['orderLegs.0.instrument.symbol', 'SPY'],
+    ['orderLegs.0.assetType', 'COLLECTIVE_INVESTMENT'],
+    ['orderLegs.0.instrument.assetType', 'COLLECTIVE_INVESTMENT'],
+  ]) {
+    const value = ownValue(order, path);
+    assert.equal(typeof value, typeof expected);
+    assert.equal(value, expected);
+  }
+  assert.equal(Array.isArray(ownValue(order, 'orderLegs')), true);
+  assert.equal(order.orderLegs.length, 1);
+  // These are intentionally absent, not expected scalar values. Tests that
+  // remove symbol/quantity start from the present live fields checked above.
+  assert.equal(Object.hasOwn(order, 'childOrderStrategies'), false);
+  assert.equal(Object.hasOwn(order.orderLegs[0], 'quantity'), false);
+  assert.equal(Object.hasOwn(order.orderLegs[0], 'finalSymbol'), false);
 });
 
 test('two live-derived legs with order-level quantity exactly one refuse', async (t) => {
