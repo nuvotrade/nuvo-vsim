@@ -4,6 +4,7 @@ import {
   bindLane1V21ReplayBody, createLane1SpyV2Controller, normalizeLane1V21Signal,
   replayBodyFromAuthenticatedLane1V21Signal,
 } from '../src/lane/lane-1-spy-v2.js';
+import { syntheticSnapshot } from './fixtures/lane-1-synthetic-state.js';
 
 const SECRET = 'v2-secret';
 const NOW = Date.parse('2026-08-28T15:00:00.000Z');
@@ -27,7 +28,7 @@ test('TV replay body preserves the authored ticket without persisting the secret
 
 function makeHarness({ armed = true, configArmed = armed,
   positionSide = 'FLAT', custodySide = positionSide,
-  market = 'RTH', claimable = true, placeFault = null } = {}) {
+  market = 'RTH', claimable = true, placeFault = null, snapshotChange = null } = {}) {
   const calls = []; const writes = []; const notices = [];
   let brokerSide = custodySide; let orderSequence = 0; let fillSequence = 0;
   let state = { armed, stage: positionSide === 'FLAT' ? 'FLAT' : 'OPEN_' + positionSide,
@@ -71,8 +72,14 @@ function makeHarness({ armed = true, configArmed = armed,
     },
   };
   const broker = {
-    async position() { calls.push('position:' + brokerSide); return { positionSide: brokerSide }; },
-    async placeMarket({ instruction, durableArm }) {
+    async position() { calls.push('position:' + brokerSide); return syntheticSnapshot(brokerSide, NOW); },
+    async sendSnapshot() {
+      const snapshot = await this.position();
+      if (snapshotChange) snapshotChange(snapshot);
+      return snapshot;
+    },
+    async placeMarket({ instruction, durableArm, expectedSnapshot }) {
+      assert.deepEqual(expectedSnapshot, syntheticSnapshot(brokerSide, NOW));
       calls.push('market:' + instruction + ':' + Boolean(durableArm));
       if (placeFault) throw new Error(placeFault);
       orderSequence += 1;
@@ -211,4 +218,53 @@ test('durable Principal ARM enables LONG and EXIT while environment stays OFF', 
   assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
     ['market:BUY:true', 'market:SELL:true']);
   assert.equal(h.state().armed, true);
+});
+
+test('unknown broker projection records named drift and never claims or dispatches', async () => {
+  const h = makeHarness({ snapshotChange: (snapshot) => { delete snapshot.longQuantity; } });
+  const result = await h.controller.signal(signal('BUY'));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.sent, false);
+  assert.equal(result.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
+  assert.equal(h.state().fault.detail, 'LANE_1_POSITION_STATE_DRIFT:BROKER_POSITION_UNKNOWN:quantities');
+  assert.equal(h.state().armed, false);
+  assert.equal(h.calls.some((call) => /^(claim|market):/u.test(call)), false);
+});
+
+test('unknown coordinator position records named drift instead of defaulting FLAT', async () => {
+  const h = makeHarness({ positionSide: null, custodySide: 'FLAT' });
+  const result = await h.controller.signal(signal('BUY'));
+  assert.equal(result.body.sent, false);
+  assert.equal(result.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
+  assert.equal(h.state().fault.detail, 'LANE_1_POSITION_STATE_DRIFT:COORDINATOR_POSITION_UNKNOWN');
+  assert.equal(h.calls.some((call) => /^(claim|market):/u.test(call)), false);
+});
+
+test('DISARMED ignores the send snapshot and still returns the unchanged ingress disposition', async () => {
+  const h = makeHarness({ armed: false, snapshotChange: () => { throw new Error('MUST_NOT_READ'); } });
+  const result = await h.controller.signal(signal('BUY'));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.disposition, 'disarmed');
+  assert.equal(result.body.sent, false);
+  assert.equal(h.calls.length, 0);
+});
+
+test('reconciliation reports unknown coordinator state instead of skipping it', async () => {
+  const h = makeHarness({ positionSide: null, custodySide: 'FLAT' });
+  const result = await h.controller.reconcile();
+  assert.ok(result);
+  assert.equal(result.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
+  assert.equal(result.body.sent, false);
+  assert.equal(h.state().fault.detail, 'LANE_1_POSITION_STATE_DRIFT:COORDINATOR_POSITION_UNKNOWN');
+  assert.equal(h.state().armed, false);
+});
+
+test('reconciliation reports unknown broker state instead of calling it an external flatten', async () => {
+  const h = makeHarness({ positionSide: 'LONG', custodySide: null });
+  const result = await h.controller.reconcile();
+  assert.ok(result);
+  assert.equal(result.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
+  assert.equal(h.state().fault.detail, 'LANE_1_POSITION_STATE_DRIFT:BROKER_POSITION_UNKNOWN');
+  assert.equal(result.body.sent, false);
+  assert.equal(h.state().armed, false);
 });

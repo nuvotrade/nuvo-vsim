@@ -431,9 +431,11 @@ function brokerV2Adapter(env, ownerId) {
   const durableArm = async () => (await coordinator.status())?.armed === true;
   return {
     position: () => client.lane1V2NetSpyPosition(ownerId, { accountHash: accountHash() }),
-    async placeMarket({ instruction }) {
-      const accepted = await client.placeLane1V21Market(ownerId, { instruction },
-        { accountHash: accountHash(), durableArm: await durableArm() });
+    sendSnapshot: () => client.lane1V21SendSnapshot(ownerId, { accountHash: accountHash() }),
+    async placeMarket({ instruction, clientOrderId, expectedSnapshot }) {
+      const accepted = await client.placeLane1V21Market(ownerId, { instruction, clientOrderId },
+        { accountHash: accountHash(), durableArm: await durableArm(), expectedSnapshot,
+          readCoordinator: () => coordinator.status() });
       accountByOrder.set(accepted.brokerOrderId, accepted.accountHash); return accepted;
     },
     waitForFill: async (context) => client.waitForLane1EquityFill(ownerId,

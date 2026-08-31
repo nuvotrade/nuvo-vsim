@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { syntheticClaim, syntheticPositionPacket } from './fixtures/lane-1-synthetic-state.js';
 import { liveDerivedPreviewOrder } from './helpers/schwab-preview-order.js';
 import {
   buildLane1SchwabBracket, buildLane1SchwabExit, buildLane1SchwabMarketOrder, buildLane1SchwabOrder,
@@ -150,8 +151,10 @@ test('durable dashboard ARM authorizes only the V2.1 lane market send while env 
       /LANE_1_DISARMED/u);
     assert.equal(requests.length, 0);
 
-    const accepted = await client.placeLane1V21Market('OWNER', { instruction: 'BUY' },
-      { durableArm: true });
+    client._read = async (path) => path.includes('?fields=positions') ? syntheticPositionPacket() : [];
+    const expectedSnapshot = await client.lane1V21SendSnapshot('OWNER');
+    const accepted = await client.placeLane1V21Market('OWNER', { instruction: 'BUY', clientOrderId: 'CLIENT-1' },
+      { durableArm: true, expectedSnapshot, readCoordinator: async () => syntheticClaim() });
     assert.equal(accepted.brokerOrderId, 'ORDER-1');
     assert.equal(requests.length, 1);
     assert.ok(requests[0].url.endsWith('/accounts/ACCOUNT-HASH/orders'));

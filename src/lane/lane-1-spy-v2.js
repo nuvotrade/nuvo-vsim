@@ -2,6 +2,8 @@ import { fromEquityBrokerEvents } from '../economic/from-broker-events.js';
 import { foldEquityRoundTrip } from '../economic/fold-resolved-unit.js';
 import { emitResolvedUnitBundleRuntime } from '../economic/emit-resolved-unit-bundle-runtime.js';
 import { moneyCents } from '../economic/money-cents.js';
+import { assertLane1InstructionState, assertLane1PositionAgreement,
+  assertLane1SendSnapshot } from './lane-1-position-guards.js';
 
 export const LANE_1_SPY_V2 = 'LANE_1_SPY_V2_1_MARKET_ONLY';
 export const LANE_1_SPY_MARKET_V2_1 = 'LANE_1_SPY_MARKET_ONLY_V2_1';
@@ -204,10 +206,13 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
     if (disarmed.changed !== false) await notify({ type: 'DISARMED', reason: 'TTL_EXPIRED' });
     return noSend('ttl-expired', disarmed, { reason: 'TTL_EXPIRED' });
   }
-  async function custodyDisposition(state, signal, exitScope) {
-    const custody = await broker.position();
-    const durableSide = state.positionSide ?? 'FLAT';
-    if (custody.positionSide !== durableSide) {
+  function custodyDisposition(state, custody, signal) {
+    assertLane1SendSnapshot(custody);
+    const durableSide = state.positionSide;
+    // Unknown fields refuse before comparison; they must not match FLAT.
+    try { assertLane1PositionAgreement(durableSide, custody); }
+    catch (error) {
+      if (error.message !== 'LANE_1_POSITION_STATE_DRIFT:COORDINATOR_BROKER_DISAGREEMENT') throw error;
       return noSend('reconciliation-required', state, { faultCode: 'LANE_1_POSITION_STATE_DRIFT',
         durablePositionSide: durableSide, custodyPositionSide: custody.positionSide });
     }
@@ -251,18 +256,24 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
       const expired = await expire(state, instant); if (expired) return expired;
       if (!effectivelyArmed || !state?.armed) return noSend('disarmed', state,
         { tvBodyBindingSha256 });
+      let expectedSnapshot;
       let custody;
-      try { custody = await custodyDisposition(state, normalized.signal, normalized.exitScope); }
+      try {
+        expectedSnapshot = await broker.sendSnapshot();
+        custody = custodyDisposition(state, expectedSnapshot, normalized.signal);
+      }
       catch (error) { return recordFault(error); }
       if (custody) return custody;
       let session;
       try { session = await marketSession(); } catch (error) { return recordFault(error); }
       if (session !== 'RTH') return noSend('market-closed', state);
 
-      const positionSide = state.positionSide ?? 'FLAT';
+      const positionSide = state.positionSide;
       const seal = await lane1V2ProposalSeal({ signal: normalized.signal,
         rawSignalSide: body.side, tvBodyBindingSha256, positionSide,
         now: instant, uuid, prior: state.open?.seal ?? null });
+      try { assertLane1InstructionState({ instruction: seal.brokerInstruction, positionSide, quantity: 1 }); }
+      catch (error) { return recordFault(error); }
       const claim = await coordinator.claim({ signal: normalized.signal, seal });
       if (!claim.claimed) return noSend('duplicate-in-flight', claim.state);
       state = claim.state;
@@ -270,7 +281,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
       try {
         if (normalized.signal !== 'EXIT') {
           accepted = await broker.placeMarket({ instruction: seal.brokerInstruction,
-            clientOrderId: seal.clientOrderId, durableArm });
+            clientOrderId: seal.clientOrderId, durableArm, expectedSnapshot });
           state = await coordinator.recordAccepted({ signal: normalized.signal,
             brokerOrderId: accepted.brokerOrderId, acceptedAt: accepted.acceptedAt });
           const fill = await broker.waitForFill({ side: seal.brokerInstruction,
@@ -290,7 +301,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
         }
 
         accepted = await broker.placeMarket({ instruction: seal.brokerInstruction,
-          clientOrderId: seal.clientOrderId, durableArm });
+          clientOrderId: seal.clientOrderId, durableArm, expectedSnapshot });
         state = await coordinator.recordAccepted({ signal: 'EXIT',
           brokerOrderId: accepted.brokerOrderId, acceptedAt: accepted.acceptedAt });
         const fill = await broker.waitForFill({ side: seal.brokerInstruction,
@@ -318,9 +329,13 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
     },
     async reconcile() {
       const state = await coordinator.status();
-      if (!['LONG', 'SHORT'].includes(state?.positionSide)) return null;
+      if (state?.positionSide === 'FLAT') return null;
       try {
+        if (!['LONG', 'SHORT'].includes(state?.positionSide)) {
+          throw new Error('LANE_1_POSITION_STATE_DRIFT:COORDINATOR_POSITION_UNKNOWN');
+        }
         const custody = await broker.position();
+        assertLane1PositionAgreement(custody?.positionSide, custody);
         if (custody.positionSide === state.positionSide) return null;
         if (custody.positionSide !== 'FLAT') throw new Error('LANE_1_POSITION_STATE_DRIFT');
         throw new Error('LANE_1_EXTERNAL_FLATTEN_IDENTITY_REQUIRED');

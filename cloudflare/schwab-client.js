@@ -8,6 +8,10 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 import { normalizedBrokerEventKey } from './guardian.js';
 import { resolveSchwabFillEvidence } from '../src/economic/schwab-fill-identity.js';
+import {
+  assertLane1DispatchCoordinator, assertLane1InstructionState, assertLane1SendSnapshot,
+  assertLane1SnapshotUnchanged, lane1OrderState, readLane1SpyPosition,
+} from '../src/lane/lane-1-position-guards.js';
 
 export async function fetchLane1PreviewOnly(url, init, fetcher = fetch) {
   let destination;
@@ -694,12 +698,26 @@ export class SchwabD1Client {
     throw new Error('SCHWAB_TOKEN_REFRESH_BUSY');
   }
 
-  async _read(path, token) {
+  async _read(path, token, { completeOrderList = false } = {}) {
     const response = await fetch(`${TRADER_URL}${path}`, {
       headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
       signal: AbortSignal.timeout(8_000),
     });
     if (!response.ok) throw new Error(`SCHWAB_READ_${response.status}:${path.split('?')[0]}`);
+    if (completeOrderList) {
+      // Do not promote partial/page-limited success to an empty working set.
+      if (response.status !== 200 || ['content-range', 'link', 'x-next-page',
+        'x-next-cursor', 'x-has-more', 'x-truncated'].some((name) => response.headers.has(name))) {
+        throw new Error('LANE_1_ORDER_READ_INCOMPLETE');
+      }
+      let orders;
+      try { orders = JSON.parse(await boundedText(response)); }
+      catch { throw new Error('LANE_1_ORDER_READ_INCOMPLETE'); }
+      const total = response.headers.get('x-total-count');
+      if (total !== null && (!/^\d+$/u.test(total) || !Array.isArray(orders)
+        || Number(total) !== orders.length)) throw new Error('LANE_1_ORDER_READ_INCOMPLETE');
+      return orders;
+    }
     return response.json();
   }
 
@@ -957,20 +975,33 @@ export class SchwabD1Client {
     if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
     const account = await this._laneAccountHash(ownerId, accountHash);
     const packet = await this._read(`/accounts/${encodeURIComponent(account.accountHash)}?fields=positions`, account.token);
-    const positions = packet?.securitiesAccount?.positions ?? [];
-    const rows = positions.filter((row) => String(row?.instrument?.symbol ?? '').trim().toUpperCase() === 'SPY');
-    const longQuantity = rows.reduce((sum, row) => sum + Number(row?.longQuantity ?? 0), 0);
-    const shortQuantity = rows.reduce((sum, row) => sum + Number(row?.shortQuantity ?? 0), 0);
-    const netQuantity = longQuantity - shortQuantity;
-    if (!Number.isInteger(netQuantity) || Math.abs(netQuantity) > 1) {
-      throw new Error(`LANE_1_POSITION_LIMIT_FAULT:${netQuantity}`);
-    }
-    return {
-      symbol: 'SPY', netQuantity,
-      positionSide: netQuantity === 1 ? 'LONG' : netQuantity === -1 ? 'SHORT' : 'FLAT',
-      acquiredAt: new Date().toISOString(),
-      accountHash: account.accountHash,
-    };
+    return { ...readLane1SpyPosition(packet), acquiredAt: new Date().toISOString(),
+      accountHash: account.accountHash };
+  }
+
+  async lane1V21SendSnapshot(ownerId, { accountHash = null } = {}) {
+    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+    const account = await this._laneAccountHash(ownerId, accountHash);
+    return this._lane1V21SendSnapshot(account);
+  }
+
+  async _lane1V21SendSnapshot(account, ordersFrom = new Date(Date.now() - 60 * DAY_MS).toISOString()) {
+    const readStartedAt = new Date().toISOString();
+    const base = `/accounts/${encodeURIComponent(account.accountHash)}`;
+    // Live reads, never D1. Bound: no working SPY orders entered within this
+    // 60-day query. Older orders are NOT covered. Principal asserted on
+    // 2026-08-31 that none exist in ...315 and none will be placed; not API proof.
+    const query = new URLSearchParams({ fromEnteredTime: ordersFrom,
+      toEnteredTime: new Date(Date.now() + 60_000).toISOString(), maxResults: '3000' });
+    const [packet, orders] = await Promise.all([
+      this._read(`${base}?fields=positions`, account.token),
+      this._read(`${base}/orders?${query}`, account.token, { completeOrderList: true }),
+    ]);
+    const position = readLane1SpyPosition(packet);
+    const orderStateSha256 = await digest(JSON.stringify(lane1OrderState(orders)));
+    return { ...position, accountHash: account.accountHash, orderStateSha256,
+      orderCheckBound: 'NO_WORKING_SPY_ORDER_IN_60_DAY_QUERY',
+      ordersFrom, ordersTo: query.get('toEnteredTime'), readStartedAt, acquiredAt: new Date().toISOString() };
   }
 
   async placeLane1V2Bracket(ownerId, { signal }, { accountHash = null } = {}) {
@@ -997,15 +1028,26 @@ export class SchwabD1Client {
     };
   }
 
-  async placeLane1V21Market(ownerId, { instruction }, {
-    accountHash = null, durableArm = false,
+  async placeLane1V21Market(ownerId, { instruction, clientOrderId }, {
+    accountHash = null, durableArm = false, expectedSnapshot = null, readCoordinator = null,
   } = {}) {
     if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON' && durableArm !== true) {
       throw new Error('LANE_1_DISARMED');
     }
     if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
     const requestBody = buildLane1SchwabMarketOrder({ instruction });
+    assertLane1SendSnapshot(expectedSnapshot);
+    const expected = structuredClone(expectedSnapshot);
+    assertLane1InstructionState({ instruction, positionSide: expected.positionSide, quantity: 1 });
+    if (typeof readCoordinator !== 'function') throw new Error('LANE_1_DISPATCH_COORDINATOR_REQUIRED');
     const account = await this._laneAccountHash(ownerId, accountHash);
+    if (account.accountHash !== expected.accountHash) throw new Error('LANE_1_POSITION_STATE_DRIFT:ACCOUNT_CHANGED');
+    // Final reads run after token/account selection and before the only POST.
+    // No retries, custody cache, optional-check fallback, or claim creation.
+    const current = await this._lane1V21SendSnapshot(account, expected.ordersFrom);
+    const state = await readCoordinator();
+    assertLane1DispatchCoordinator(state, { instruction, clientOrderId, positionSide: expected.positionSide });
+    assertLane1SnapshotUnchanged(expected, current);
     const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders`, {
       method: 'POST',
       headers: {
