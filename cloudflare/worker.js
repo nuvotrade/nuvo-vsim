@@ -2092,8 +2092,13 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     <div class="lane-summary-today"><span>Today</span><strong data-vsim="lane-summary-today">— realized · — open</strong></div>
     <div class="lane-summary-block"><span>Blocking</span><strong data-vsim="lane-summary-blocking">—</strong></div>
     </article>`;
+  const mobileLaneSummaryCard = laneSummaryCard
+    .replace('lane-summary-card', 'lane-summary-card bot-lane-summary-card')
+    .replaceAll('lane-summary-title', 'bot-lane-summary-title');
+  const mobileSystemCard = `<article class="panel system-brief mobile-system-brief" aria-label="System status"></article>`;
   const bot = `<section class="view" id="bot" aria-labelledby="bot-title">
     <div class="page-heading"><div><p class="kicker">LANE_1_SPY · append-only operational evidence</p><h2 id="bot-title">BOT event ledger</h2></div><span class="readonly-tag">PHASE 1 · READ ONLY</span></div>
+    ${mobileLaneSummaryCard}
     <div class="bot-ledger-counts" aria-label="Lane 1 event counts">
       <div><span>SIGNAL</span><strong data-vsim="bot-count-signal">0</strong></div>
       <div><span>REFUSED</span><strong data-vsim="bot-count-refused">0</strong></div>
@@ -2142,6 +2147,24 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .lane-summary-matrix{margin-top:10px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-matrix-head,.lane-summary-matrix-row{display:grid;grid-template-columns:minmax(82px,1.35fr) .5fr .8fr .36fr;align-items:center}.lane-summary-matrix-head{background:#07110e;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{min-width:0;padding:6px 5px;border-right:1px solid var(--line)}.lane-summary-matrix-head span:last-child,.lane-summary-matrix-row>div:last-child{border-right:0}.lane-summary-matrix-row{border-top:1px solid var(--line);font:700 7px/1.2 var(--mono)}.lane-summary-matrix-row>div:first-child{color:var(--text);white-space:nowrap}.lane-summary-matrix-row>div[data-evidence]{text-align:center}.lane-summary-matrix-row small{display:none}.lane-summary-matrix .clear{color:var(--green)}.lane-summary-matrix .refused{color:var(--amber)}.lane-summary-matrix .unmeasured{color:var(--muted)}
     .lane-summary-last,.lane-summary-today,.lane-summary-block{margin-top:9px;padding-top:8px;border-top:1px solid var(--line)}.lane-summary-block strong{display:block;margin-top:5px;color:var(--amber);font:800 9px/1.3 var(--mono)}@media(max-width:760px){.bot-ledger-counts{grid-template-columns:repeat(2,1fr)}.bot-ledger-scope{grid-template-columns:1fr}}
   </style>`;
+  const mobileStyles = `<style>
+    .bot-lane-summary-card,.mobile-system-brief{display:none}
+    @media(max-width:660px){
+      html,body,.shell,.topbar,.nav,main,.view,.panel,.metric-card{min-width:0;max-width:100%}
+      body{font-size:13px}.topbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;padding:12px}.brand{min-width:0}.brand h1{font-size:20px}.header-status{margin-left:0;min-width:0}.header-status strong{font-size:11px}.header-status small{font-size:9px}
+      .nav{grid-column:1/-1;order:3;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;gap:2px;overflow:visible}.nav-button{min-width:0;min-height:34px;padding:7px 4px;font-size:10px;line-height:1.15;white-space:normal}.nav-button.active:after{left:8px;right:8px;bottom:0}
+      main{padding:18px 10px 36px}.page-heading{margin-bottom:16px}.page-heading h2{font-size:21px}.panel{padding:14px}.panel-head{gap:9px;margin-bottom:13px}.panel-head h3{font-size:16px}.metric-card{min-height:108px;padding:14px}.metric-value{font-size:25px;margin:9px 0}.metric-foot{font-size:9px}
+      .lane-summary-card .panel-head{align-items:center}.lane-summary-arm{max-width:48%;text-align:right;line-height:1.25}.lane-summary-matrix-head,.lane-summary-matrix-row{grid-template-columns:minmax(96px,1.45fr) .52fr .8fr .38fr}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{padding:7px 4px}.lane-summary-matrix-row{font-size:8px}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{font-size:11px}
+      #bot>.bot-lane-summary-card{display:block}#bot>*:not(.bot-lane-summary-card){display:none}
+      #system>.mobile-system-brief{display:block}#system>*:not(.mobile-system-brief){display:none}
+      .system-health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-health-tile{min-height:48px;padding:10px 8px;font-size:8px;gap:6px}.system-health-details{display:none}.system-overall{max-width:52%;line-height:1.25;text-align:right}.system-health-meta{font-size:7px}
+      .pnl-calendar-head{display:grid}.pnl-calendar-tools{width:100%;flex-wrap:wrap;justify-content:space-between}
+      .expiration-row{grid-template-columns:minmax(0,1fr) auto auto;gap:7px 10px}.expiration-row strong{grid-column:1}.expiration-row>span{grid-column:2}.expiration-row>b{display:block;grid-column:3}.expiration-row .risk-track{grid-column:1/-1;grid-row:2}
+      #overview>article.table-panel{display:none}
+      .portfolio-ledger .table-wrap,#overview .positions-empty .table-wrap{margin:0;overflow:visible}.portfolio-ledger table,#overview .positions-empty table{min-width:0;width:100%}.portfolio-ledger thead,#overview .positions-empty thead{display:none}.portfolio-ledger tbody,#overview .positions-empty tbody{display:grid;gap:10px}.portfolio-ledger tbody tr,#overview .positions-empty tbody tr{display:block;border:1px solid var(--line);border-radius:7px;background:#081510}.portfolio-ledger tbody td,#overview .positions-empty tbody td{display:grid;grid-template-columns:minmax(94px,.8fr) minmax(0,1.2fr);gap:12px;width:100%;padding:9px 10px;border-bottom:1px solid rgba(28,48,42,.75);font-size:11px;white-space:normal;overflow-wrap:anywhere;text-align:right}.portfolio-ledger tbody td:last-child,#overview .positions-empty tbody td:last-child{border-bottom:0}.portfolio-ledger tbody td:before,#overview .positions-empty tbody td:before{content:attr(data-label);color:var(--muted);font:700 8px/1.3 var(--mono);letter-spacing:.1em;text-align:left;text-transform:uppercase}.portfolio-ledger tbody td.muted,#overview .positions-empty tbody td.muted{display:block;text-align:left}.portfolio-ledger tbody td.muted:before,#overview .positions-empty tbody td.muted:before{content:none}
+      .portfolio-ledger .panel-note,#overview .positions-empty .panel-note{overflow-wrap:anywhere}
+    }
+  </style>`;
   const calculatorStyles = `<style>
     .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}
   </style>`;
@@ -2152,13 +2175,14 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
-    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + botLedgerStyles + e3Styles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + botLedgerStyles + mobileStyles + e3Styles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
     .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
     .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button><button class="nav-button" data-view="bot">BOT</button>')
     .replace('<button class="nav-button" data-view="system">System</button>', e3Nav + '<button class="nav-button" data-view="system">System</button>')
     .replace(readinessScorecard, laneSummaryCard)
     .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
     .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + bot + '\n      <section class="view" id="decisions"')
+    .replace('<section class="view" id="system" aria-labelledby="system-title">', '<section class="view" id="system" aria-labelledby="system-title">' + mobileSystemCard)
     .replace('</main>', e3View + '</main>')
     .replace('</body>', '<script src="/design/live.js"></script></body>');
 }
@@ -2493,13 +2517,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
 
   function fillTable(tbody, rows, cells, emptyMessage) {
     clear(tbody);
+    const table = tbody && tbody.closest('table');
+    const labels = table ? qa('th', table).map(node => node.textContent.trim()) : [];
     if (!rows.length) {
       const row = make('tr'); const cell = make('td', emptyMessage, 'muted');
       cell.colSpan = cells.length; row.append(cell); tbody.append(row); return;
     }
     rows.forEach(item => {
       const row = make('tr');
-      cells.forEach(formatter => { const cell = make('td'); const value = formatter(item);
+      cells.forEach((formatter, index) => { const cell = make('td'); const value = formatter(item);
+        cell.dataset.label = labels[index] || '';
         if (value instanceof Node) cell.append(value); else cell.textContent = value;
         if (typeof value === 'string' && value.startsWith('-$')) cell.className = 'negative';
         row.append(cell); });
@@ -3321,57 +3348,59 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       clear(positionPanel);
       const head = make('div', undefined, 'panel-head'); const title = make('div'); title.append(make('p', 'Layer 8 · Live custody', 'kicker'), make('h3', 'Open positions')); head.append(title, make('span', positions.length + ' open', 'count')); positionPanel.append(head);
       if (!positions.length) positionPanel.append(make('div', 'No synchronized positions.', 'empty-state'));
-      else { const wrap = make('div', undefined, 'table-wrap'); const table = make('table'); const thead = make('thead'); const hr = make('tr'); ['Symbol','Type','Quantity','Market value'].forEach(label => hr.append(make('th', label))); thead.append(hr); const body = make('tbody'); positions.forEach(position => { const row = make('tr'); [position.symbol || '—', position.type || '—', number(position.quantity), money(position.marketValue)].forEach(value => row.append(make('td', value))); body.append(row); }); table.append(thead, body); wrap.append(table); positionPanel.append(wrap); }
+      else { const wrap = make('div', undefined, 'table-wrap'); const table = make('table'); const thead = make('thead'); const hr = make('tr'); const labels = ['Symbol','Type','Quantity','Market value']; labels.forEach(label => hr.append(make('th', label))); thead.append(hr); const body = make('tbody'); positions.forEach(position => { const row = make('tr'); [position.symbol || '—', position.type || '—', number(position.quantity), money(position.marketValue)].forEach((value, index) => { const cell = make('td', value); cell.dataset.label = labels[index]; row.append(cell); }); body.append(row); }); table.append(thead, body); wrap.append(table); positionPanel.append(wrap); }
     }
 
-    const systemCard = q('#overview .system-brief');
-    if (systemCard) {
+    const systemCards = qa('.system-brief');
+    if (systemCards.length) {
       const model = status.systemHealth || { rows: [
         'D1','SCHWAB','MARKET','TV','DISCORD','BOT',
       ].map(label => ({ label, color: 'RED', status: label === 'BOT' ? 'OFF' : 'DOWN',
         asOf: null, detail: 'NOT PROBED' })), status: 'ACTION REQUIRED', color: 'RED',
       checkedAt: null, versions: { dashboard: 'unknown', market: 'unknown' },
       tape: { spy: null, vix: null, source: 'UNPROVEN', asOf: null } };
-      clear(systemCard);
-      const head = make('div', undefined, 'panel-head system-health-head');
-      const title = make('div');
-      title.append(make('p', 'Operational integrity', 'kicker'), make('h3', 'System'));
       const intendedBotOff = model.rows.some(entry => entry.label === 'BOT' && entry.status === 'OFF');
       const actionable = model.rows.some(entry => entry.color === 'RED'
         && !(entry.label === 'BOT' && entry.status === 'OFF'));
       const overallText = actionable ? 'ACTION REQUIRED'
         : intendedBotOff ? 'SYSTEMS LIVE · BOT OFF' : model.status;
-      const overall = make('strong', overallText,
-        'system-overall system-' + (actionable ? 'red' : 'green'));
-      head.append(title, overall);
-      const grid = make('div', undefined, 'system-health-grid');
-      model.rows.forEach(entry => {
-        const displayColor = entry.label === 'BOT' && entry.status === 'OFF'
-          ? 'neutral' : String(entry.color).toLowerCase();
-        const tile = make('div', undefined, 'system-health-tile system-' + displayColor);
-        const name = make('span', entry.label);
-        const state = make('strong');
-        state.append(make('i', undefined, 'health-light'), document.createTextNode(entry.status));
-        tile.append(name, state);
-        grid.append(tile);
-      });
       const tape = model.tape || {};
-      const details = make('details', undefined, 'system-health-details');
-      details.append(make('summary', 'Diagnostics'));
-      model.rows.forEach(entry => {
-        const line = make('p');
-        line.append(make('strong', entry.label + ' · ' + entry.status),
-          make('span', (entry.detail || 'No detail') + ' · ' + (entry.asOf ? when(entry.asOf) : 'not yet checked')));
-        details.append(line);
-      });
-      details.append(make('p', 'SPY ' + (present(tape.spy) ? Number(tape.spy).toFixed(2) : '—')
-        + ' · VIX ' + (present(tape.vix) ? Number(tape.vix).toFixed(2) : '—')
-        + ' · SOURCE ' + (tape.source || 'UNPROVEN')));
       const versions = model.versions || {};
-      const footer = make('p', 'Dashboard v' + String(versions.dashboard || 'unknown').slice(0, 12)
-        + ' · Market v' + String(versions.market || 'unknown').slice(0, 12)
-        + ' · Checked ' + (model.checkedAt ? when(model.checkedAt) : 'not yet'), 'system-health-meta');
-      systemCard.append(head, grid, details, footer);
+      systemCards.forEach(systemCard => {
+        clear(systemCard);
+        const head = make('div', undefined, 'panel-head system-health-head');
+        const title = make('div');
+        title.append(make('p', 'Operational integrity', 'kicker'), make('h3', 'System'));
+        const overall = make('strong', overallText,
+          'system-overall system-' + (actionable ? 'red' : 'green'));
+        head.append(title, overall);
+        const grid = make('div', undefined, 'system-health-grid');
+        model.rows.forEach(entry => {
+          const displayColor = entry.label === 'BOT' && entry.status === 'OFF'
+            ? 'neutral' : String(entry.color).toLowerCase();
+          const tile = make('div', undefined, 'system-health-tile system-' + displayColor);
+          const name = make('span', entry.label);
+          const state = make('strong');
+          state.append(make('i', undefined, 'health-light'), document.createTextNode(entry.status));
+          tile.append(name, state);
+          grid.append(tile);
+        });
+        const details = make('details', undefined, 'system-health-details');
+        details.append(make('summary', 'Diagnostics'));
+        model.rows.forEach(entry => {
+          const line = make('p');
+          line.append(make('strong', entry.label + ' · ' + entry.status),
+            make('span', (entry.detail || 'No detail') + ' · ' + (entry.asOf ? when(entry.asOf) : 'not yet checked')));
+          details.append(line);
+        });
+        details.append(make('p', 'SPY ' + (present(tape.spy) ? Number(tape.spy).toFixed(2) : '—')
+          + ' · VIX ' + (present(tape.vix) ? Number(tape.vix).toFixed(2) : '—')
+          + ' · SOURCE ' + (tape.source || 'UNPROVEN')));
+        const footer = make('p', 'Dashboard v' + String(versions.dashboard || 'unknown').slice(0, 12)
+          + ' · Market v' + String(versions.market || 'unknown').slice(0, 12)
+          + ' · Checked ' + (model.checkedAt ? when(model.checkedAt) : 'not yet'), 'system-health-meta');
+        systemCard.append(head, grid, details, footer);
+      });
     }
   }
 
@@ -3507,14 +3536,15 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   function renderLane1SummaryCard(ledger) {
     const summary = ledger && ledger.summary;
     if (!summary) return;
-    const arm = q('[data-vsim="lane-summary-arm"]');
+    const textAll = (selector, value) => qa(selector).forEach(node => text(node, value));
+    const arms = qa('[data-vsim="lane-summary-arm"]');
     const armStage = summary.arm?.stage || (summary.arm?.value === 'OFF' ? 'DISARMED' : null);
     const intendedArmOff = summary.arm?.value === 'OFF' && summary.blocking === 'ARM_OFF · INTENDED';
-    text(arm, armStage ? armStage + (intendedArmOff ? ' · intended' : '') : '—');
-    if (arm) arm.dataset.state = String(summary.arm?.value || '').toLowerCase();
-    text(q('[data-vsim="lane-summary-position"]'), summary.position?.value === 'NOT_MEASURED'
+    textAll('[data-vsim="lane-summary-arm"]', armStage ? armStage + (intendedArmOff ? ' · intended' : '') : '—');
+    arms.forEach(arm => { arm.dataset.state = String(summary.arm?.value || '').toLowerCase(); });
+    textAll('[data-vsim="lane-summary-position"]', summary.position?.value === 'NOT_MEASURED'
       ? '—' : (summary.position?.value || '—'));
-    text(q('[data-vsim="lane-summary-fills"]'), number(summary.fills?.provenInstructions || 0)
+    textAll('[data-vsim="lane-summary-fills"]', number(summary.fills?.provenInstructions || 0)
       + ' of ' + number(summary.fills?.targetInstructions || 4));
     const realized = summary.pnl?.realizedToday || {};
     const openPnl = summary.pnl?.open || {};
@@ -3522,32 +3552,34 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       ? moneyExact(realized.valueCents / 100) : '—';
     const openText = Number.isSafeInteger(openPnl.valueCents)
       ? moneyExact(openPnl.valueCents / 100) : '—';
-    text(q('[data-vsim="lane-summary-today"]'), realizedText + ' realized · ' + openText + ' open');
-    const body = q('[data-vsim="lane-summary-matrix-body"]'); clear(body);
-    if (body) ['BUY','SELL','SELL_SHORT','BUY_TO_COVER'].forEach(instruction => {
-      const evidence = summary.matrix?.[instruction] || {};
-      const row = make('div', undefined, 'lane-summary-matrix-row');
-      row.setAttribute('role', 'row');
-      row.append(make('div', instruction));
-      [['alert', evidence.alert], ['preview', evidence.preview], ['fill', evidence.fill]]
-        .forEach(([kind, item = {}]) => {
-          const status = item.status || 'NOT_MEASURED';
-          const compact = kind === 'alert' ? status === 'CONFIRMED' ? '✓' : '—'
-            : kind === 'preview' ? status.includes('CLEAR') ? 'clear'
-              : status.includes('REFUSED_NO_POSITION') ? 'no pos'
-                : status.includes('REFUSED') ? 'refused' : '—'
-              : status === 'FILLED' ? '1' : '—';
-          const className = compact === '✓' || compact === 'clear' || compact === '1'
-            ? 'clear' : compact === 'no pos' || compact === 'refused' ? 'refused' : 'unmeasured';
-          const cell = make('div', undefined, className); cell.dataset.evidence = kind;
-          cell.append(make('strong', compact));
-          row.append(cell);
-        });
-      body.append(row);
+    textAll('[data-vsim="lane-summary-today"]', realizedText + ' realized · ' + openText + ' open');
+    qa('[data-vsim="lane-summary-matrix-body"]').forEach(body => {
+      clear(body);
+      ['BUY','SELL','SELL_SHORT','BUY_TO_COVER'].forEach(instruction => {
+        const evidence = summary.matrix?.[instruction] || {};
+        const row = make('div', undefined, 'lane-summary-matrix-row');
+        row.setAttribute('role', 'row');
+        row.append(make('div', instruction));
+        [['alert', evidence.alert], ['preview', evidence.preview], ['fill', evidence.fill]]
+          .forEach(([kind, item = {}]) => {
+            const status = item.status || 'NOT_MEASURED';
+            const compact = kind === 'alert' ? status === 'CONFIRMED' ? '✓' : '—'
+              : kind === 'preview' ? status.includes('CLEAR') ? 'clear'
+                : status.includes('REFUSED_NO_POSITION') ? 'no pos'
+                  : status.includes('REFUSED') ? 'refused' : '—'
+                : status === 'FILLED' ? '1' : '—';
+            const className = compact === '✓' || compact === 'clear' || compact === '1'
+              ? 'clear' : compact === 'no pos' || compact === 'refused' ? 'refused' : 'unmeasured';
+            const cell = make('div', undefined, className); cell.dataset.evidence = kind;
+            cell.append(make('strong', compact));
+            row.append(cell);
+          });
+        body.append(row);
+      });
     });
-    text(q('[data-vsim="lane-summary-blocking"]'), intendedArmOff ? 'none' : (summary.blocking || 'none'));
+    textAll('[data-vsim="lane-summary-blocking"]', intendedArmOff ? 'none' : (summary.blocking || 'none'));
     const last = summary.lastSignal || {};
-    text(q('[data-vsim="lane-summary-last"]'), last.timestamp
+    textAll('[data-vsim="lane-summary-last"]', last.timestamp
       ? when(last.timestamp) + ' · ' + (last.instruction || '—') + ' · '
         + (last.outcome === 'PREVIEW · CLEAR' ? 'previewed'
           : last.outcome === 'PREVIEW · REFUSED_NO_POSITION' ? 'preview no pos'

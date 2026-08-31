@@ -137,7 +137,7 @@ test('Overview renderer is a quiet two-column grid with explicit Pacific time', 
   assert.match(script, /system-health-grid/u);
   assert.match(script, /'D1','SCHWAB','MARKET','TV','DISCORD','BOT'/u);
   assert.match(script, /timeZone: 'America\/Los_Angeles'/u);
-  const renderer = script.slice(script.indexOf("const systemCard = q('#overview .system-brief')"),
+  const renderer = script.slice(script.indexOf("const systemCards = qa('.system-brief')"),
     script.indexOf('function renderOpportunities'));
   assert.doesNotMatch(renderer, /alert\(|confirm\(|health-amber|tv-live-widget/u);
   assert.match(renderer, /Dashboard v/u);
