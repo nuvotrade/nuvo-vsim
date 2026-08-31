@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { SchwabD1Client, buildLane1SchwabMarketOrder } from '../cloudflare/schwab-client.js';
 import { documentedPreviewOrder } from './helpers/schwab-preview-order.js';
 import { previewEvidenceBucket } from './helpers/preview-evidence-bucket.js';
+import { testPublicKey, decryptStored } from './helpers/preview-evidence-key.js';
+import { redactPreviewOriginal } from '../cloudflare/preview-evidence-codec.js';
 import { bindLane1V21ReplayBody } from '../src/lane/lane-1-spy-v2.js';
 import {
   handleLane1PreviewRequest, handleLane1TvWebhook, latestLane1ReplayIngress,
@@ -227,7 +229,7 @@ async function previewReceiptFixture(t, raw, { status = 200, failWrite = false,
   client.configured = () => true;
   client._laneAccountHash = async () => ({ accountHash: 'PRIVATE-ACCOUNT', token: 'PRIVATE-TOKEN' });
   const result = await previewStoredLane1Ingress({ env, ownerId: OWNER, ingressId: INGRESS_ID,
-    dependencies: { client, coordinator: {
+    dependencies: { client, previewEvidencePublicKey:testPublicKey, coordinator: {
       async status() { return structuredClone(state); },
       async claim() { claims += 1; throw new Error('UNEXPECTED_CLAIM'); },
     } },
@@ -254,7 +256,7 @@ test('complete broker response is saved before refusal, not just our scalar summ
   assert.equal(ref.sourceIngressId, INGRESS_ID);
   assert.equal(ref.bytes, Buffer.byteLength(raw));
   assert.equal(ref.sha256, createHash('sha256').update(raw).digest('hex'));
-  assert.equal(Buffer.from(bucket.objects.get(ref.bodyKey).bytes).toString(), raw);
+  assert.equal(Buffer.from(await decryptStored(bucket, ref.bodyKey)).toString(), raw);
   assert.deepEqual(JSON.parse(Buffer.from(bucket.objects.get(ref.manifestKey).bytes)), ref);
   assert.equal(JSON.stringify(result).includes('PRIVATE-ACCOUNT'), false);
   assert.equal(db.rows[1].detail_json.includes('PRIVATE-ACCOUNT'), false);
@@ -272,8 +274,8 @@ test('D1 failure cannot discard the already saved complete broker response', asy
   const raw = '{"orderValidationResult":{"reviews":["Needs review"]}}';
   const { result, bucket } = await previewReceiptFixture(t, raw, { failWrite: true });
   assert.equal(result.body.faultCode, 'LANE_1_PREVIEW_RECEIPT_WRITE_FAILED');
-  const body = [...bucket.objects].find(([key]) => key.endsWith('/response.body'))[1];
-  assert.equal(Buffer.from(body.bytes).toString(), raw);
+  const key = [...bucket.objects.keys()].find((key) => key.endsWith('/original.encrypted.json'));
+  assert.equal(Buffer.from(await decryptStored(bucket, key)).toString(), raw);
 });
 
 for (const [name, validation, expectedTypes] of [
@@ -305,7 +307,7 @@ for (const [name, validation, expectedTypes] of [
     assert.equal(proof.workerVersion, 'receipt-candidate');
     assert.deepEqual(proof.validationFieldTypes, expectedTypes);
     for (const key of ['rejects', 'reviews', 'warns', 'alerts']) {
-      assert.deepEqual(proof[key], validation?.[key] ?? null);
+      assert.deepEqual(proof[key], redactPreviewOriginal(Buffer.from(raw)).body?.orderValidationResult?.[key] ?? null);
     }
     assert.equal(proof.validationPresent, validation !== undefined);
     assert.equal(proof.responseObjectPresent, true);
@@ -336,7 +338,8 @@ test('failed preview saves broker rejection fields on non-2xx without changing i
   } });
   const { db, result } = await previewReceiptFixture(t, raw, { status: 400 });
   assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_400');
-  assert.deepEqual(JSON.parse(db.rows[1].detail_json).rejects, [{ message: 'Broker refused request' }]);
+  assert.deepEqual(JSON.parse(db.rows[1].detail_json).rejects, [{}]);
+  assert.ok(JSON.parse(db.rows[1].detail_json).removedPaths.includes('/orderValidationResult/rejects/0/message'));
 });
 
 test('receipt storage failure is explicit, remains disarmed, and never claims a proof', async (t) => {
@@ -361,8 +364,10 @@ test('warnings alone still clear an exact preview; success does not write a refu
   assert.equal(db.rows.filter((row) => row.event_type === 'LANE_1_ORDER_PREVIEW').length, 1);
   assert.equal(db.rows.some((row) => row.event_type === 'LANE_1_ORDER_PREVIEW_REFUSED'), false);
   const proof = JSON.parse(db.rows[1].detail_json);
-  assert.deepEqual(proof.warns, ['Informational warning']);
-  assert.deepEqual(proof.alerts, ['Informational alert']);
+  assert.deepEqual(proof.warns, [null]);
+  assert.deepEqual(proof.alerts, [null]);
+  assert.ok(proof.removedPaths.includes('/orderValidationResult/warns/0'));
+  assert.ok(proof.removedPaths.includes('/orderValidationResult/alerts/0'));
   assert.deepEqual(proof.orderContract.actual, proof.orderContract.expected);
 });
 
@@ -390,7 +395,7 @@ for (const [name, validation] of [
     assert.deepEqual(proof.orderContract.actual, proof.orderContract.expected);
     assert.deepEqual(proof.coordinatorBefore, proof.coordinatorAfter);
     for (const key of ['rejects', 'reviews', 'warns', 'alerts']) {
-      assert.deepEqual(proof[key], validation[key] ?? null);
+      assert.deepEqual(proof[key], redactPreviewOriginal(Buffer.from(raw)).body?.orderValidationResult?.[key] ?? null);
       assert.equal(proof.validationFieldTypes[key], validation[key] === undefined ? 'missing' : 'array');
     }
     for (const secret of ['PRIVATE-ACCOUNT', 'PRIVATE-TOKEN', SECRET, 'rawResponseBody']) {
@@ -409,7 +414,10 @@ for (const field of ['rejects', 'reviews', 'warns', 'alerts']) {
       assert.equal(result.status, 422);
       assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_NOT_CLEAR');
       assert.equal(db.rows[1].event_type, 'LANE_1_ORDER_PREVIEW_REFUSED');
-      assert.deepEqual(JSON.parse(db.rows[1].detail_json)[field], value);
+      const proof = JSON.parse(db.rows[1].detail_json);
+      assert.equal(proof[field], null);
+      assert.equal(proof.validationFieldTypes[field], value === null ? 'null' : typeof value);
+      if (value !== null) assert.ok(proof.removedPaths.includes(`/orderValidationResult/${field}`));
     });
   }
 }
@@ -432,7 +440,8 @@ for (const field of ['rejects', 'reviews']) {
     const { db, result } = await previewReceiptFixture(t, raw);
     assert.equal(result.status, 422);
     assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_NOT_CLEAR');
-    assert.deepEqual(JSON.parse(db.rows[1].detail_json)[field], [note]);
+    assert.deepEqual(JSON.parse(db.rows[1].detail_json)[field], [{originalSeverity:'WARN'}]);
+    assert.ok(JSON.parse(db.rows[1].detail_json).removedPaths.includes(`/orderValidationResult/${field}/0/activityMessage`));
   });
 }
 

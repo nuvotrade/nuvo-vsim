@@ -1,5 +1,8 @@
 # Preview response capture — local draft, production HOLD
 
+Historical draft note: retention choice was subsequently approved. See
+`LANE_1_PREVIEW_CAPTURE_RELEASE.md` for the encrypted two-artifact release.
+
 2026-08-31. Base Git: `aab2f6e8f677fbc41f5435268218880c5870081e`.
 Live version checked: `98f7b19a-7874-49e9-b3a3-7f1a697acaa4`, 100%.
 No upload, deployment, new ingress, preview click, or ARM in this work.

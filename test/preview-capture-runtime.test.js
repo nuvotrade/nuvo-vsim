@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { createHash } from 'node:crypto';
+import { testPublicKey, testPrivateKey } from './helpers/preview-evidence-key.js';
+import { decryptPreviewOriginal } from '../cloudflare/preview-evidence-codec.js';
 
 test('capture executes in workerd with a real local R2 binding before parser use', async () => {
   const built = await build({ stdin: { contents: `
     import {capturePreviewResponse} from './cloudflare/preview-response-evidence.js';
     export default { async fetch(request, env) {
       const capture = await capturePreviewResponse({bucket: env.EVIDENCE,
+        publicKey:${JSON.stringify(testPublicKey)},
         response: new Response(request.body, {status: 400}),
         context: {ownerId:'test-owner', sourceIngressId:'test-row',
           sourceIngressCreatedAt:'2026-08-31T15:33:13.437Z',
@@ -30,10 +33,13 @@ test('capture executes in workerd with a real local R2 binding before parser use
     assert.equal(result.evidence.httpStatus, 400);
     assert.equal(result.evidence.sha256, createHash('sha256').update(raw).digest('hex'));
     const bucket = await mf.getR2Bucket('EVIDENCE');
-    assert.equal(await (await bucket.get(result.evidence.bodyKey)).text(), raw);
+    const encrypted = await (await bucket.get(result.evidence.bodyKey)).json();
+    assert.equal(Buffer.from(await decryptPreviewOriginal(encrypted, testPrivateKey)).toString(), raw);
     assert.deepEqual(await (await bucket.get(result.evidence.manifestKey)).json(), result.evidence);
     assert.equal(await bucket.put(result.evidence.bodyKey, 'overwrite', {
       onlyIf: {etagDoesNotMatch:'*'} }), null);
-    assert.equal(await (await bucket.get(result.evidence.bodyKey)).text(), raw);
+    assert.deepEqual(await (await bucket.get(result.evidence.bodyKey)).json(), encrypted);
+    const redacted = await (await bucket.get(result.evidence.redactedKey)).text();
+    assert.equal(createHash('sha256').update(redacted).digest('hex'), result.evidence.redactedSha256);
   } finally { await mf.dispose(); }
 });

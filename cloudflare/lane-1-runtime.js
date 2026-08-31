@@ -140,34 +140,41 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
     return refuse('LANE_1_PREVIEW_CAPTURE_BUCKET_REQUIRED');
   }
   let rawResponseEvidence = null;
+  let inspection = null;
   const client = dependencies.client ?? new SchwabD1Client(env);
   const preview = await client.previewLane1V21Market(ownerId,
     { instruction: seal.brokerInstruction },
     { accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null,
       captureResponse: async (response, { requestSha256 }) => {
         const captured = await capturePreviewResponse({ bucket: env.EVIDENCE, response,
+          publicKey: dependencies.previewEvidencePublicKey,
           context: { ownerId, sourceIngressId: row.id, sourceIngressCreatedAt: row.created_at,
             tvBodyBindingSha256: binding.tvBodyBindingSha256, requestSha256,
             workerVersion: env.CF_VERSION_METADATA?.id ?? 'local' } });
         rawResponseEvidence = captured.evidence;
+        inspection = captured.inspection;
         return captured;
       } });
   const raw = typeof preview.rawResponseBody === 'string' ? preview.rawResponseBody : null;
-  const response = parseObject(raw);
+  const originalResponse = parseObject(raw);
+  const response = inspection?.body ?? null;
   const validation = response?.orderValidationResult;
+  const originalValidation = originalResponse?.orderValidationResult;
   // Record the returned shape, never the parser's normalized empty lists.
   const responseEvidence = {
     rawResponseEvidence,
-    responseObjectPresent: response !== null,
-    validationPresent: validation !== undefined && validation !== null,
+    redactionVersion: inspection?.redactionVersion ?? null,
+    removedPaths: inspection?.removedPaths ?? [],
+    responseObjectPresent: originalResponse !== null,
+    validationPresent: originalValidation !== undefined && originalValidation !== null,
     rejects: validation?.rejects ?? null,
     reviews: validation?.reviews ?? null,
     warns: validation?.warns ?? null,
     alerts: validation?.alerts ?? null,
     validationFieldTypes: Object.fromEntries(['rejects', 'reviews', 'warns', 'alerts']
-      .map((key) => [key, validation?.[key] === undefined ? 'missing'
-        : validation[key] === null ? 'null'
-          : Array.isArray(validation[key]) ? 'array' : typeof validation[key]])),
+      .map((key) => [key, originalValidation?.[key] === undefined ? 'missing'
+        : originalValidation[key] === null ? 'null'
+          : Array.isArray(originalValidation[key]) ? 'array' : typeof originalValidation[key]])),
     orderContract: previewOrderContractEvidence(response, seal.brokerInstruction),
   };
   if (preview.status !== 'CLEAR' || !rawResponseEvidence?.complete) {

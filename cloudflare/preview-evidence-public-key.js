@@ -1,0 +1,11 @@
+// Public encryption key only. The private key is never deployed or committed.
+// Key custody: docs/LANE_1_PREVIEW_CAPTURE_RELEASE.md.
+export const PREVIEW_EVIDENCE_PUBLIC_KEY = `MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA1XYG0ZknZdAcIjNO1EW/
+Zr5cBCUyj79AFM2AA0a0v5ZO64KinyU/3ZcjpRmQFauHpV+9K1oYPDGNPLqKhaHI
+73rK+LhPoBGoJLKMEQqHbOIPy3VMdYVGuDUVWjagWNFsSkE3iMParLwMT1qSWDln
+JgdiK2VlIwbEACAkOTPiJdPb9ZMB+7q3zRxHm++qI7sZEXoQ8r8xyZ0WbqwzbCov
+xuStbptz1Zxc9pDWlL9E9zPDVhdkIThTxtnDYH5hk1ZW4vgvWbvbnh3IaxBRU2O3
+HTn7TPP0JfJiuN4pjwN36xhDv7/DUT3muqO95vmQXvjpuRG8NCX9eiNDbbyN5xwR
+sfCQDabrDcd95vjISeUQsDjdlPrUxkBZIfzjk7JXRTKRmG1cgQSxWavZtKVp1UkF
+pXf+Q7tk+yr+jr19Rkstyv714dSYYrwll/bEo4TH7mBJq9wRt8bV8S2rCpUQXHmi
+RmYb6PLn5neNgKcwhUmalqCvfomtcT/E+a8aY4LvG7hvAgMBAAE=`;
