@@ -116,7 +116,44 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
   const preview = await client.previewLane1V21Market(ownerId,
     { instruction: seal.brokerInstruction },
     { accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null });
-  if (preview.status !== 'CLEAR') return refuse(preview.faultCode ?? 'LANE_1_PREVIEW_NOT_CLEAR');
+  if (preview.status !== 'CLEAR') {
+    const faultCode = preview.faultCode ?? 'LANE_1_PREVIEW_NOT_CLEAR';
+    const raw = typeof preview.rawResponseBody === 'string' ? preview.rawResponseBody : null;
+    const response = parseObject(raw);
+    const validation = response?.orderValidationResult;
+    // Preserve refusal evidence, not the full broker payload or credentials.
+    // Null/missing fields must not be normalized into empty (apparently clear) arrays.
+    let receipt;
+    try {
+      receipt = await recordOperationalProof(env, ownerId, 'LANE_1_ORDER_PREVIEW_REFUSED', {
+        test: true, sent: false, faultCode,
+        sourceIngressId: row.id, sourceIngressCreatedAt: row.created_at,
+        replayBody: binding.replayBody, tvBodyBindingSha256: binding.tvBodyBindingSha256,
+        requestSha256: preview.requestSha256 ?? null,
+        rawResponseSha256: raw === null ? null : await sha256(raw),
+        responseObjectPresent: response !== null,
+        validationPresent: validation !== undefined && validation !== null,
+        rejects: validation?.rejects ?? null,
+        reviews: validation?.reviews ?? null,
+        warns: validation?.warns ?? null,
+        alerts: validation?.alerts ?? null,
+        validationFieldTypes: Object.fromEntries(['rejects', 'reviews', 'warns', 'alerts']
+          .map((key) => [key, validation?.[key] === undefined ? 'missing'
+            : validation[key] === null ? 'null'
+              : Array.isArray(validation[key]) ? 'array' : typeof validation[key]])),
+        schwabEndpoint: '/previewOrder', brokerInstruction: seal.brokerInstruction,
+        quantity: 1, previewedAt: new Date(instant).toISOString(),
+      });
+      if (!receipt?.id) throw new Error('RECEIPT_NOT_WRITTEN');
+    } catch {
+      return { ...refuse('LANE_1_PREVIEW_RECEIPT_WRITE_FAILED'), body: {
+        ...refuse('LANE_1_PREVIEW_RECEIPT_WRITE_FAILED').body, previewFaultCode: faultCode,
+      } };
+    }
+    return { ...refuse(faultCode), body: { ...refuse(faultCode).body,
+      ingressId: row.id, previewProofId: receipt.id,
+    } };
+  }
   const after = await coordinator.status();
   if (canonical(before) !== canonical(after)) {
     return refuse('LANE_1_PREVIEW_COORDINATOR_MUTATED');
