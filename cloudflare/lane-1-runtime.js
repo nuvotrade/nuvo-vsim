@@ -57,6 +57,28 @@ function parseObject(value) {
   } catch { return null; }
 }
 
+function previewOrderContractEvidence(response, instruction) {
+  const order = response?.orderStrategy;
+  const leg = order?.orderLegCollection?.[0];
+  // Explicit allowlist: no account, token, full response, or arbitrary objects.
+  const scalar = (value) => typeof value === 'string' ? value.slice(0, 128)
+    : typeof value === 'number' || typeof value === 'boolean' ? value : null;
+  return {
+    expected: { orderType: 'MARKET', orderStrategyType: 'SINGLE', session: 'NORMAL',
+      duration: 'DAY', legCount: 1, childCount: 0, instruction, quantity: 1,
+      symbol: 'SPY', assetType: 'EQUITY' },
+    actual: {
+      orderType: scalar(order?.orderType), orderStrategyType: scalar(order?.orderStrategyType),
+      session: scalar(order?.session), duration: scalar(order?.duration),
+      legCount: Array.isArray(order?.orderLegCollection) ? order.orderLegCollection.length : null,
+      childCount: order?.childOrderStrategies === undefined ? 0
+        : Array.isArray(order.childOrderStrategies) ? order.childOrderStrategies.length : null,
+      instruction: scalar(leg?.instruction), quantity: scalar(leg?.quantity),
+      symbol: scalar(leg?.instrument?.symbol), assetType: scalar(leg?.instrument?.assetType),
+    },
+  };
+}
+
 async function replayBindingFromIngressDetail(detail) {
   if (detail?.replayEligible !== true || !detail.replayBody) return null;
   try {
@@ -116,13 +138,26 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
   const preview = await client.previewLane1V21Market(ownerId,
     { instruction: seal.brokerInstruction },
     { accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null });
+  const raw = typeof preview.rawResponseBody === 'string' ? preview.rawResponseBody : null;
+  const response = parseObject(raw);
+  const validation = response?.orderValidationResult;
+  // Record the returned shape, never the parser's normalized empty lists.
+  const responseEvidence = {
+    responseObjectPresent: response !== null,
+    validationPresent: validation !== undefined && validation !== null,
+    rejects: validation?.rejects ?? null,
+    reviews: validation?.reviews ?? null,
+    warns: validation?.warns ?? null,
+    alerts: validation?.alerts ?? null,
+    validationFieldTypes: Object.fromEntries(['rejects', 'reviews', 'warns', 'alerts']
+      .map((key) => [key, validation?.[key] === undefined ? 'missing'
+        : validation[key] === null ? 'null'
+          : Array.isArray(validation[key]) ? 'array' : typeof validation[key]])),
+    orderContract: previewOrderContractEvidence(response, seal.brokerInstruction),
+  };
   if (preview.status !== 'CLEAR') {
     const faultCode = preview.faultCode ?? 'LANE_1_PREVIEW_NOT_CLEAR';
-    const raw = typeof preview.rawResponseBody === 'string' ? preview.rawResponseBody : null;
-    const response = parseObject(raw);
-    const validation = response?.orderValidationResult;
     // Preserve refusal evidence, not the full broker payload or credentials.
-    // Null/missing fields must not be normalized into empty (apparently clear) arrays.
     let receipt;
     try {
       receipt = await recordOperationalProof(env, ownerId, 'LANE_1_ORDER_PREVIEW_REFUSED', {
@@ -131,16 +166,7 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
         replayBody: binding.replayBody, tvBodyBindingSha256: binding.tvBodyBindingSha256,
         requestSha256: preview.requestSha256 ?? null,
         rawResponseSha256: raw === null ? null : await sha256(raw),
-        responseObjectPresent: response !== null,
-        validationPresent: validation !== undefined && validation !== null,
-        rejects: validation?.rejects ?? null,
-        reviews: validation?.reviews ?? null,
-        warns: validation?.warns ?? null,
-        alerts: validation?.alerts ?? null,
-        validationFieldTypes: Object.fromEntries(['rejects', 'reviews', 'warns', 'alerts']
-          .map((key) => [key, validation?.[key] === undefined ? 'missing'
-            : validation[key] === null ? 'null'
-              : Array.isArray(validation[key]) ? 'array' : typeof validation[key]])),
+        ...responseEvidence,
         schwabEndpoint: '/previewOrder', brokerInstruction: seal.brokerInstruction,
         quantity: 1, previewedAt: new Date(instant).toISOString(),
       });
@@ -167,6 +193,7 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
     signal: binding.normalized.signal, brokerInstruction: seal.brokerInstruction,
     quantity: 1, requestSha256: preview.requestSha256,
     rawResponseSha256: preview.rawResponseSha256,
+    ...responseEvidence,
     schwabEndpoint: '/previewOrder', accountMask: preview.accountMask ?? null,
     coordinatorBefore: { armed: before.armed === true, stage: before.stage,
       positionSide: before.positionSide ?? 'FLAT', updatedAt: before.updatedAt ?? null },

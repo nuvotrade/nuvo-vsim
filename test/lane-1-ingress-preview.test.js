@@ -241,8 +241,6 @@ for (const [name, validation, expectedTypes] of [
     { rejects: 'array', reviews: 'array', warns: 'array', alerts: 'array' }],
   ['review', { rejects: [], reviews: [{ message: 'Broker review sentence' }], warns: ['Warning'], alerts: [] },
     { rejects: 'array', reviews: 'array', warns: 'array', alerts: 'array' }],
-  ['missing arrays', { warns: ['Warning only; required arrays absent'] },
-    { rejects: 'missing', reviews: 'missing', warns: 'array', alerts: 'missing' }],
   ['null and malformed arrays', { rejects: null, reviews: 'Not an array' },
     { rejects: 'null', reviews: 'string', warns: 'missing', alerts: 'missing' }],
   ['missing validation', undefined,
@@ -322,4 +320,114 @@ test('warnings alone still clear an exact preview; success does not write a refu
   assert.equal(result.body.armStillDisarmed, true);
   assert.equal(db.rows.filter((row) => row.event_type === 'LANE_1_ORDER_PREVIEW').length, 1);
   assert.equal(db.rows.some((row) => row.event_type === 'LANE_1_ORDER_PREVIEW_REFUSED'), false);
+  const proof = JSON.parse(db.rows[1].detail_json);
+  assert.deepEqual(proof.warns, ['Informational warning']);
+  assert.deepEqual(proof.alerts, ['Informational alert']);
+  assert.deepEqual(proof.orderContract.actual, proof.orderContract.expected);
+});
+
+for (const [name, validation] of [
+  ['both rejects and reviews omitted', { warns: [{ activityMessage: 'Market-order price warning', originalSeverity: 'WARN' }] }],
+  ['only rejects omitted', { reviews: [] }],
+  ['only reviews omitted', { rejects: [] }],
+  ['all optional lists omitted', {}],
+]) {
+  test(`exact preview clears with ${name}; receipt retains omission, warning, and raw hash`, async (t) => {
+    const raw = JSON.stringify({ orderValidationResult: validation,
+      orderStrategy: buildLane1SchwabMarketOrder({ instruction: 'BUY' }),
+      accountNumber: 'PRIVATE-ACCOUNT', access_token: 'PRIVATE-TOKEN', secret: SECRET });
+    const { db, result, binding } = await previewReceiptFixture(t, raw);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.disposition, 'previewed');
+    assert.equal(result.body.armStillDisarmed, true);
+    const proofRows = db.rows.filter((row) => row.event_type === 'LANE_1_ORDER_PREVIEW');
+    assert.equal(proofRows.length, 1);
+    assert.equal(db.rows.some((row) => row.event_type === 'LANE_1_ORDER_PREVIEW_REFUSED'), false);
+    const proof = JSON.parse(proofRows[0].detail_json);
+    assert.equal(proof.sourceIngressId, INGRESS_ID);
+    assert.equal(proof.tvBodyBindingSha256, binding.tvBodyBindingSha256);
+    assert.equal(proof.rawResponseSha256, createHash('sha256').update(raw).digest('hex'));
+    assert.deepEqual(proof.orderContract.actual, proof.orderContract.expected);
+    assert.deepEqual(proof.coordinatorBefore, proof.coordinatorAfter);
+    for (const key of ['rejects', 'reviews', 'warns', 'alerts']) {
+      assert.deepEqual(proof[key], validation[key] ?? null);
+      assert.equal(proof.validationFieldTypes[key], validation[key] === undefined ? 'missing' : 'array');
+    }
+    for (const secret of ['PRIVATE-ACCOUNT', 'PRIVATE-TOKEN', SECRET, 'rawResponseBody']) {
+      assert.equal(proofRows[0].detail_json.includes(secret), false);
+      assert.equal(JSON.stringify(result).includes(secret), false);
+    }
+  });
+}
+
+for (const field of ['rejects', 'reviews', 'warns', 'alerts']) {
+  for (const value of [null, 'not an array', {}, 0, false]) {
+    test(`preview refuses explicit ${field}=${JSON.stringify(value)} instead of treating it as omitted`, async (t) => {
+      const raw = JSON.stringify({ orderValidationResult: { [field]: value },
+        orderStrategy: buildLane1SchwabMarketOrder({ instruction: 'BUY' }) });
+      const { db, result } = await previewReceiptFixture(t, raw);
+      assert.equal(result.status, 422);
+      assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_NOT_CLEAR');
+      assert.equal(db.rows[1].event_type, 'LANE_1_ORDER_PREVIEW_REFUSED');
+      assert.deepEqual(JSON.parse(db.rows[1].detail_json)[field], value);
+    });
+  }
+}
+
+for (const validation of [null, [], 'malformed validation', true, 42]) {
+  test(`preview refuses a non-object validation result ${JSON.stringify(validation)}`, async (t) => {
+    const raw = JSON.stringify({ orderValidationResult: validation,
+      orderStrategy: buildLane1SchwabMarketOrder({ instruction: 'BUY' }) });
+    const { result } = await previewReceiptFixture(t, raw);
+    assert.equal(result.status, 422);
+    assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_NOT_CLEAR');
+  });
+}
+
+for (const field of ['rejects', 'reviews']) {
+  test(`a nonempty ${field} list blocks even when the other list is omitted and severity says WARN`, async (t) => {
+    const note = { activityMessage: 'Not automatically waived', originalSeverity: 'WARN' };
+    const raw = JSON.stringify({ orderValidationResult: { [field]: [note] },
+      orderStrategy: buildLane1SchwabMarketOrder({ instruction: 'BUY' }) });
+    const { db, result } = await previewReceiptFixture(t, raw);
+    assert.equal(result.status, 422);
+    assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_NOT_CLEAR');
+    assert.deepEqual(JSON.parse(db.rows[1].detail_json)[field], [note]);
+  });
+}
+
+for (const [name, mutate, field, actual] of [
+  ['LIMIT order', (o) => { o.orderType = 'LIMIT'; }, 'orderType', 'LIMIT'],
+  ['TRIGGER strategy', (o) => { o.orderStrategyType = 'TRIGGER'; }, 'orderStrategyType', 'TRIGGER'],
+  ['extended session', (o) => { o.session = 'SEAMLESS'; }, 'session', 'SEAMLESS'],
+  ['GTC duration', (o) => { o.duration = 'GOOD_TILL_CANCEL'; }, 'duration', 'GOOD_TILL_CANCEL'],
+  ['second leg', (o) => { o.orderLegCollection.push(structuredClone(o.orderLegCollection[0])); }, 'legCount', 2],
+  ['child order', (o) => { o.childOrderStrategies = [{}]; }, 'childCount', 1],
+  ['SELL instruction', (o) => { o.orderLegCollection[0].instruction = 'SELL'; }, 'instruction', 'SELL'],
+  ['quantity two', (o) => { o.orderLegCollection[0].quantity = 2; }, 'quantity', 2],
+  ['wrong symbol', (o) => { o.orderLegCollection[0].instrument.symbol = 'WRONG'; }, 'symbol', 'WRONG'],
+  ['option asset', (o) => { o.orderLegCollection[0].instrument.assetType = 'OPTION'; }, 'assetType', 'OPTION'],
+  ['missing symbol', (o) => { delete o.orderLegCollection[0].instrument.symbol; }, 'symbol', null],
+]) {
+  test(`omitted lists cannot bypass echoed contract: ${name}; mismatch is retained`, async (t) => {
+    const order = buildLane1SchwabMarketOrder({ instruction: 'BUY' });
+    mutate(order);
+    order.accountNumber = 'PRIVATE-ACCOUNT';
+    const raw = JSON.stringify({ orderValidationResult: {}, orderStrategy: order });
+    const { db, result } = await previewReceiptFixture(t, raw);
+    assert.equal(result.status, 422);
+    assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_CONTRACT_UNVERIFIED');
+    const proof = JSON.parse(db.rows[1].detail_json);
+    assert.equal(proof.orderContract.actual[field], actual);
+    assert.notEqual(proof.orderContract.expected[field], actual);
+    assert.equal(proof.rawResponseSha256, createHash('sha256').update(raw).digest('hex'));
+    assert.equal(db.rows[1].detail_json.includes('PRIVATE-ACCOUNT'), false);
+  });
+}
+
+test('omitted validation lists cannot make a missing echoed order clear', async (t) => {
+  const { db, result } = await previewReceiptFixture(t, JSON.stringify({ orderValidationResult: {} }));
+  assert.equal(result.status, 422);
+  assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_CONTRACT_UNVERIFIED');
+  assert.equal(JSON.parse(db.rows[1].detail_json).orderContract.actual.orderType, null);
 });

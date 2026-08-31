@@ -882,8 +882,13 @@ export class SchwabD1Client {
       rawResponseBody: raw, warnings: [], accountMask: account.accountMask,
       validatedAt: new Date().toISOString() }; }
     const validation = preview?.orderValidationResult;
-    if (!validation || !Array.isArray(validation.rejects) || !Array.isArray(validation.reviews)
-      || validation.rejects.length > 0 || validation.reviews.length > 0) {
+    // Only omission is empty. Explicit null/scalars/objects remain malformed;
+    // any reject or review still blocks, regardless of its message/severity.
+    const listsValid = validation && typeof validation === 'object' && !Array.isArray(validation)
+      && ['rejects', 'reviews', 'warns', 'alerts'].every((key) =>
+        validation[key] === undefined || Array.isArray(validation[key]));
+    if (!listsValid || (validation.rejects?.length ?? 0) > 0
+      || (validation.reviews?.length ?? 0) > 0) {
       return { signal, instruction, status: 'DISABLED', faultCode: `${prefix}_NOT_CLEAR`,
         requestSha256, rawResponseSha256, rawResponseBody: raw, warnings: [],
         accountMask: account.accountMask, validatedAt: new Date().toISOString() };
