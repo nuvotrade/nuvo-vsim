@@ -485,6 +485,16 @@ export class VsimAccountCoordinator extends DurableObject {
 
   async laneV2Status() { return this.#laneV2State(); }
 
+  async laneV2History({ limit = 250 } = {}) {
+    const boundedLimit = Math.min(250, Math.max(1, Number.isSafeInteger(Number(limit))
+      ? Number(limit) : 250));
+    const rows = [...this.sql.exec(`SELECT sequence,event_type,detail_json,created_at FROM (
+      SELECT sequence,event_type,detail_json,created_at FROM lane_1_spy_v2_history
+      ORDER BY sequence DESC LIMIT ?)
+      ORDER BY sequence ASC`, boundedLimit)];
+    return { appendOnly: true, readOnly: true, events: rows };
+  }
+
   #record(cycleId, state, detail) {
     this.sql.exec(
       `INSERT INTO cycle_lock_history (cycle_id, state, detail, updated_at)

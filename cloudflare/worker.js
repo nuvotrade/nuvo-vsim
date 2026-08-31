@@ -44,6 +44,7 @@ import {
   armLane1FromDashboard, handleLane1PreviewRequest, handleLane1TvWebhook,
   handlePrincipalFlatten, lane1Status, latestLane1ReplayIngress, validateLane1V21Market,
 } from './lane-1-runtime.js';
+import { lane1EventLedger } from './lane-1-event-ledger.js';
 import { buildSystemHealth, proofsForWorker } from './system-health.js';
 
 const JSON_HEADERS = Object.freeze({
@@ -2081,6 +2082,18 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
   </section>`;
   const underwrite = `<section class="view" id="underwrite" aria-labelledby="underwrite-title"><div class="page-heading"><div><p class="kicker">One underwriting workspace · read-only</p><h2 id="underwrite-title">Underwrite</h2></div><span class="readonly-tag">NO ORDER ROUTE</span></div><div class="underwrite-tabs" role="tablist" aria-label="Underwriting mode"><button type="button" class="underwrite-tab active" role="tab" aria-selected="true" data-underwrite-mode="scan">Scan opportunities</button><button type="button" class="underwrite-tab" role="tab" aria-selected="false" data-underwrite-mode="manual">Specify manually</button></div><div class="underwrite-pane active" data-underwrite-pane="scan"></div><div class="underwrite-pane" data-underwrite-pane="manual" hidden></div></section>`;
   const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Lifetime results and canonical Schwab ledger drill-down</p><h2 id="performance-title">Performance</h2></div><button type="button" class="as-of history-link" data-jump-system-history>History integrity →</button></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L · Lifetime</span><strong data-vsim="performance-realized">—</strong><small data-vsim="performance-realized-note">Lifetime · matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small data-vsim="performance-unrealized-note">latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small data-vsim="performance-total-note">realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small data-vsim="profit-factor-note">Lifetime · gross wins ÷ gross losses</small></div><div><span>Matched trades</span><strong data-vsim="closed-trades">—</strong><small data-vsim="closed-trades-note">Lifetime ledger denominator</small></div></div><article class="panel pnl-calendar-panel"><div class="panel-head pnl-calendar-head"><div><p class="kicker" data-vsim="pnl-calendar-subtitle">Realized daily P&amp;L · all closed lifecycles · Schwab ledger</p><h3>Realized P&amp;L calendar</h3></div><div class="pnl-calendar-tools"><span data-vsim="pnl-calendar-reconciliation" class="readonly-tag">CHECKING</span><div class="pnl-calendar-nav"><button type="button" aria-label="Previous month" data-pnl-calendar-shift="-1">‹</button><strong data-vsim="pnl-calendar-month">—</strong><button type="button" aria-label="Next month" data-pnl-calendar-shift="1">›</button></div></div></div><div class="pnl-calendar-scopes" role="group" aria-label="Realized P&amp;L strategy scope"><button type="button" class="chip active" data-pnl-calendar-scope="ALL">All strategies</button><button type="button" class="chip" data-pnl-calendar-scope="IN_MANDATE">CC + CSP only</button></div><div class="pnl-calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span></div><div class="pnl-calendar-grid" data-vsim="pnl-calendar-grid"></div><div class="pnl-calendar-footer"><div><span>Profit</span><strong data-vsim="pnl-calendar-profit">—</strong></div><div><span>Loss</span><strong data-vsim="pnl-calendar-loss">—</strong></div><div><span data-vsim="pnl-calendar-net-label">MONTH TOTAL</span><strong data-vsim="pnl-calendar-net">—</strong></div></div><p class="panel-note" data-vsim="pnl-calendar-note">New York market date · NYSE full-day closures · early-close sessions count as trading days.</p></article><article class="panel mandate-panel"><div class="panel-head"><div><p class="kicker">Historical strategy-leg view</p><h3>Mandate lens</h3></div><span class="readonly-tag">DRILL DOWN TO VERIFY STRUCTURES</span></div><div class="desk-metrics mandate-metrics"><div><span>Mandate-compatible legs</span><strong data-vsim="mandate-pnl">—</strong><small data-vsim="mandate-trades">—</small></div><div><span>Compatible profit factor</span><strong data-vsim="mandate-profit-factor">—</strong><small>SHARES · SHORT_CALL · SHORT_PUT</small></div><div><span>Structure review</span><strong data-vsim="review-pnl">—</strong><small data-vsim="review-trades">—</small></div><div><span>Review profit factor</span><strong data-vsim="review-profit-factor">—</strong><small>inspect long legs and futures</small></div></div><p class="panel-note" data-vsim="mandate-note">Historical option legs require ledger review before they can be classified as standalone or part of a spread.</p></article><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles · drag to filter ledger dates</p><h3>Cumulative realized P&amp;L</h3></div><span data-vsim="performance-asof" class="as-of">—</span></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss. Drag horizontally to filter the ledger by date."></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><article class="panel table-panel performance-ledger"><div class="panel-head"><div><p class="kicker">Canonical append-only Schwab ledger</p><h3>Closed trade drill-down</h3></div><span data-vsim="filtered-trade-count" class="count">—</span></div><div class="ledger-filters"><span data-vsim="ledger-filter-summary">All matched trades</span><label>From <input type="date" data-performance-from></label><label>To <input type="date" data-performance-to></label><button type="button" class="chip" data-clear-performance-filter>Clear filters</button></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Strategy</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div><div class="panel-note">Click attribution rows or drag the cumulative curve to filter. Raw broker packets remain protected; this table shows FIFO-matched lifecycles.</div></article><details class="panel broker-activity"><summary>Broker activity · imported orders, executions, cash, assignment and transfer events</summary><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div></details><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
+  const bot = `<section class="view" id="bot" aria-labelledby="bot-title">
+    <div class="page-heading"><div><p class="kicker">LANE_1_SPY · append-only operational evidence</p><h2 id="bot-title">BOT event ledger</h2></div><span class="readonly-tag">PHASE 1 · READ ONLY</span></div>
+    <div class="bot-ledger-counts" aria-label="Lane 1 event counts">
+      <div><span>SIGNAL</span><strong data-vsim="bot-count-signal">0</strong></div>
+      <div><span>REFUSED</span><strong data-vsim="bot-count-refused">0</strong></div>
+      <div><span>PREVIEW</span><strong data-vsim="bot-count-preview">0</strong></div>
+      <div><span>ORDER</span><strong data-vsim="bot-count-order">0</strong><small data-vsim="bot-order-reason">NEVER ARMED</small></div>
+      <div><span>FILL</span><strong data-vsim="bot-count-fill">0</strong><small data-vsim="bot-fill-reason">NEVER ARMED</small></div>
+    </div>
+    <article class="panel bot-ledger-scope"><div><p class="kicker">Bot-only measurement</p><h3>P&amp;L · <span data-vsim="bot-pnl-status">NOT_MEASURED</span></h3><p data-vsim="bot-pnl-reason">No captured Lane 1 fill payloads exist. Phase 1 does not infer pairing or substitute account P&amp;L.</p></div><div><p class="kicker">Round-trip pairing</p><h3 data-vsim="bot-phase2-status">BLOCKED_NO_FILL_PAYLOADS</h3><p data-vsim="bot-phase2-reason">Round-trip pairing starts only after four complete broker fill payloads are captured.</p></div></article>
+    <article class="panel table-panel bot-event-ledger"><div class="panel-head"><div><p class="kicker">Authenticated signals, named refusals, and Schwab previews</p><h3>Chronological Lane 1 events</h3><p class="bot-ledger-source" data-vsim="bot-ledger-source-status">Checking both append-only sources.</p></div><span class="count" data-vsim="bot-event-count">0 events</span></div><div class="table-wrap"><table><thead><tr><th>Timestamp</th><th>Event</th><th>Raw side</th><th>Accepted instruction</th><th>Qty</th><th>Outcome</th><th>Reason code</th><th>Receipt / ingress</th></tr></thead><tbody data-vsim="bot-event-ledger-body"></tbody></table></div><div class="panel-note">Raw side is displayed exactly as stored. A rejected token is never normalized into an accepted instruction. ORDER and FILL remain zero until the existing coordinator history records them.</div></article>
+  </section>`;
   const calculators = `<section class="view" id="calculators" aria-labelledby="calculators-title">
     <div class="page-heading"><div><p class="kicker">Read-only underwriting · no order route</p><h2 id="calculators-title">Options calculators</h2></div></div>
     <div class="calculator-tabs" role="tablist" aria-label="Options calculator type"><button type="button" class="calculator-tab active" role="tab" aria-selected="true" data-calculator="covered-call">Covered calls</button><button type="button" class="calculator-tab" role="tab" aria-selected="false" data-calculator="cash-secured-put">Cash-secured puts</button></div>
@@ -2113,6 +2126,9 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
   const systemHealthStyles = `<style>
     #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-red{color:var(--red)}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
   </style>`;
+  const botLedgerStyles = `<style>
+    .bot-ledger-counts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}.bot-ledger-counts>div{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:#081510}.bot-ledger-counts span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.13em}.bot-ledger-counts strong{display:block;margin-top:8px;font:700 20px/1.2 var(--mono)}.bot-ledger-counts small{display:block;margin-top:5px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em}.bot-ledger-scope{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:12px}.bot-ledger-scope h3,.bot-ledger-scope p{margin:0}.bot-ledger-scope h3{margin-top:5px}.bot-ledger-scope p:last-child{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.5}.bot-event-ledger{margin-top:0}.bot-event-ledger table{min-width:1120px}.bot-event-ledger td{font-family:var(--mono);font-size:9px}.bot-event-ledger .bot-refused{color:var(--red)}.bot-event-ledger .bot-clear{color:var(--green)}.bot-record-link{color:var(--cyan);text-decoration:none}.bot-record-link:hover,.bot-record-link:focus-visible{text-decoration:underline}.bot-raw-side{white-space:pre-wrap}.bot-ledger-source{margin:6px 0 0;color:var(--muted);font:700 8px/1.4 var(--mono)}.bot-ledger-source.source-fault{color:var(--red)}@media(max-width:760px){.bot-ledger-counts{grid-template-columns:repeat(2,1fr)}.bot-ledger-scope{grid-template-columns:1fr}}
+  </style>`;
   const calculatorStyles = `<style>
     .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}
   </style>`;
@@ -2123,12 +2139,12 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
-    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + e3Styles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + botLedgerStyles + e3Styles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
     .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
-    .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button>')
+    .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button><button class="nav-button" data-view="bot">BOT</button>')
     .replace('<button class="nav-button" data-view="system">System</button>', e3Nav + '<button class="nav-button" data-view="system">System</button>')
     .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
-    .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + '\n      <section class="view" id="decisions"')
+    .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + bot + '\n      <section class="view" id="decisions"')
     .replace('</main>', e3View + '</main>')
     .replace('</body>', '<script src="/design/live.js"></script></body>');
 }
@@ -3469,6 +3485,69 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       make('p', 'Append-only Schwab order, execution, cash, assignment, exercise, and transfer events. Raw broker packets remain protected.', 'connector-note'));
   }
 
+  function renderLane1EventLedger(ledger) {
+    if (!ledger) return;
+    const counts = ledger.counts || {};
+    ['signal','refused','preview','order','fill'].forEach(kind => {
+      const value = counts[kind.toUpperCase()];
+      text(q('[data-vsim="bot-count-' + kind + '"]'), value === null || value === undefined
+        ? 'SOURCE_FAULT' : number(value));
+    });
+    text(q('[data-vsim="bot-order-reason"]'), ledger.zeroReasons?.ORDER === 'NEVER_ARMED'
+      ? 'NEVER ARMED' : counts.ORDER === null ? 'SOURCE FAULT' : 'RECORDED');
+    text(q('[data-vsim="bot-fill-reason"]'), ledger.zeroReasons?.FILL === 'NEVER_ARMED'
+      ? 'NEVER ARMED' : counts.FILL === null ? 'SOURCE FAULT' : 'RECORDED');
+    const sourceNode = q('[data-vsim="bot-ledger-source-status"]');
+    text(sourceNode, ledger.availability === 'COMPLETE'
+      ? 'LIVE STORE · operational audit + coordinator history'
+      : 'SOURCE FAULT · ' + (ledger.sourceErrors || []).join(' · '));
+    if (sourceNode) sourceNode.classList.toggle('source-fault', ledger.availability !== 'COMPLETE');
+    text(q('[data-vsim="bot-pnl-status"]'), ledger.pnl?.status || 'NOT_MEASURED');
+    text(q('[data-vsim="bot-pnl-reason"]'), ledger.pnl?.reason || 'Bot P&L is not measured.');
+    text(q('[data-vsim="bot-phase2-status"]'), ledger.phase2?.status || 'BLOCKED_NO_FILL_PAYLOADS');
+    text(q('[data-vsim="bot-phase2-reason"]'), ledger.phase2?.reason || 'Captured fills are required.');
+    const events = Array.isArray(ledger.events) ? ledger.events : [];
+    text(q('[data-vsim="bot-event-count"]'), events.length + (events.length === 1 ? ' event' : ' events'));
+    const tbody = q('[data-vsim="bot-event-ledger-body"]');
+    clear(tbody);
+    if (!tbody) return;
+    if (!events.length) {
+      const row = make('tr'); const cell = make('td', ledger.availability === 'COMPLETE'
+        ? 'No Lane 1 bot events.' : 'Lane 1 event source unavailable; empty state is not asserted.');
+      cell.colSpan = 8; cell.className = 'muted'; row.append(cell); tbody.append(row); return;
+    }
+    events.forEach(event => {
+      const row = make('tr');
+      if (event.recordId) row.id = 'lane1-event-' + event.recordId;
+      const raw = event.rawSide === null || event.rawSide === undefined ? 'NOT_RECORDED'
+        : typeof event.rawSide === 'string' ? event.rawSide : String(event.rawSide);
+      const values = [when(event.timestamp), event.event || '—', raw,
+        event.instruction ?? 'null', event.quantity ?? '—', event.outcome || '—',
+        event.reasonCode || '—'];
+      values.forEach((value, index) => {
+        const cell = make('td', String(value));
+        if (index === 2) cell.className = 'bot-raw-side';
+        if (index === 5) cell.className = event.outcome === 'REFUSED'
+          || event.outcome === 'CONTRACT_REFUSED' ? 'bot-refused' : 'bot-clear';
+        row.append(cell);
+      });
+      const recordCell = make('td');
+      const link = make('a', event.recordId || '—', 'bot-record-link');
+      link.href = event.recordHref || '#'; link.title = event.recordId || '';
+      recordCell.append(link); row.append(recordCell); tbody.append(row);
+    });
+  }
+
+  async function pollLane1EventLedger() {
+    if (document.visibilityState !== 'visible') return;
+    try { renderLane1EventLedger(await api('/api/lane-1-spy/ledger?limit=250')); }
+    catch (error) {
+      const sourceNode = q('[data-vsim="bot-ledger-source-status"]');
+      text(sourceNode, 'SOURCE FAULT · ' + error.message + ' · prior rows retained');
+      if (sourceNode) sourceNode.classList.add('source-fault');
+    }
+  }
+
   function setLaneState(armed) {
     const node = q('[data-e3="lane-state"]');
     if (!node) return;
@@ -3535,14 +3614,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   let currentStatus = null;
   async function refresh() {
     const requests = [api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
-      api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope))];
+      api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope)),
+      api('/api/lane-1-spy/ledger?limit=250')];
     if (E3_SPINE_ENABLED) requests.push(api('/api/e3-spine'));
     const payloads = await Promise.all(requests);
     currentStatus = payloads[0];
     performanceState.calendar = payloads[5];
     renderOverview(currentStatus, payloads[3]); renderOpportunities(currentStatus); renderSystem(currentStatus, payloads[4]); await renderEvidence(currentStatus);
     renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3], payloads[4]); renderBrokerActivity(payloads[4], payloads[2]); renderPerformance(payloads[4], payloads[3]);
-    if (E3_SPINE_ENABLED) renderE3Spine(payloads[6]);
+    renderLane1EventLedger(payloads[6]);
+    if (E3_SPINE_ENABLED) renderE3Spine(payloads[7]);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
     const market = currentStatus.marketCheck;
@@ -3690,6 +3771,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     qa('.metric-value').forEach(node => text(node, 'UNAVAILABLE'));
     qa('tbody').forEach(clear);
   }).finally(() => document.body.classList.add('live-ready'));
+  window.setInterval(pollLane1EventLedger, 5_000);
 })();`;
 }
 
@@ -3756,6 +3838,11 @@ async function route(request, env, ctx) {
       latestLane1ReplayIngress(env, owner.id),
     ]);
     return json(buildE3SpineTab({ cycleSnapshot, laneUnit, lanePreviewSource }));
+  }
+  if (url.pathname === '/api/lane-1-spy/ledger' && request.method === 'GET') {
+    return json(await lane1EventLedger(env, owner.id, {
+      limit: Number(url.searchParams.get('limit') ?? 250),
+    }));
   }
   if (url.pathname === '/api/lane-1-spy/disarm' && request.method === 'POST') {
     const result = await disarmLane1FromDashboard({ env, ownerId: owner.id });

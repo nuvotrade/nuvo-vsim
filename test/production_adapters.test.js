@@ -45,7 +45,7 @@ describe('protected live dashboard', () => {
     const dashboard = await fullDashboard();
     const html = await dashboard.text();
     assert.match(html, /NUVO VSIM v5 — Live Shadow/u);
-    for (const view of ['overview', 'underwrite', 'performance', 'decisions', 'system']) {
+    for (const view of ['overview', 'underwrite', 'performance', 'decisions', 'bot', 'system']) {
       assert.match(html, new RegExp(`data-view="${view}"`, 'u'));
     }
     assert.equal(await (await designAsset('styles.css')).text(), BUNDLED_DESIGN_STYLES);
