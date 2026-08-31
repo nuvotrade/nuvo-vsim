@@ -2082,6 +2082,17 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
   </section>`;
   const underwrite = `<section class="view" id="underwrite" aria-labelledby="underwrite-title"><div class="page-heading"><div><p class="kicker">One underwriting workspace · read-only</p><h2 id="underwrite-title">Underwrite</h2></div><span class="readonly-tag">NO ORDER ROUTE</span></div><div class="underwrite-tabs" role="tablist" aria-label="Underwriting mode"><button type="button" class="underwrite-tab active" role="tab" aria-selected="true" data-underwrite-mode="scan">Scan opportunities</button><button type="button" class="underwrite-tab" role="tab" aria-selected="false" data-underwrite-mode="manual">Specify manually</button></div><div class="underwrite-pane active" data-underwrite-pane="scan"></div><div class="underwrite-pane" data-underwrite-pane="manual" hidden></div></section>`;
   const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Lifetime results and canonical Schwab ledger drill-down</p><h2 id="performance-title">Performance</h2></div><button type="button" class="as-of history-link" data-jump-system-history>History integrity →</button></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L · Lifetime</span><strong data-vsim="performance-realized">—</strong><small data-vsim="performance-realized-note">Lifetime · matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small data-vsim="performance-unrealized-note">latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small data-vsim="performance-total-note">realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small data-vsim="profit-factor-note">Lifetime · gross wins ÷ gross losses</small></div><div><span>Matched trades</span><strong data-vsim="closed-trades">—</strong><small data-vsim="closed-trades-note">Lifetime ledger denominator</small></div></div><article class="panel pnl-calendar-panel"><div class="panel-head pnl-calendar-head"><div><p class="kicker" data-vsim="pnl-calendar-subtitle">Realized daily P&amp;L · all closed lifecycles · Schwab ledger</p><h3>Realized P&amp;L calendar</h3></div><div class="pnl-calendar-tools"><span data-vsim="pnl-calendar-reconciliation" class="readonly-tag">CHECKING</span><div class="pnl-calendar-nav"><button type="button" aria-label="Previous month" data-pnl-calendar-shift="-1">‹</button><strong data-vsim="pnl-calendar-month">—</strong><button type="button" aria-label="Next month" data-pnl-calendar-shift="1">›</button></div></div></div><div class="pnl-calendar-scopes" role="group" aria-label="Realized P&amp;L strategy scope"><button type="button" class="chip active" data-pnl-calendar-scope="ALL">All strategies</button><button type="button" class="chip" data-pnl-calendar-scope="IN_MANDATE">CC + CSP only</button></div><div class="pnl-calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span></div><div class="pnl-calendar-grid" data-vsim="pnl-calendar-grid"></div><div class="pnl-calendar-footer"><div><span>Profit</span><strong data-vsim="pnl-calendar-profit">—</strong></div><div><span>Loss</span><strong data-vsim="pnl-calendar-loss">—</strong></div><div><span data-vsim="pnl-calendar-net-label">MONTH TOTAL</span><strong data-vsim="pnl-calendar-net">—</strong></div></div><p class="panel-note" data-vsim="pnl-calendar-note">New York market date · NYSE full-day closures · early-close sessions count as trading days.</p></article><article class="panel mandate-panel"><div class="panel-head"><div><p class="kicker">Historical strategy-leg view</p><h3>Mandate lens</h3></div><span class="readonly-tag">DRILL DOWN TO VERIFY STRUCTURES</span></div><div class="desk-metrics mandate-metrics"><div><span>Mandate-compatible legs</span><strong data-vsim="mandate-pnl">—</strong><small data-vsim="mandate-trades">—</small></div><div><span>Compatible profit factor</span><strong data-vsim="mandate-profit-factor">—</strong><small>SHARES · SHORT_CALL · SHORT_PUT</small></div><div><span>Structure review</span><strong data-vsim="review-pnl">—</strong><small data-vsim="review-trades">—</small></div><div><span>Review profit factor</span><strong data-vsim="review-profit-factor">—</strong><small>inspect long legs and futures</small></div></div><p class="panel-note" data-vsim="mandate-note">Historical option legs require ledger review before they can be classified as standalone or part of a spread.</p></article><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles · drag to filter ledger dates</p><h3>Cumulative realized P&amp;L</h3></div><span data-vsim="performance-asof" class="as-of">—</span></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss. Drag horizontally to filter the ledger by date."></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><article class="panel table-panel performance-ledger"><div class="panel-head"><div><p class="kicker">Canonical append-only Schwab ledger</p><h3>Closed trade drill-down</h3></div><span data-vsim="filtered-trade-count" class="count">—</span></div><div class="ledger-filters"><span data-vsim="ledger-filter-summary">All matched trades</span><label>From <input type="date" data-performance-from></label><label>To <input type="date" data-performance-to></label><button type="button" class="chip" data-clear-performance-filter>Clear filters</button></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Strategy</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div><div class="panel-note">Click attribution rows or drag the cumulative curve to filter. Raw broker packets remain protected; this table shows FIFO-matched lifecycles.</div></article><details class="panel broker-activity"><summary>Broker activity · imported orders, executions, cash, assignment and transfer events</summary><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div></details><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
+  const readinessScorecard = `<article class="panel scorecard"><div class="panel-head"><div><p class="kicker">Five scoreboards</p><h3>Readiness</h3></div><strong class="readiness">1 / 5</strong></div>
+            <div class="score-rows"><div><span>Economic</span><i></i><small>Awaiting data</small></div><div><span>Calibration</span><i></i><small>Awaiting data</small></div><div><span>Execution</span><i></i><small>Not connected</small></div><div class="ready"><span>Constitution</span><i></i><small>Clean</small></div><div><span>Survival</span><i></i><small>Awaiting data</small></div></div>
+          </article>`;
+  const laneSummaryCard = `<article class="panel lane-summary-card" aria-labelledby="lane-summary-title"><div class="panel-head"><div><p class="kicker">LANE_1 · SPY 1 SHARE</p><h3 id="lane-summary-title">BOT summary</h3></div><strong class="lane-summary-arm" data-vsim="lane-summary-arm">—</strong></div>
+    <div class="lane-summary-facts"><div><span>Position</span><strong data-vsim="lane-summary-position">—</strong></div><div><span>Fills</span><strong data-vsim="lane-summary-fills">0 of 4</strong></div></div>
+    <div class="lane-summary-matrix" role="table" aria-label="Lane 1 evidence by instruction"><div class="lane-summary-matrix-head" role="row"><span role="columnheader">Instruction</span><span role="columnheader">Alert</span><span role="columnheader">Preview</span><span role="columnheader">Fill</span></div><div data-vsim="lane-summary-matrix-body"></div></div>
+    <div class="lane-summary-last"><span>Last signal</span><strong data-vsim="lane-summary-last">—</strong></div>
+    <div class="lane-summary-today"><span>Today</span><strong data-vsim="lane-summary-today">— realized · — open</strong></div>
+    <div class="lane-summary-block"><span>Blocking</span><strong data-vsim="lane-summary-blocking">—</strong></div>
+    <details class="lane-summary-details"><summary>Evidence and measurement notes</summary><div data-vsim="lane-summary-details">Checking D1 and ACCOUNT_COORDINATOR.</div></details>
+    <p class="lane-summary-source" data-vsim="lane-summary-source">Checking live stores.</p></article>`;
   const bot = `<section class="view" id="bot" aria-labelledby="bot-title">
     <div class="page-heading"><div><p class="kicker">LANE_1_SPY · append-only operational evidence</p><h2 id="bot-title">BOT event ledger</h2></div><span class="readonly-tag">PHASE 1 · READ ONLY</span></div>
     <div class="bot-ledger-counts" aria-label="Lane 1 event counts">
@@ -2124,10 +2135,13 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}#overview .system-brief .health-list li{align-items:center;gap:10px;padding:8px 0}#overview .system-brief .health-label{display:grid;grid-template-columns:10px 1fr;align-items:center;min-width:0}#overview .system-brief .health-label small{grid-column:2;color:var(--muted);font-size:7px;margin-top:2px;font-family:ui-monospace,monospace}#overview .system-brief .health-value{text-align:right;font-size:8px}#overview .system-brief .health-green{background:var(--green);box-shadow:0 0 6px rgba(96,226,168,.6)}#overview .system-brief .health-red{background:var(--red);box-shadow:0 0 6px rgba(242,118,118,.45)}#overview .system-brief .health-amber{background:var(--amber)}#overview .system-brief .health-tape{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font:8px/1.45 ui-monospace,monospace;white-space:normal}#overview .system-brief .tv-live-widget{margin-top:8px;min-height:44px;overflow:hidden;border:1px solid var(--line);border-radius:5px;background:#07110e}#overview .system-brief .tv-live-widget .tv-placeholder{padding:13px;color:var(--red);font:8px ui-monospace,monospace}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
   </style>`;
   const systemHealthStyles = `<style>
-    #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-red{color:var(--red)}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
+    #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-red{color:var(--red)}.system-neutral{color:var(--muted)}.system-neutral .health-light{box-shadow:none}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
   </style>`;
   const botLedgerStyles = `<style>
-    .bot-ledger-counts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}.bot-ledger-counts>div{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:#081510}.bot-ledger-counts span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.13em}.bot-ledger-counts strong{display:block;margin-top:8px;font:700 20px/1.2 var(--mono)}.bot-ledger-counts small{display:block;margin-top:5px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em}.bot-ledger-scope{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:12px}.bot-ledger-scope h3,.bot-ledger-scope p{margin:0}.bot-ledger-scope h3{margin-top:5px}.bot-ledger-scope p:last-child{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.5}.bot-event-ledger{margin-top:0}.bot-event-ledger table{min-width:1120px}.bot-event-ledger td{font-family:var(--mono);font-size:9px}.bot-event-ledger .bot-refused{color:var(--red)}.bot-event-ledger .bot-clear{color:var(--green)}.bot-record-link{color:var(--cyan);text-decoration:none}.bot-record-link:hover,.bot-record-link:focus-visible{text-decoration:underline}.bot-raw-side{white-space:pre-wrap}.bot-ledger-source{margin:6px 0 0;color:var(--muted);font:700 8px/1.4 var(--mono)}.bot-ledger-source.source-fault{color:var(--red)}@media(max-width:760px){.bot-ledger-counts{grid-template-columns:repeat(2,1fr)}.bot-ledger-scope{grid-template-columns:1fr}}
+    .bot-ledger-counts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}.bot-ledger-counts>div{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:#081510}.bot-ledger-counts span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.13em}.bot-ledger-counts strong{display:block;margin-top:8px;font:700 20px/1.2 var(--mono)}.bot-ledger-counts small{display:block;margin-top:5px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em}.bot-ledger-scope{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:12px}.bot-ledger-scope h3,.bot-ledger-scope p{margin:0}.bot-ledger-scope h3{margin-top:5px}.bot-ledger-scope p:last-child{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.5}.bot-event-ledger{margin-top:0}.bot-event-ledger table{min-width:1120px}.bot-event-ledger td{font-family:var(--mono);font-size:9px}.bot-event-ledger .bot-refused{color:var(--red)}.bot-event-ledger .bot-clear{color:var(--green)}.bot-record-link{color:var(--cyan);text-decoration:none}.bot-record-link:hover,.bot-record-link:focus-visible{text-decoration:underline}.bot-raw-side{white-space:pre-wrap}.bot-ledger-source{margin:6px 0 0;color:var(--muted);font:700 8px/1.4 var(--mono)}.bot-ledger-source.source-fault{color:var(--red)}
+    .lane-summary-card{min-width:0}.lane-summary-arm{padding:5px 8px;border:1px solid currentColor;border-radius:4px;color:var(--muted);font:800 8px/1 var(--mono);letter-spacing:.08em}.lane-summary-arm[data-state="on"]{color:var(--green)}.lane-summary-facts{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-facts>div{padding:9px 10px;min-width:0;border-right:1px solid var(--line)}.lane-summary-facts>div:last-child{border-right:0}.lane-summary-facts span,.lane-summary-block span,.lane-summary-last span,.lane-summary-today span{display:block;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{display:block;margin-top:5px;font:700 10px/1.3 var(--mono);overflow-wrap:anywhere}
+    .lane-summary-matrix{margin-top:10px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-matrix-head,.lane-summary-matrix-row{display:grid;grid-template-columns:minmax(82px,1.35fr) .5fr .8fr .36fr;align-items:center}.lane-summary-matrix-head{background:#07110e;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{min-width:0;padding:6px 5px;border-right:1px solid var(--line)}.lane-summary-matrix-head span:last-child,.lane-summary-matrix-row>div:last-child{border-right:0}.lane-summary-matrix-row{border-top:1px solid var(--line);font:700 7px/1.2 var(--mono)}.lane-summary-matrix-row>div:first-child{color:var(--text);white-space:nowrap}.lane-summary-matrix-row>div[data-evidence]{text-align:center}.lane-summary-matrix-row small{display:none}.lane-summary-matrix .clear{color:var(--green)}.lane-summary-matrix .refused{color:var(--amber)}.lane-summary-matrix .unmeasured{color:var(--muted)}
+    .lane-summary-last,.lane-summary-today,.lane-summary-block{margin-top:9px;padding-top:8px;border-top:1px solid var(--line)}.lane-summary-block strong{display:block;margin-top:5px;color:var(--amber);font:800 9px/1.3 var(--mono)}.lane-summary-details{margin-top:9px;border-top:1px solid var(--line);color:var(--muted);font:7px/1.45 var(--mono)}.lane-summary-details summary{padding:8px 0 3px;cursor:pointer;text-transform:uppercase;letter-spacing:.08em}.lane-summary-details div{padding:4px 0;white-space:pre-line}.lane-summary-source{margin:6px 0 0;color:var(--muted);font:7px/1.35 var(--mono)}@media(max-width:760px){.bot-ledger-counts{grid-template-columns:repeat(2,1fr)}.bot-ledger-scope{grid-template-columns:1fr}}
   </style>`;
   const calculatorStyles = `<style>
     .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}
@@ -2143,6 +2157,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
     .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button><button class="nav-button" data-view="bot">BOT</button>')
     .replace('<button class="nav-button" data-view="system">System</button>', e3Nav + '<button class="nav-button" data-view="system">System</button>')
+    .replace(readinessScorecard, laneSummaryCard)
     .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
     .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + bot + '\n      <section class="view" id="decisions"')
     .replace('</main>', e3View + '</main>')
@@ -3322,11 +3337,19 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       const head = make('div', undefined, 'panel-head system-health-head');
       const title = make('div');
       title.append(make('p', 'Operational integrity', 'kicker'), make('h3', 'System'));
-      const overall = make('strong', model.status, 'system-overall system-' + String(model.color).toLowerCase());
+      const intendedBotOff = model.rows.some(entry => entry.label === 'BOT' && entry.status === 'OFF');
+      const actionable = model.rows.some(entry => entry.color === 'RED'
+        && !(entry.label === 'BOT' && entry.status === 'OFF'));
+      const overallText = actionable ? 'ACTION REQUIRED'
+        : intendedBotOff ? 'SYSTEMS LIVE · BOT OFF' : model.status;
+      const overall = make('strong', overallText,
+        'system-overall system-' + (actionable ? 'red' : 'green'));
       head.append(title, overall);
       const grid = make('div', undefined, 'system-health-grid');
       model.rows.forEach(entry => {
-        const tile = make('div', undefined, 'system-health-tile system-' + String(entry.color).toLowerCase());
+        const displayColor = entry.label === 'BOT' && entry.status === 'OFF'
+          ? 'neutral' : String(entry.color).toLowerCase();
+        const tile = make('div', undefined, 'system-health-tile system-' + displayColor);
         const name = make('span', entry.label);
         const state = make('strong');
         state.append(make('i', undefined, 'health-light'), document.createTextNode(entry.status));
@@ -3350,9 +3373,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         + ' · Market v' + String(versions.market || 'unknown').slice(0, 12)
         + ' · Checked ' + (model.checkedAt ? when(model.checkedAt) : 'not yet'), 'system-health-meta');
       systemCard.append(head, grid, details, footer);
-      text(q('#overview .readiness'), '1 / 5');
-      const scoreNotes = qa('#overview .scorecard .score-rows small');
-      ['Collecting shadow outcomes','Uncalibrated · non-blocking','Mutation intentionally disabled','Clean','Collecting survival evidence'].forEach((value, index) => text(scoreNotes[index], value));
     }
   }
 
@@ -3485,8 +3505,79 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       make('p', 'Append-only Schwab order, execution, cash, assignment, exercise, and transfer events. Raw broker packets remain protected.', 'connector-note'));
   }
 
+  function renderLane1SummaryCard(ledger) {
+    const summary = ledger && ledger.summary;
+    if (!summary) return;
+    const arm = q('[data-vsim="lane-summary-arm"]');
+    const armStage = summary.arm?.stage || (summary.arm?.value === 'OFF' ? 'DISARMED' : null);
+    const intendedArmOff = summary.arm?.value === 'OFF' && summary.blocking === 'ARM_OFF · INTENDED';
+    text(arm, armStage ? armStage + (intendedArmOff ? ' · intended' : '') : '—');
+    if (arm) arm.dataset.state = String(summary.arm?.value || '').toLowerCase();
+    text(q('[data-vsim="lane-summary-position"]'), summary.position?.value === 'NOT_MEASURED'
+      ? '—' : (summary.position?.value || '—'));
+    text(q('[data-vsim="lane-summary-fills"]'), number(summary.fills?.provenInstructions || 0)
+      + ' of ' + number(summary.fills?.targetInstructions || 4));
+    const realized = summary.pnl?.realizedToday || {};
+    const openPnl = summary.pnl?.open || {};
+    const realizedText = Number.isSafeInteger(realized.valueCents)
+      ? moneyExact(realized.valueCents / 100) : '—';
+    const openText = Number.isSafeInteger(openPnl.valueCents)
+      ? moneyExact(openPnl.valueCents / 100) : '—';
+    text(q('[data-vsim="lane-summary-today"]'), realizedText + ' realized · ' + openText + ' open');
+    const body = q('[data-vsim="lane-summary-matrix-body"]'); clear(body);
+    if (body) ['BUY','SELL','SELL_SHORT','BUY_TO_COVER'].forEach(instruction => {
+      const evidence = summary.matrix?.[instruction] || {};
+      const row = make('div', undefined, 'lane-summary-matrix-row');
+      row.setAttribute('role', 'row');
+      row.append(make('div', instruction));
+      [['alert', evidence.alert], ['preview', evidence.preview], ['fill', evidence.fill]]
+        .forEach(([kind, item = {}]) => {
+          const status = item.status || 'NOT_MEASURED';
+          const compact = kind === 'alert' ? status === 'CONFIRMED' ? '✓' : '—'
+            : kind === 'preview' ? status.includes('CLEAR') ? 'clear'
+              : status.includes('REFUSED_NO_POSITION') ? 'no pos'
+                : status.includes('REFUSED') ? 'refused' : '—'
+              : status === 'FILLED' ? '1' : '—';
+          const className = compact === '✓' || compact === 'clear' || compact === '1'
+            ? 'clear' : compact === 'no pos' || compact === 'refused' ? 'refused' : 'unmeasured';
+          const cell = make('div', undefined, className); cell.dataset.evidence = kind;
+          cell.append(make('strong', compact));
+          row.append(cell);
+        });
+      body.append(row);
+    });
+    text(q('[data-vsim="lane-summary-blocking"]'), intendedArmOff ? 'none' : (summary.blocking || 'none'));
+    const last = summary.lastSignal || {};
+    text(q('[data-vsim="lane-summary-last"]'), last.timestamp
+      ? when(last.timestamp) + ' · ' + (last.instruction || '—') + ' · '
+        + (last.outcome === 'PREVIEW · CLEAR' ? 'previewed'
+          : last.outcome === 'PREVIEW · REFUSED_NO_POSITION' ? 'preview no pos'
+            : String(last.outcome || 'recorded').toLowerCase().replaceAll('_', ' ')) : '—');
+    const notes = ['Alerts: PRINCIPAL_CONFIRMED · SPY 5m; checkmarks are configuration, not runtime proof.',
+      'Previews: ' + ['BUY','SELL','SELL_SHORT','BUY_TO_COVER'].map(instruction => {
+        const item = summary.matrix?.[instruction]?.preview || {};
+        return instruction + '=' + (item.status || 'NOT_MEASURED')
+          + (item.receiptId ? ' (' + item.receiptId + ')' : '');
+      }).join(' · '),
+      'Fills: ACCOUNT_COORDINATOR history · ' + number(summary.fills?.today || 0)
+        + ' today · ' + number(summary.fills?.total || 0) + ' total.',
+      'Broker reconciliation: NOT_MEASURED · '
+        + (summary.brokerReconciliation?.reason || 'source unavailable') + '.',
+      'POSITION_DRIFT: ' + (summary.brokerReconciliation?.positionDrift || 'NOT_MEASURED') + '.',
+      'Realized: ' + (realized.reason || realized.source || 'NOT_MEASURED') + '.',
+      'Open: ' + (openPnl.reason || openPnl.source || 'NOT_MEASURED') + '.',
+      'Aggregate: ' + (summary.pnl?.aggregate?.reason || 'NOT_MEASURED') + '.'];
+    text(q('[data-vsim="lane-summary-details"]'), notes.join('\\n'));
+    const source = q('[data-vsim="lane-summary-source"]');
+    text(source, ledger.availability === 'COMPLETE'
+      ? 'LIVE STORE · D1 operational audit + ACCOUNT_COORDINATOR history/state'
+      : 'SOURCE FAULT · prior card values retained where available');
+    if (source) source.classList.toggle('source-fault', ledger.availability !== 'COMPLETE');
+  }
+
   function renderLane1EventLedger(ledger) {
     if (!ledger) return;
+    renderLane1SummaryCard(ledger);
     const counts = ledger.counts || {};
     ['signal','refused','preview','order','fill'].forEach(kind => {
       const value = counts[kind.toUpperCase()];
@@ -3545,6 +3636,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       const sourceNode = q('[data-vsim="bot-ledger-source-status"]');
       text(sourceNode, 'SOURCE FAULT · ' + error.message + ' · prior rows retained');
       if (sourceNode) sourceNode.classList.add('source-fault');
+      const summarySource = q('[data-vsim="lane-summary-source"]');
+      text(summarySource, 'SOURCE FAULT · ' + error.message + ' · prior card values retained');
+      if (summarySource) summarySource.classList.add('source-fault');
     }
   }
 
