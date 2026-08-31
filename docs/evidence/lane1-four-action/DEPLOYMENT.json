@@ -1,0 +1,55 @@
+{
+  "recordedAt": "2026-08-31T21:16:18Z",
+  "worker": "nuvo-vsim-v5-shadow",
+  "runtimeSourceGit": "ffe157a0c0e23fbd43078a64d613e4fd82e445e8",
+  "packetGit": "0984db06d940cff76b514089a38318e5582c98d9",
+  "bundleSha256": "b5dce61b1a129a8843f1b5392036e8cd241602b56cd9661830b3494bc9090e86",
+  "bundleBytes": 1984156,
+  "predecessor": "42a4f738-5e2e-4e69-8c91-c451a609b3a7",
+  "candidate": "2376a4a9-6ca4-4943-8e28-a15294bf68e3",
+  "deploymentId": "7c0cb12a-db26-4953-961b-2daf2ef37d46",
+  "trafficPercent": 100,
+  "bindingComparison": {
+    "count": 49,
+    "bindingsIdentical": true,
+    "runtimeIdentical": true,
+    "secretValuesRead": false,
+    "environmentArm": "OFF"
+  },
+  "d1AliasInventory": {
+    "queriedAt": "2026-08-31T21:11:40.555Z",
+    "field": "detail_json.replayBody.side",
+    "exactTokens": ["LONG", "SHORT", "EXIT"],
+    "totalIngressRows": 3,
+    "malformedIngressJsonRows": 0,
+    "affectedCount": 0,
+    "ids": [],
+    "firstCreatedAt": null,
+    "lastCreatedAt": null,
+    "rowsWritten": 0
+  },
+  "brokerPosition": {
+    "source": "authenticated Schwab Positions UI",
+    "accountMask": "315",
+    "brokerUpdatedAt": "2026-08-31T17:11:47-04:00",
+    "spyLongQuantity": 0,
+    "spyShortQuantity": 0,
+    "positionSide": "FLAT",
+    "proofClass": "BROKER_UI_OBSERVED",
+    "principalAssertionAlsoRecorded": true
+  },
+  "dashboard": {
+    "before": {"observedAt":"2026-08-31T21:14:38.183Z","state":"DISARMED"},
+    "after": {"observedAt":"2026-08-31T21:15:29.807Z","state":"DISARMED","footerVersion":"2376a4a9-6ca"},
+    "selectedIngressId": "de0d86ad-68a2-4263-96e8-2d5e4473dda5",
+    "validatePressed": false
+  },
+  "externalActions": {
+    "webhookSent": false,
+    "previewInvoked": false,
+    "ordersCalled": false,
+    "armChanged": false,
+    "alertsChanged": false
+  },
+  "rollbackVersion": "42a4f738-5e2e-4e69-8c91-c451a609b3a7"
+}
