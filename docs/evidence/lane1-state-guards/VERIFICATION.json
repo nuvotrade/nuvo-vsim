@@ -1,0 +1,354 @@
+{
+  "scope": "LOCAL_ONLY; synthetic broker state; no live requests",
+  "sourceGit": "198a9db26b92ad8c22bf0f7b6f9dfd25ee0798f4",
+  "baseGit": "ed08909f3b3cdab2404a790d2a2a777e1b9d8afb",
+  "baseline": {
+    "tests": 573,
+    "pass": 573,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "candidate": {
+    "tests": 642,
+    "pass": 642,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "addedTests": [
+    "dispatch recheck: synthetic BUY rereads both endpoints and coordinator before one fake POST",
+    "dispatch recheck: synthetic SELL rereads both endpoints and coordinator before one fake POST",
+    "dispatch recheck: synthetic SELL_SHORT rereads both endpoints and coordinator before one fake POST",
+    "dispatch recheck: synthetic BUY_TO_COVER rereads both endpoints and coordinator before one fake POST",
+    "dispatch recheck: position changes after initial read => exact refusal and zero POST",
+    "dispatch recheck: positions disappear after initial read => exact refusal and zero POST",
+    "dispatch recheck: working order appears after initial read => exact refusal and zero POST",
+    "dispatch recheck: pending cancellation is still a working order => exact refusal and zero POST",
+    "dispatch recheck: filled external round trip leaves FLAT but changes order history => exact refusal and zero POST",
+    "dispatch recheck: malformed order body => exact refusal and zero POST",
+    "dispatch recheck: unknown order status => exact refusal and zero POST",
+    "dispatch recheck: account switches during credential selection => exact refusal and zero POST",
+    "dispatch recheck: Principal disarms during broker reads => exact refusal and zero POST",
+    "dispatch recheck: coordinator position changes => exact refusal and zero POST",
+    "dispatch recheck: claim belongs to another signal => exact refusal and zero POST",
+    "dispatch recheck: ARM expires during broker reads => exact refusal and zero POST",
+    "dispatch recheck: position endpoint fails => exact refusal and zero POST",
+    "dispatch recheck: orders endpoint fails => exact refusal and zero POST",
+    "dispatch recheck: partial HTTP 206 list => exact refusal and zero POST",
+    "dispatch recheck: pagination Link header => exact refusal and zero POST",
+    "dispatch recheck: total count exceeds returned rows => exact refusal and zero POST",
+    "dispatch recheck: truncation header => exact refusal and zero POST",
+    "dispatch recheck: 3000-row response cap => exact refusal and zero POST",
+    "dispatch recheck: missing baseline or final coordinator reader refuses before network",
+    "dispatch recheck: original position reader also rejects missing positions",
+    "production runtime wiring carries snapshot and claim identity through to the final recheck",
+    "state guard: missing positions never means FLAT",
+    "state guard: missing symbol cannot hide a SPY position",
+    "state guard: missing and nonnumeric long/short quantities refuse without coercion",
+    "state guard: gross and fractional exposure cannot net to an allowed position",
+    "state guard: known coordinator/broker disagreement refuses",
+    "state guard: unknown coordinator or internally inconsistent broker projection refuses",
+    "state guard: instruction quantity is numeric one only",
+    "state guard: aliases and unknown instructions are not accepted by the internal state machine",
+    "state guard: working and pending SPY orders block",
+    "state guard: unknown working-order result/status/leg refuses",
+    "state guard: SPY in a second leg or child of a terminal parent cannot be skipped",
+    "state guard: capped order result is not proof of no working orders",
+    "state guard: final account or position change refuses",
+    "state guard: changed terminal order history or query window refuses even while flat",
+    "state guard: slow future or invalid final reads refuse",
+    "state guard: final DISARM wins over an earlier armed snapshot",
+    "state guard: expired or missing final ARM window refuses",
+    "state guard: final coordinator position drift refuses",
+    "state guard: changed claim stage identity instruction or accepted order refuses",
+    "state guard: FLAT + BUY => LONG",
+    "state guard: FLAT + SELL_SHORT => SHORT",
+    "state guard: FLAT + SELL => LANE_1_SELL_REQUIRES_LONG",
+    "state guard: FLAT + BUY_TO_COVER => LANE_1_BUY_TO_COVER_REQUIRES_SHORT",
+    "state guard: LONG + SELL => FLAT",
+    "state guard: LONG + BUY => LANE_1_BUY_REQUIRES_FLAT",
+    "state guard: LONG + SELL_SHORT => LANE_1_SELL_SHORT_REQUIRES_FLAT",
+    "state guard: LONG + BUY_TO_COVER => LANE_1_BUY_TO_COVER_REQUIRES_SHORT",
+    "state guard: SHORT + BUY_TO_COVER => FLAT",
+    "state guard: SHORT + BUY => LANE_1_BUY_REQUIRES_FLAT",
+    "state guard: SHORT + SELL => LANE_1_SELL_REQUIRES_LONG",
+    "state guard: SHORT + SELL_SHORT => LANE_1_SELL_SHORT_REQUIRES_FLAT",
+    "state guard: UNKNOWN + BUY => LANE_1_POSITION_STATE_DRIFT:POSITION_UNKNOWN",
+    "state guard: UNKNOWN + SELL => LANE_1_POSITION_STATE_DRIFT:POSITION_UNKNOWN",
+    "state guard: UNKNOWN + SELL_SHORT => LANE_1_POSITION_STATE_DRIFT:POSITION_UNKNOWN",
+    "state guard: UNKNOWN + BUY_TO_COVER => LANE_1_POSITION_STATE_DRIFT:POSITION_UNKNOWN",
+    "state guard positives discriminate real FLAT/LONG/SHORT numeric projections",
+    "state guard positives allow unchanged fresh snapshots and exact four synthetic claims",
+    "terminal SPY identities are stable under response reordering; unrelated orders do not block",
+    "unknown broker projection records named drift and never claims or dispatches",
+    "unknown coordinator position records named drift instead of defaulting FLAT",
+    "DISARMED ignores the send snapshot and still returns the unchanged ingress disposition",
+    "reconciliation reports unknown coordinator state instead of skipping it",
+    "reconciliation reports unknown broker state instead of calling it an external flatten"
+  ],
+  "removedTests": [],
+  "guardMutations": {
+    "mutationMode": "in-memory loader; no application writes",
+    "detected": 26,
+    "total": 26,
+    "results": [
+      {
+        "name": "missing positions default FLAT",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "missing positions never means FLAT",
+        "detected": true
+      },
+      {
+        "name": "coerce quantity strings",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "missing and nonnumeric long/short quantities refuse without coercion",
+        "detected": true
+      },
+      {
+        "name": "net away gross exposure",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "gross and fractional exposure cannot net to an allowed position",
+        "detected": true
+      },
+      {
+        "name": "ignore coordinator/broker disagreement",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "known coordinator/broker disagreement refuses",
+        "detected": true
+      },
+      {
+        "name": "skip quantity contract",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "instruction quantity is numeric one only",
+        "detected": true
+      },
+      {
+        "name": "allow SELL while flat",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "FLAT + SELL =>",
+        "detected": true
+      },
+      {
+        "name": "allow BUY while long",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "LONG + BUY =>",
+        "detected": true
+      },
+      {
+        "name": "allow SELL_SHORT while short",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "SHORT + SELL_SHORT =>",
+        "detected": true
+      },
+      {
+        "name": "allow COVER while flat",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "FLAT + BUY_TO_COVER =>",
+        "detected": true
+      },
+      {
+        "name": "skip working-order refusal",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "working and pending SPY orders block",
+        "detected": true
+      },
+      {
+        "name": "skip nested orders",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "SPY in a second leg or child of a terminal parent cannot be skipped",
+        "detected": true
+      },
+      {
+        "name": "ignore capped results",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "capped order result is not proof of no working orders",
+        "detected": true
+      },
+      {
+        "name": "ignore final account change",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "final account or position change refuses",
+        "detected": true
+      },
+      {
+        "name": "ignore order-history change",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "changed terminal order history or query window refuses even while flat",
+        "detected": true
+      },
+      {
+        "name": "allow stale final snapshot",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "slow future or invalid final reads refuse",
+        "detected": true
+      },
+      {
+        "name": "ignore final DISARM",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "final DISARM wins over an earlier armed snapshot",
+        "detected": true
+      },
+      {
+        "name": "ignore expired ARM",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "expired or missing final ARM window refuses",
+        "detected": true
+      },
+      {
+        "name": "ignore changed claim",
+        "file": "src/lane/lane-1-position-guards.js",
+        "test": "changed claim stage identity instruction or accepted order refuses",
+        "detected": true
+      },
+      {
+        "name": "skip final comparison at transport boundary",
+        "file": "cloudflare/schwab-client.js",
+        "test": "position changes after initial read => exact refusal and zero POST",
+        "detected": true
+      },
+      {
+        "name": "reuse initial snapshot instead of rereading broker",
+        "file": "cloudflare/schwab-client.js",
+        "test": "working order appears after initial read => exact refusal and zero POST",
+        "detected": true
+      },
+      {
+        "name": "skip final coordinator check at transport boundary",
+        "file": "cloudflare/schwab-client.js",
+        "test": "Principal disarms during broker reads => exact refusal and zero POST",
+        "detected": true
+      },
+      {
+        "name": "broker failure becomes empty data",
+        "file": "cloudflare/schwab-client.js",
+        "test": "orders endpoint fails => exact refusal and zero POST",
+        "detected": true
+      },
+      {
+        "name": "skip partial response checks",
+        "file": "cloudflare/schwab-client.js",
+        "test": "partial HTTP 206 list => exact refusal and zero POST",
+        "detected": true
+      },
+      {
+        "name": "runtime drops baseline snapshot",
+        "file": "cloudflare/lane-1-runtime.js",
+        "test": "production runtime wiring carries snapshot and claim identity through to the final recheck",
+        "detected": true
+      },
+      {
+        "name": "reconciliation skips unknown coordinator",
+        "file": "src/lane/lane-1-spy-v2.js",
+        "test": "reconciliation reports unknown coordinator state instead of skipping it",
+        "detected": true
+      },
+      {
+        "name": "reconciliation skips broker shape check",
+        "file": "src/lane/lane-1-spy-v2.js",
+        "test": "reconciliation reports unknown broker state instead of calling it an external flatten",
+        "detected": true
+      }
+    ]
+  },
+  "previewMutations": {
+    "scope": "offline in-memory module mutations; no source writes",
+    "killed": 13,
+    "total": 13,
+    "results": [
+      {
+        "mutant": "quantity guard removed",
+        "test": "live-body negative mutation refuses: missing order quantity",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "string quantity coerced",
+        "test": "live-derived response mapping fails closed on quantity \"1\"",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "legacy leg quantity fallback",
+        "test": "live-body negative mutation refuses: legacy leg quantity cannot replace missing order quantity",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "symbol guard removed",
+        "test": "omitted lists cannot bypass echoed contract: missing symbol; mismatch is retained",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "legacy finalSymbol fallback",
+        "test": "live-body negative mutation refuses: legacy finalSymbol cannot replace missing instrument symbol",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "single-leg guard removed",
+        "test": "two live-derived legs with order-level quantity exactly one refuse",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "reject guard removed",
+        "test": "nonempty rejects added to the live warns-only body refuses",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "review guard removed",
+        "test": "nonempty reviews added to the live warns-only body refuses",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "asset allowlists removed",
+        "test": "live-body negative mutation refuses: unknown assets agree",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "asset agreement removed",
+        "test": "live-body negative mutation refuses: allowed assets disagree leg EQUITY",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "old wrong mapping restored",
+        "test": "production-byte mapping: unchanged redacted live BUY SPY one-share body with warns only clears",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "old receipt quantity projection restored",
+        "test": "production-byte mapping: unchanged redacted live BUY SPY one-share body with warns only clears",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      },
+      {
+        "mutant": "OPTION refusal guard removed",
+        "test": "omitted lists cannot bypass echoed contract: option asset; mismatch is retained",
+        "healthy": "PASS",
+        "mutated": "FAIL_EXPECTED",
+        "killed": true
+      }
+    ]
+  }
+}
