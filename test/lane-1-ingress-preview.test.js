@@ -431,3 +431,19 @@ test('omitted validation lists cannot make a missing echoed order clear', async 
   assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_CONTRACT_UNVERIFIED');
   assert.equal(JSON.parse(db.rows[1].detail_json).orderContract.actual.orderType, null);
 });
+
+test('schema audit: documented Schwab orderLegs response is still refused by the omission-only candidate', async (t) => {
+  // Shape verified in Schwab's authenticated OAS3 PreviewOrder/OrderStrategy/OrderLeg
+  // models on 2026-08-31. Synthetic SPY values; NOT a recovered live response.
+  const raw = JSON.stringify({
+    orderStrategy: { orderType: 'MARKET', orderStrategyType: 'SINGLE',
+      session: 'NORMAL', duration: 'DAY', orderLegs: [{
+        instruction: 'BUY', quantity: 1, finalSymbol: 'SPY', assetType: 'EQUITY',
+      }] },
+    orderValidationResult: { warns: [{ originalSeverity: 'WARN', activityMessage: 'Market-order warning' }] },
+  });
+  const { db, result } = await previewReceiptFixture(t, raw);
+  assert.equal(result.status, 422);
+  assert.equal(result.body.faultCode, 'SCHWAB_LANE_MARKET_PREVIEW_LONG_CONTRACT_UNVERIFIED');
+  assert.equal(db.rows[1].event_type, 'LANE_1_ORDER_PREVIEW_REFUSED');
+});

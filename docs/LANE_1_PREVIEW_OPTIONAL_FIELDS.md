@@ -1,15 +1,29 @@
 # Lane-1 omission-only preview parser candidate — 2026-08-31
 
-## Status: LOCAL ONLY; schema verification blocks upload and deployment
+## Status: LOCAL ONLY; schema reveals a second parser mismatch — deployment held
 
-The Principal authorized the proposal, including verification that Schwab's
-documented preview schema permits omitted validation lists. That condition is
-not yet satisfied. The Schwab Developer Portal is signed out; its public product
-catalog did not expose the response schema. The observed receipt proves omission
-occurred, not that omission is contractually equivalent to an empty list.
+The Principal signed into Schwab's Developer Portal. Its authenticated OAS3
+reference was inspected on 2026-08-31 around 16:14Z. `OrderValidationResult`
+renders `rejects` and `reviews` as optional arrays of `OrderValidationDetail`,
+without required markers. This supports the omission-only interpretation; it
+does not itself prove acceptance of the Monday ticket.
 
-The Principal was asked to sign into the developer portal in Chrome. Do not
-upload, deploy, or run another live preview until that schema has been checked.
+The schema also revealed a separate mismatch: `PreviewOrder.orderStrategy`
+uses `OrderStrategy.orderLegs[]`, with `OrderLeg.finalSymbol` and `assetType`.
+The current checker and candidate instead read `orderLegCollection[]` and
+`instrument.symbol` / `instrument.assetType`. A new local test proves a response
+in the documented shape is refused with `LONG_CONTRACT_UNVERIFIED`.
+That fixture uses synthetic SPY values; the live echoed body was not recovered.
+
+Source: [Schwab Accounts and Trading Production specifications](https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production),
+"Trader API - Account Access and User Preferences", version 1.0.0, OAS3.
+Inspected PreviewOrder, OrderValidationResult, OrderValidationDetail,
+OrderStrategy, OrderLeg, and the POST previewOrder operation. No Try it out,
+Authorize, or Execute action was used.
+
+Do not upload or run another live preview merely to rediscover this known local
+mismatch. The omission-only scope has not been expanded to alter response-leg
+mapping; report this finding to the Principal before doing so.
 No credential, authentication policy, broker order, ARM state, or ingress was
 changed during this work. No alert was sent. No live VALIDATE was pressed.
 
@@ -50,7 +64,10 @@ The retired routes remain 410. The same-row binding and two ARM guards remain.
 ## Test accounting
 
 Baseline: 476 tests, 66 suites, all passing.
-Candidate: 518 tests, 66 suites, all passing; zero skipped or pending.
+Candidate before schema audit: 518 tests, 66 suites, all passing.
+Schema-audit candidate: 519 tests, 66 suites, all passing; zero skipped or pending.
+The additional test asserts that the documented response shape is currently
+refused. A passing test here proves the blocker, not successful preview.
 
 The prior missing-lists refusal case is replaced by four omission success cases.
 Added: 20 explicit malformed-list cases, five malformed validation-object cases,
@@ -80,9 +97,11 @@ preview proof is append-only and remains history after rollback.
 
 ## Remaining sequence — do not skip the first condition
 
-1. Read Schwab's authoritative response schema. Record whether `rejects` and
-   `reviews` are optional, plus any documented acceptance semantics. If the
-   schema contradicts this candidate, stop and revise; do not reinterpret it.
+1. Schema inspection is complete. Obtain direction on the newly identified
+   response-leg mapping before expanding the omission-only patch. The proposed
+   repair reads the documented response fields while preserving exact
+   instruction, symbol, quantity, type, session, duration, and single-leg checks;
+   it does not rewrite the order request or waive any rejects/reviews.
 2. Recheck clean Git, reproduce the committed bundle, and preserve the rollback.
 3. Confirm live version and unchanged bindings, environment ARM OFF and durable
    DISARMED. Upload/deploy only this candidate under the existing authorization.
