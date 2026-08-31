@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  bindLane1V21ReplayBody, createLane1SpyV2Controller, normalizeLane1V21Signal,
+  bindLane1V21ReplayBody, createLane1SpyV2Controller, lane1V2ProposalSeal, normalizeLane1V21Signal,
   replayBodyFromAuthenticatedLane1V21Signal,
 } from '../src/lane/lane-1-spy-v2.js';
 import { syntheticSnapshot } from './fixtures/lane-1-synthetic-state.js';
@@ -111,33 +111,39 @@ function makeHarness({ armed = true, configArmed = armed,
   return { controller, calls, writes, notices, state: () => structuredClone(state) };
 }
 
-test('TV vocabulary is locked and SELL or EXIT flattens either side', () => {
+test('TV vocabulary is exactly four broker instructions with explicit exit intent', () => {
   assert.deepEqual(normalizeLane1V21Signal('BUY'), { signal: 'LONG', exitScope: null });
-  assert.deepEqual(normalizeLane1V21Signal('LONG'), { signal: 'LONG', exitScope: null });
-  assert.deepEqual(normalizeLane1V21Signal('SHORT'), { signal: 'SHORT', exitScope: null });
-  assert.deepEqual(normalizeLane1V21Signal('EXIT'), { signal: 'EXIT', exitScope: 'ANY' });
-  assert.deepEqual(normalizeLane1V21Signal('SELL'), { signal: 'EXIT', exitScope: 'ANY' });
+  assert.deepEqual(normalizeLane1V21Signal('SELL_SHORT'), { signal: 'SHORT', exitScope: null });
+  assert.deepEqual(normalizeLane1V21Signal('SELL'), { signal: 'EXIT', exitScope: 'LONG' });
+  assert.deepEqual(normalizeLane1V21Signal('BUY_TO_COVER'), { signal: 'EXIT', exitScope: 'SHORT' });
+  for (const alias of ['LONG', 'SHORT', 'EXIT', 'COVER']) {
+    assert.equal(normalizeLane1V21Signal(alias), null);
+  }
 });
 
-test('every valid no-send TV alert returns 200 and never an order conflict', async () => {
-  for (const [positionSide, requested, disposition] of [
-    ['FLAT', 'EXIT', 'already-flat'], ['FLAT', 'SELL', 'already-flat'],
-    ['LONG', 'BUY', 'already-in'], ['LONG', 'LONG', 'already-in'],
-    ['SHORT', 'SHORT', 'already-in'], ['LONG', 'SHORT', 'must-exit-first'],
-    ['SHORT', 'LONG', 'must-exit-first'],
+test('contradictory TV instructions return named refusals before any claim or send', async () => {
+  for (const [positionSide, requested, faultCode] of [
+    ['FLAT', 'SELL', 'LANE_1_SELL_REQUIRES_LONG'],
+    ['FLAT', 'BUY_TO_COVER', 'LANE_1_BUY_TO_COVER_REQUIRES_SHORT'],
+    ['LONG', 'BUY', 'LANE_1_BUY_REQUIRES_FLAT'],
+    ['SHORT', 'SELL_SHORT', 'LANE_1_SELL_SHORT_REQUIRES_FLAT'],
+    ['LONG', 'SELL_SHORT', 'LANE_1_SELL_SHORT_REQUIRES_FLAT'],
+    ['SHORT', 'BUY', 'LANE_1_BUY_REQUIRES_FLAT'],
+    ['SHORT', 'SELL', 'LANE_1_SELL_REQUIRES_LONG'],
+    ['LONG', 'BUY_TO_COVER', 'LANE_1_BUY_TO_COVER_REQUIRES_SHORT'],
   ]) {
     const h = makeHarness({ positionSide });
     const result = await h.controller.signal(signal(requested));
-    assert.equal(result.status, 200); assert.equal(result.body.disposition, disposition);
+    assert.equal(result.status, 200); assert.equal(result.body.faultCode, faultCode);
     assert.equal(result.body.sent, false);
-    assert.equal(h.calls.some((entry) => entry.startsWith('market:')), false);
+    assert.equal(h.calls.some((entry) => /^(claim|market):/u.test(entry)), false);
   }
   const off = makeHarness({ armed: false });
   assert.equal((await off.controller.signal(signal('BUY'))).status, 200);
   const closed = makeHarness({ market: 'CLOSED' });
-  assert.equal((await closed.controller.signal(signal('LONG'))).body.disposition, 'market-closed');
+  assert.equal((await closed.controller.signal(signal('BUY'))).body.disposition, 'market-closed');
   const duplicate = makeHarness({ claimable: false });
-  assert.equal((await duplicate.controller.signal(signal('LONG'))).body.disposition, 'duplicate-in-flight');
+  assert.equal((await duplicate.controller.signal(signal('BUY'))).body.disposition, 'duplicate-in-flight');
 });
 
 test('TV BUY then TV SELL creates two market order ids and resolves flat while ARM remains Principal-controlled', async () => {
@@ -166,22 +172,22 @@ test('TV BUY then TV SELL creates two market order ids and resolves flat while A
   assert.equal(h.state().armed, true);
 });
 
-test('SHORT opens from flat and SELL covers it without a preview gate', async () => {
+test('SELL_SHORT opens and only BUY_TO_COVER closes the synthetic short round trip', async () => {
   const h = makeHarness();
-  const opened = await h.controller.signal(signal('SHORT'));
+  const opened = await h.controller.signal(signal('SELL_SHORT'));
   assert.equal(opened.body.brokerOrderId, 'TV-ORDER-1');
-  const exited = await h.controller.signal(signal('SELL'));
+  const exited = await h.controller.signal(signal('BUY_TO_COVER'));
   assert.equal(exited.body.brokerOrderId, 'TV-ORDER-2');
   assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
     ['market:SELL_SHORT:true', 'market:BUY_TO_COVER:true']);
   assert.equal(exited.body.positionSide, 'FLAT');
 });
 
-test('ARM remains live after EXIT and a later opening starts a new episode', async () => {
+test('ARM remains live after explicit SELL and a later opening starts a new episode', async () => {
   const h = makeHarness();
-  assert.equal((await h.controller.signal(signal('LONG'))).body.disposition, 'opened');
-  assert.equal((await h.controller.signal(signal('EXIT'))).body.disposition, 'exited');
-  const reopened = await h.controller.signal(signal('SHORT'));
+  assert.equal((await h.controller.signal(signal('BUY'))).body.disposition, 'opened');
+  assert.equal((await h.controller.signal(signal('SELL'))).body.disposition, 'exited');
+  const reopened = await h.controller.signal(signal('SELL_SHORT'));
   assert.equal(reopened.status, 200);
   assert.equal(reopened.body.disposition, 'opened');
   assert.equal(reopened.body.positionSide, 'SHORT');
@@ -193,27 +199,27 @@ test('ARM remains live after EXIT and a later opening starts a new episode', asy
 
 test('a valid TV body reports faults with HTTP 200; malformed bodies remain 400', async () => {
   const faulted = makeHarness({ placeFault: 'SCHWAB_LANE_MARKET_ORDER_BUY_500' });
-  const fault = await faulted.controller.signal(signal('LONG'));
+  const fault = await faulted.controller.signal(signal('BUY'));
   assert.equal(fault.status, 200); assert.equal(fault.body.state, 'FAULT');
   assert.equal(fault.body.faultCode, 'SCHWAB_LANE_MARKET_ORDER_BUY_500');
   assert.equal((await makeHarness().controller.signal(signal('BUY', { ticker: 'QQQ' }))).status, 400);
   assert.equal((await makeHarness().controller.signal(signal('BUY', { qty: 2 }))).status, 400);
-  assert.equal((await makeHarness().controller.signal({ ...signal('EXIT'), comment: 'no' })).status, 400);
+  assert.equal((await makeHarness().controller.signal({ ...signal('SELL'), comment: 'no' })).status, 400);
 });
 
 test('custody drift blocks before either market order', async () => {
   const h = makeHarness({ positionSide: 'LONG', custodySide: 'FLAT' });
-  const result = await h.controller.signal(signal('EXIT'));
+  const result = await h.controller.signal(signal('SELL'));
   assert.equal(result.status, 200); assert.equal(result.body.disposition, 'reconciliation-required');
   assert.equal(result.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
   assert.equal(h.calls.some((entry) => entry.startsWith('market:')), false);
 });
 
-test('durable Principal ARM enables LONG and EXIT while environment stays OFF', async () => {
+test('durable Principal ARM enables BUY and SELL while environment stays OFF', async () => {
   const h = makeHarness({ armed: true, configArmed: false });
-  const opened = await h.controller.signal(signal('LONG'));
+  const opened = await h.controller.signal(signal('BUY'));
   assert.equal(opened.status, 200); assert.equal(opened.body.brokerOrderId, 'TV-ORDER-1');
-  const exited = await h.controller.signal(signal('EXIT'));
+  const exited = await h.controller.signal(signal('SELL'));
   assert.equal(exited.status, 200); assert.equal(exited.body.brokerOrderId, 'TV-ORDER-2');
   assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
     ['market:BUY:true', 'market:SELL:true']);
@@ -268,3 +274,138 @@ test('reconciliation reports unknown broker state instead of calling it an exter
   assert.equal(result.body.sent, false);
   assert.equal(h.state().armed, false);
 });
+
+// These are synthetic contract/guard tests, not TradingView deliveries or fills.
+for (const token of ['LONG', 'SHORT', 'EXIT', 'COVER']) {
+  test(`four-action: legacy ${token} refuses before state access`, async () => {
+    const h = makeHarness();
+    assert.equal(normalizeLane1V21Signal(token), null);
+    const result = await h.controller.signal(signal(token));
+    assert.deepEqual(result, { status: 400,
+      body: { faultCode: 'LANE_1_INVALID_SIGNAL', sent: false } });
+    assert.deepEqual(h.calls, []);
+    assert.deepEqual(h.notices, []);
+    assert.deepEqual(h.writes, []);
+  });
+}
+
+test('four-action: case folding trimming and coercion are forbidden', async () => {
+  for (const side of ['buy', 'sell', 'sell_short', 'buy_to_cover', 'Buy', ' BUY', 'BUY ',
+    '\tSELL', 'SELL\n', 'SELL SHORT', ' BUY_TO_COVER ', '', null, undefined, 1, true,
+    ['BUY'], { side: 'BUY' }, '__proto__', 'constructor']) {
+    const h = makeHarness();
+    assert.equal(normalizeLane1V21Signal(side), null);
+    assert.deepEqual(await h.controller.signal(signal(side)), { status: 400,
+      body: { faultCode: 'LANE_1_INVALID_SIGNAL', sent: false } });
+    assert.deepEqual(h.calls, []);
+  }
+});
+
+test('four-action: numeric one exact SPY and exact body keys remain required', async () => {
+  for (const change of [{ qty: '1' }, { qty: null }, { qty: true }, { qty: 0 }, { qty: 2 },
+    { ticker: 'spy' }, { ticker: ' SPY' }, { ticker: 'SPY ' }, { ticker: 'SOFI' },
+    { action: 'BUY' }, { side: undefined }, { extra: true }, { secret: 'WRONG' }]) {
+    const h = makeHarness();
+    assert.deepEqual(await h.controller.signal(signal('BUY', change)), { status: 400,
+      body: { faultCode: 'LANE_1_INVALID_SIGNAL', sent: false } });
+    assert.deepEqual(h.calls, []);
+  }
+});
+
+test('four-action: SELL while SHORT refuses and never constructs a cover dispatch', async () => {
+  const h = makeHarness({ positionSide: 'SHORT' });
+  const result = await h.controller.signal(signal('SELL'));
+  assert.deepEqual(result, { status: 200, body: { state: 'FAULT',
+    faultCode: 'LANE_1_SELL_REQUIRES_LONG', sent: false } });
+  assert.equal(h.state().fault.detail, 'LANE_1_SELL_REQUIRES_LONG');
+  assert.deepEqual(h.calls, ['position:SHORT']);
+  assert.deepEqual(h.writes, []);
+});
+
+test('four-action: seal preserves every exact instruction independently of position', async () => {
+  for (const [rawSignalSide, signal] of [['BUY', 'LONG'], ['SELL', 'EXIT'],
+    ['SELL_SHORT', 'SHORT'], ['BUY_TO_COVER', 'EXIT']]) {
+    for (const positionSide of ['FLAT', 'LONG', 'SHORT', 'UNKNOWN', null, undefined]) {
+      // Construction is shared with preview. Position is not fabricated here,
+      // and construction alone is NOT permission to dispatch this instruction.
+      const seal = await lane1V2ProposalSeal({ signal, rawSignalSide, positionSide,
+        tvBodyBindingSha256: 'a'.repeat(64), now: NOW, uuid: () => 'SYNTHETIC' });
+      assert.equal(seal.brokerInstruction, rawSignalSide);
+      assert.equal(seal.rawSignalSide, rawSignalSide);
+      assert.equal(seal.positionSide, positionSide ?? null);
+      assert.equal(seal.quantityShares, 1);
+      assert.equal(seal.orderType, 'MARKET');
+      assert.equal(seal.duration, 'DAY');
+      assert.equal(seal.session, 'NORMAL');
+    }
+  }
+});
+
+test('four-action: seal refuses missing aliases and contradictory normalized direction', async () => {
+  const input = { signal: 'LONG', rawSignalSide: 'BUY', positionSide: 'FLAT',
+    tvBodyBindingSha256: 'a'.repeat(64), now: NOW, uuid: () => 'SYNTHETIC' };
+  for (const rawSignalSide of [undefined, 'LONG', 'SHORT', 'EXIT', 'COVER', 'buy']) {
+    await assert.rejects(() => lane1V2ProposalSeal({ ...input, rawSignalSide }),
+      { message: 'LANE_1_INVALID_SIGNAL' });
+  }
+  for (const [rawSignalSide, wrongSignal] of [['BUY', 'SHORT'], ['SELL', 'LONG'],
+    ['SELL_SHORT', 'LONG'], ['BUY_TO_COVER', 'SHORT']]) {
+    await assert.rejects(() => lane1V2ProposalSeal({ ...input, rawSignalSide, signal: wrongSignal }),
+      { message: 'LANE_1_INSTRUCTION_BINDING_MISMATCH' });
+  }
+});
+
+test('four-action: Monday BUY binding remains identical and aliases are not replayable', async () => {
+  const binding = await bindLane1V21ReplayBody({ ticker: 'SPY', side: 'BUY', qty: 1 });
+  assert.equal(binding.tvBodyBindingSha256,
+    '21baaecb3006248b6bf21c186684c855d55e5255b5c004970033221762a2188c');
+  for (const side of ['LONG', 'SHORT', 'EXIT', 'COVER']) {
+    await assert.rejects(() => bindLane1V21ReplayBody({ ticker: 'SPY', side, qty: 1 }),
+      { message: 'LANE_1_REPLAY_BODY_INVALID' });
+  }
+});
+
+for (const instruction of ['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER']) {
+  test(`four-action: ${instruction} remains exact through synthetic controller seal and receipt`, async () => {
+    const h = makeHarness();
+    if (instruction === 'SELL' || instruction === 'BUY_TO_COVER') {
+      const opening = instruction === 'SELL' ? 'BUY' : 'SELL_SHORT';
+      assert.equal((await h.controller.signal(signal(opening))).body.disposition, 'opened');
+      h.calls.length = 0;
+    }
+    const result = await h.controller.signal(signal(instruction));
+    assert.equal(result.status, 200);
+    assert.equal(result.body.sent, true, 'synthetic dispatch, not a live fill');
+    assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
+      [`market:${instruction}:true`]);
+    const proposals = JSON.parse(h.writes.at(-1).bytes['order-events.json']).appendLog
+      .filter((row) => row.eventType === 'PROPOSAL_SEALED');
+    const seal = proposals.at(-1).proposal;
+    assert.equal(seal.brokerInstruction, instruction);
+    assert.equal(seal.rawSignalSide, instruction);
+    const binding = await bindLane1V21ReplayBody({ ticker: 'SPY', side: instruction, qty: 1 });
+    assert.equal(seal.tvBodyBindingSha256, binding.tvBodyBindingSha256);
+    assert.equal(result.body.tvBodyBindingSha256, binding.tvBodyBindingSha256);
+  });
+
+  test(`four-action: DISARMED ${instruction} never reads positions claims or sends`, async () => {
+    const h = makeHarness({ armed: false });
+    const result = await h.controller.signal(signal(instruction));
+    assert.equal(result.status, 200);
+    assert.equal(result.body.disposition, 'disarmed');
+    assert.equal(result.body.sent, false);
+    assert.deepEqual(h.calls, []);
+    assert.deepEqual(h.writes, []);
+    assert.deepEqual(h.notices, []);
+  });
+
+  test(`four-action: UNKNOWN position refuses ${instruction} before claim`, async () => {
+    const h = makeHarness({ positionSide: 'UNKNOWN', custodySide: 'FLAT' });
+    const result = await h.controller.signal(signal(instruction));
+    assert.equal(result.status, 200);
+    assert.equal(result.body.sent, false);
+    assert.equal(result.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
+    assert.equal(h.state().fault.detail, 'LANE_1_POSITION_STATE_DRIFT:COORDINATOR_POSITION_UNKNOWN');
+    assert.equal(h.calls.some((call) => /^(claim|market):/u.test(call)), false);
+  });
+}

@@ -33,9 +33,11 @@ async function secretMatches(supplied, expected) {
 }
 
 export function normalizeLane1V21Signal(side) {
-  if (side === 'BUY' || side === 'LONG') return { signal: 'LONG', exitScope: null };
-  if (side === 'SHORT') return { signal: 'SHORT', exitScope: null };
-  if (side === 'EXIT' || side === 'SELL') return { signal: 'EXIT', exitScope: 'ANY' };
+  // Exact authored broker instruction. No aliases, trimming, or coercion.
+  if (side === 'BUY') return { signal: 'LONG', exitScope: null };
+  if (side === 'SELL_SHORT') return { signal: 'SHORT', exitScope: null };
+  if (side === 'SELL') return { signal: 'EXIT', exitScope: 'LONG' };
+  if (side === 'BUY_TO_COVER') return { signal: 'EXIT', exitScope: 'SHORT' };
   return null;
 }
 
@@ -85,19 +87,24 @@ function faultCode(error) {
     ?? 'LANE_1_SYSTEM_FAULT';
 }
 
-export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,
+export async function lane1V2ProposalSeal({ signal, rawSignalSide,
   tvBodyBindingSha256, positionSide, now, uuid, prior = null }) {
+  const normalized = normalizeLane1V21Signal(rawSignalSide);
+  if (!normalized) throw new Error('LANE_1_INVALID_SIGNAL');
+  if (signal !== normalized.signal) throw new Error('LANE_1_INSTRUCTION_BINDING_MISMATCH');
   const sealedAt = new Date(now).toISOString();
   const decisionId = `DEC-LANE1-SPY-V2-${uuid()}`;
   const proposalId = `PROP-LANE1-SPY-V2-${uuid()}`;
-  const brokerInstruction = signal === 'LONG' ? 'BUY' : signal === 'SHORT' ? 'SELL_SHORT'
-    : positionSide === 'LONG' ? 'SELL' : 'BUY_TO_COVER';
+  // Position validates dispatch separately; it must never choose the instruction.
+  // The same builder also constructs DISARMED previews, including close refusals
+  // while flat. Such a preview does not assert that the position exists.
+  const brokerInstruction = rawSignalSide;
   const seed = {
     recordType: 'SEALED_EQUITY_PROPOSAL', lane: 'LANE_1_SPY', laneContract: LANE_1_SPY_V2,
     authorityLevel: 2, principalException: 'LANE_1_SPY', decisionId, proposalId,
     parentProposalHash: prior?.proposalHash ?? null, symbol: 'SPY', assetType: 'EQUITY',
     signalSource: 'TRADINGVIEW_WEBHOOK', rawSignalSide, signal,
-    tvBodyBindingSha256, positionSide: positionSide ?? signal,
+    tvBodyBindingSha256, positionSide: positionSide ?? null,
     brokerInstruction, quantityShares: 1,
     orderType: 'MARKET', session: 'NORMAL', duration: 'DAY', sealedAt,
   };
@@ -206,7 +213,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
     if (disarmed.changed !== false) await notify({ type: 'DISARMED', reason: 'TTL_EXPIRED' });
     return noSend('ttl-expired', disarmed, { reason: 'TTL_EXPIRED' });
   }
-  function custodyDisposition(state, custody, signal) {
+  function custodyDisposition(state, custody, instruction) {
     assertLane1SendSnapshot(custody);
     const durableSide = state.positionSide;
     // Unknown fields refuse before comparison; they must not match FLAT.
@@ -216,11 +223,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
       return noSend('reconciliation-required', state, { faultCode: 'LANE_1_POSITION_STATE_DRIFT',
         durablePositionSide: durableSide, custodyPositionSide: custody.positionSide });
     }
-    if (signal === 'EXIT' && durableSide === 'FLAT') return noSend('already-flat', state);
-    if (signal === durableSide) return noSend('already-in', state, { positionSide: durableSide });
-    if (signal !== 'EXIT' && durableSide !== 'FLAT') {
-      return noSend('must-exit-first', state, { positionSide: durableSide, requestedSide: signal });
-    }
+    assertLane1InstructionState({ instruction, positionSide: durableSide, quantity: 1 });
     return null;
   }
   async function recordFault(error, accepted = null) {
@@ -260,7 +263,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
       let custody;
       try {
         expectedSnapshot = await broker.sendSnapshot();
-        custody = custodyDisposition(state, expectedSnapshot, normalized.signal);
+        custody = custodyDisposition(state, expectedSnapshot, body.side);
       }
       catch (error) { return recordFault(error); }
       if (custody) return custody;

@@ -148,7 +148,7 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
   const seal = await lane1V2ProposalSeal({ signal: binding.normalized.signal,
     rawSignalSide: binding.replayBody.side,
     tvBodyBindingSha256: binding.tvBodyBindingSha256,
-    positionSide: before.positionSide ?? 'FLAT', now: instant, uuid,
+    positionSide: before.positionSide ?? null, now: instant, uuid,
     prior: before.open?.seal ?? null });
   if (!env.EVIDENCE?.put || !env.EVIDENCE?.get) {
     return refuse('LANE_1_PREVIEW_CAPTURE_BUCKET_REQUIRED');
@@ -233,9 +233,9 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
     ...responseEvidence,
     schwabEndpoint: '/previewOrder', accountMask: preview.accountMask ?? null,
     coordinatorBefore: { armed: before.armed === true, stage: before.stage,
-      positionSide: before.positionSide ?? 'FLAT', updatedAt: before.updatedAt ?? null },
+      positionSide: before.positionSide ?? null, updatedAt: before.updatedAt ?? null },
     coordinatorAfter: { armed: after.armed === true, stage: after.stage,
-      positionSide: after.positionSide ?? 'FLAT', updatedAt: after.updatedAt ?? null },
+      positionSide: after.positionSide ?? null, updatedAt: after.updatedAt ?? null },
     previewedAt: new Date(instant).toISOString(),
   });
   return { status: 200, body: { state: 'DISARMED', disposition: 'previewed',
@@ -582,16 +582,41 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {
     });
   }
   const authenticated = await secretMatches(body?.secret, env.LANE_1_TV_WEBHOOK_SECRET);
+  let ingressProof = null;
+  let ingressDiagnostic = null;
   if (authenticated) {
     const replayBody = replayBodyFromAuthenticatedLane1V21Signal(body);
     const binding = replayBody ? await bindLane1V21ReplayBody(replayBody) : null;
-    await recordOperationalProof(env, ownerId, 'LANE_1_TV_INGRESS', {
-      receivedAt: new Date().toISOString(),
-      side: String(body?.side ?? '').trim().toUpperCase() || null,
+    // Redacted representation, NOT wire bytes. Preserve allowed scalar values
+    // exactly; do not persist arbitrary nested input or the authentication secret.
+    const rawMessage = {};
+    const removedPaths = [];
+    for (const key of Object.keys(body)) {
+      const path = `/${key.replace(/~/gu, '~0').replace(/\//gu, '~1')}`;
+      if (!['ticker', 'side', 'qty'].includes(key)) { removedPaths.push(path); continue; }
+      const value = body[key];
+      if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) rawMessage[key] = value;
+      else removedPaths.push(path);
+    }
+    const isTape = String(body?.kind ?? '').trim().toUpperCase() === 'TAPE';
+    ingressDiagnostic = {
+      // Diagnostic text is not normalized into an apparently accepted token.
+      // Shape acceptance is not ARM permission, dispatch, or a broker fill.
+      side: typeof body?.side === 'string' ? body.side : null,
+      sideType: body?.side === null ? 'null' : Array.isArray(body?.side) ? 'array' : typeof body?.side,
+      rawMessage, rawMessageFormat: 'REDACTED_SIGNAL_FIELDS_V1', removedPaths,
+      acceptedInstruction: binding?.replayBody.side ?? null,
+      signalContract: 'LANE_1_FOUR_ACTION_V1',
+      ingressKind: isTape ? 'TAPE' : 'ORDER_SIGNAL',
+      signalShapeAccepted: isTape ? null : binding !== null,
+      signalFaultCode: isTape || binding !== null ? null : 'LANE_1_INVALID_SIGNAL',
       replayEligible: binding !== null,
       replayBody: binding?.replayBody ?? null,
       tvBodyBindingSha256: binding?.tvBodyBindingSha256 ?? null,
-    }).catch(() => {});
+    };
+    ingressProof = await recordOperationalProof(env, ownerId, 'LANE_1_TV_INGRESS', {
+      receivedAt: new Date().toISOString(), ...ingressDiagnostic,
+    }).catch(() => null);
   }
   if (String(body?.kind ?? '').trim().toUpperCase() === 'TAPE') {
     if (!authenticated) {
@@ -624,6 +649,12 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {
   try { result = await createLane1Runtime(env, ownerId).signal(body); }
   catch (error) { result = { status: 200, body: { state: 'FAULT',
     faultCode: error.message, sent: false } }; }
+  if (authenticated && result.status === 400 && ingressDiagnostic) {
+    await recordOperationalProof(env, ownerId, 'LANE_1_TV_SIGNAL_REFUSED', {
+      ...ingressDiagnostic, sourceIngressId: ingressProof?.id ?? null,
+      httpStatus: result.status, faultCode: result.body.faultCode, sent: false,
+    }).catch(() => null);
+  }
   return new Response(JSON.stringify(result.body), {
     status: result.status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },

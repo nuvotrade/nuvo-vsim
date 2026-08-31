@@ -228,8 +228,8 @@ test('authenticated preview route accepts only ingressId and returns a named inl
 });
 
 async function previewReceiptFixture(t, raw, { status = 200, failWrite = false,
-  failCapture = false } = {}) {
-  const binding = await bindLane1V21ReplayBody({ ticker: 'SPY', side: 'BUY', qty: 1 });
+  failCapture = false, instruction = 'BUY', positionSide = 'FLAT' } = {}) {
+  const binding = await bindLane1V21ReplayBody({ ticker: 'SPY', side: instruction, qty: 1 });
   const db = memoryDb([{ id: INGRESS_ID, owner_id: OWNER, event_type: 'LANE_1_TV_INGRESS',
     created_at: '2026-08-31T15:33:13.437Z', detail_json: JSON.stringify({
       replayEligible: true, replayBody: binding.replayBody,
@@ -243,7 +243,7 @@ async function previewReceiptFixture(t, raw, { status = 200, failWrite = false,
       return prepare(sql);
     };
   }
-  const state = disarmedState(); const before = structuredClone(state);
+  const state = { ...disarmedState(), positionSide }; const before = structuredClone(state);
   let claims = 0;
   const calls = [];
   const originalFetch = globalThis.fetch;
@@ -267,13 +267,151 @@ async function previewReceiptFixture(t, raw, { status = 200, failWrite = false,
     } },
   });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].body, buildLane1SchwabMarketOrder({ instruction: 'BUY' }));
+  assert.deepEqual(calls[0].body, buildLane1SchwabMarketOrder({ instruction }));
+  assert.equal(calls[0].body.orderLegCollection[0].instruction, instruction);
   assert.equal(calls[0].method, 'POST');
   assert.equal(claims, 0);
   assert.deepEqual(state, before);
   assert.deepEqual(db.rows[0], sourceBefore, 'stored ingress is never edited');
   assert.equal(result.body.sent, false);
   return { db, result, binding, bucket };
+}
+
+test('four-action ingress: raw lowercase buy is distinguishable from accepted BUY', async (t) => {
+  let networkCalls = 0;
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => { networkCalls += 1; throw new Error('UNEXPECTED_NETWORK'); };
+  for (const side of ['buy', 'BUY', ' buy ', ' BUY ', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER', 'SHORT', 'EXIT', 'COVER', undefined]) {
+    const db = memoryDb();
+    const body = { ticker: 'SPY', side, qty: 1, secret: SECRET };
+    const response = await handleLane1TvWebhook({ request: new Request('https://vsim.nuvotrade.co/lane/tv', {
+      method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' },
+    }), env: webhookEnv(db), ownerId: OWNER });
+    const accepted = ['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER'].includes(side);
+    assert.equal(response.status, accepted ? 200 : 400);
+    const result = await response.json();
+    if (accepted) assert.equal(result.disposition, 'disarmed');
+    else assert.deepEqual(result, { faultCode: 'LANE_1_INVALID_SIGNAL', sent: false });
+    assert.equal(result.sent, false);
+    assert.equal(db.rows.length, accepted ? 1 : 2);
+    assert.equal(db.rows[0].event_type, 'LANE_1_TV_INGRESS');
+    const detail = JSON.parse(db.rows[0].detail_json);
+    assert.equal(detail.side, side ?? null, 'do not uppercase/trim diagnostic side');
+    assert.equal(detail.sideType, typeof side);
+    const expectedRaw = side === undefined ? { ticker: 'SPY', qty: 1 } : { ticker: 'SPY', side, qty: 1 };
+    assert.deepEqual(detail.rawMessage, expectedRaw);
+    assert.equal(detail.rawMessageFormat, 'REDACTED_SIGNAL_FIELDS_V1');
+    assert.deepEqual(detail.removedPaths, ['/secret']);
+    assert.equal(detail.acceptedInstruction, accepted ? side : null);
+    assert.equal(detail.signalShapeAccepted, accepted);
+    assert.equal(detail.signalFaultCode, accepted ? null : 'LANE_1_INVALID_SIGNAL');
+    assert.equal(detail.signalContract, 'LANE_1_FOUR_ACTION_V1');
+    assert.equal(detail.ingressKind, 'ORDER_SIGNAL');
+    assert.equal(detail.replayEligible, accepted);
+    assert.equal(db.rows[0].detail_json.includes(SECRET), false);
+    if (accepted) {
+      assert.deepEqual(detail.replayBody, { ticker: 'SPY', side, qty: 1 });
+      const binding = await bindLane1V21ReplayBody(detail.replayBody);
+      assert.equal(detail.tvBodyBindingSha256, binding.tvBodyBindingSha256);
+    } else {
+      assert.equal(detail.replayBody, null);
+      assert.equal(detail.tvBodyBindingSha256, null);
+      assert.equal(db.rows[1].event_type, 'LANE_1_TV_SIGNAL_REFUSED');
+      const receipt = JSON.parse(db.rows[1].detail_json);
+      assert.equal(receipt.sourceIngressId, db.rows[0].id);
+      assert.equal(receipt.httpStatus, 400);
+      assert.equal(receipt.faultCode, 'LANE_1_INVALID_SIGNAL');
+      assert.equal(receipt.sent, false);
+      assert.deepEqual(receipt.rawMessage, expectedRaw);
+      assert.deepEqual(receipt.removedPaths, ['/secret']);
+      assert.equal(receipt.rawMessageFormat, 'REDACTED_SIGNAL_FIELDS_V1');
+      assert.equal(receipt.acceptedInstruction, null);
+      assert.equal(db.rows[1].detail_json.includes(SECRET), false);
+    }
+  }
+  assert.equal(networkCalls, 0);
+});
+
+test('four-action ingress: diagnostic representation preserves scalar types and omits nested values', async () => {
+  for (const change of [{ qty: '1' }, { qty: ' 1 ' }, { ticker: ' spy ' },
+    { side: null }, { side: ['BUY'] }, { side: { secret: SECRET } }]) {
+    const db = memoryDb();
+    const body = { ticker: 'SPY', side: 'BUY', qty: 1, secret: SECRET, ...change };
+    const response = await handleLane1TvWebhook({ request: new Request('https://vsim.nuvotrade.co/lane/tv', {
+      method: 'POST', body: JSON.stringify(body),
+    }), env: webhookEnv(db), ownerId: OWNER });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { faultCode: 'LANE_1_INVALID_SIGNAL', sent: false });
+    const detail = JSON.parse(db.rows[0].detail_json);
+    assert.equal(detail.acceptedInstruction, null);
+    assert.equal(detail.signalShapeAccepted, false);
+    if (body.side !== null && typeof body.side === 'object') {
+      assert.equal(Object.hasOwn(detail.rawMessage, 'side'), false);
+      assert.ok(detail.removedPaths.includes('/side'));
+    } else assert.deepEqual(detail.rawMessage, { ticker: body.ticker, side: body.side, qty: body.qty });
+    assert.equal(db.rows[0].detail_json.includes(SECRET), false);
+    assert.deepEqual(JSON.parse(db.rows[1].detail_json).rawMessage, detail.rawMessage);
+    assert.equal(JSON.parse(db.rows[1].detail_json).acceptedInstruction, null);
+  }
+});
+
+test('four-action ingress: wrong secret never writes an authenticated diagnostic receipt', async () => {
+  const db = memoryDb();
+  const response = await handleLane1TvWebhook({ request: new Request('https://vsim.nuvotrade.co/lane/tv', {
+    method: 'POST', body: JSON.stringify({ ticker: 'SPY', side: 'SELL_SHORT', qty: 1, secret: 'WRONG' }),
+  }), env: webhookEnv(db), ownerId: OWNER });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { faultCode: 'LANE_1_INVALID_SIGNAL', sent: false });
+  assert.equal(db.rows.length, 0);
+});
+
+test('four-action preview: historical alias rows are not reinterpreted or edited', async () => {
+  for (const [side, signal] of [['LONG', 'LONG'], ['SHORT', 'SHORT'], ['EXIT', 'EXIT']]) {
+    // Synthetic historical contract, with its actual pre-change binding shape.
+    const binding = { source: 'TRADINGVIEW_WEBHOOK', ticker: 'SPY', rawSide: side,
+      signal, qty: 1, secretAuthenticated: true };
+    const tvBodyBindingSha256 = createHash('sha256').update(canonicalJson(binding)).digest('hex');
+    const source = { id: INGRESS_ID, owner_id: OWNER, event_type: 'LANE_1_TV_INGRESS',
+      created_at: '2026-08-31T15:33:13.437Z', detail_json: JSON.stringify({
+        replayEligible: true, replayBody: { ticker: 'SPY', side, qty: 1 }, tvBodyBindingSha256,
+      }) };
+    const db = memoryDb([source]);
+    let previewCalls = 0;
+    const result = await previewStoredLane1Ingress({ env: { DB: db, NUVO_LANE_1_SPY_ARMED: 'OFF' },
+      ownerId: OWNER, ingressId: INGRESS_ID, dependencies: {
+        client: { async previewLane1V21Market() { previewCalls += 1; throw new Error('MUST_NOT_PREVIEW'); } },
+      } });
+    assert.equal(result.status, 422);
+    assert.equal(result.body.faultCode, 'LANE_1_PREVIEW_SOURCE_NOT_REPLAYABLE');
+    assert.equal(result.body.sent, false);
+    assert.equal(await latestLane1ReplayIngress({ DB: db }, OWNER), null);
+    assert.equal(previewCalls, 0);
+    assert.deepEqual(db.rows, [source]);
+  }
+});
+
+for (const [instruction, prefix] of [['BUY', 'LONG'], ['SELL', 'EXIT'],
+  ['SELL_SHORT', 'SHORT'], ['BUY_TO_COVER', 'EXIT']]) {
+  test(`four-action preview: ${instruction} keeps exact intent while flat and captures a synthetic refusal`, async (t) => {
+    // Deliberately NOT a fixture claiming Schwab's response schema for this
+    // direction. Arbitrary non-2xx bytes prove capture and identity, not clearance.
+    const raw = `SYNTHETIC PREVIEW REFUSAL FOR ${instruction}\n`;
+    const { db, result, binding, bucket } = await previewReceiptFixture(t, raw,
+      { status: 400, instruction, positionSide: 'FLAT' });
+    assert.equal(result.status, 422);
+    assert.equal(result.body.faultCode, `SCHWAB_LANE_MARKET_PREVIEW_${prefix}_400`);
+    assert.equal(result.body.state, 'DISARMED');
+    assert.equal(db.rows[1].event_type, 'LANE_1_ORDER_PREVIEW_REFUSED');
+    const receipt = JSON.parse(db.rows[1].detail_json);
+    assert.equal(receipt.brokerInstruction, instruction);
+    assert.equal(receipt.replayBody.side, instruction);
+    assert.equal(receipt.sourceIngressId, INGRESS_ID);
+    assert.equal(receipt.tvBodyBindingSha256, binding.tvBodyBindingSha256);
+    assert.equal(receipt.rawResponseEvidence.httpStatus, 400);
+    assert.equal(receipt.rawResponseEvidence.sha256, createHash('sha256').update(raw).digest('hex'));
+    assert.equal(Buffer.from(await decryptStored(bucket, receipt.rawResponseEvidence.bodyKey)).toString(), raw);
+  });
 }
 
 test('complete broker response is saved before refusal, not just our scalar summary', async (t) => {
