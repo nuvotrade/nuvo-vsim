@@ -2096,7 +2096,9 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .replace('lane-summary-card', 'lane-summary-card bot-lane-summary-card')
     .replaceAll('lane-summary-title', 'bot-lane-summary-title');
   const mobileSystemCard = `<article class="panel system-brief mobile-system-brief" aria-label="System status"></article>`;
+  const botDisarmStrip = `<article class="panel bot-disarm-strip" aria-label="Lane 1 emergency stop"><div class="bot-disarm-copy"><span>LANE_1 · ORDER GATE</span><strong data-vsim="bot-disarm-state" data-state="disarmed" role="status" aria-live="polite">DISARMED</strong><small>Stops new orders — does not cancel or flatten</small></div><button class="cc-directive bot-disarm-button" type="button" data-action="laneDisarm">DISARM</button><p class="bot-disarm-error" data-vsim="bot-disarm-error" role="alert" aria-live="assertive" hidden></p></article>`;
   const bot = `<section class="view" id="bot" aria-labelledby="bot-title">
+    ${botDisarmStrip}
     <div class="page-heading"><div><p class="kicker">LANE_1_SPY · append-only operational evidence</p><h2 id="bot-title">BOT event ledger</h2></div><span class="readonly-tag">PHASE 1 · READ ONLY</span></div>
     ${mobileLaneSummaryCard}
     <div class="bot-ledger-counts" aria-label="Lane 1 event counts">
@@ -2142,6 +2144,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-red{color:var(--red)}.system-neutral{color:var(--muted)}.system-neutral .health-light{box-shadow:none}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
   </style>`;
   const botLedgerStyles = `<style>
+    .bot-disarm-strip{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:14px;margin-bottom:12px;padding:13px 15px;border-color:rgba(242,118,118,.5);background:linear-gradient(135deg,rgba(48,25,24,.82),rgba(8,21,16,.96))}.bot-disarm-copy{display:grid;grid-template-columns:auto auto;align-items:center;justify-content:start;gap:5px 10px;min-width:0}.bot-disarm-copy>span{color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.12em}.bot-disarm-copy>strong{padding:4px 7px;border:1px solid currentColor;border-radius:4px;color:var(--red);font:800 8px/1 var(--mono);letter-spacing:.09em}.bot-disarm-copy>strong[data-state="armed"]{color:var(--green)}.bot-disarm-copy>small{grid-column:1/-1;color:var(--text);font:700 9px/1.35 var(--mono)}.bot-disarm-button{min-width:92px;margin:0;border-color:var(--red);color:var(--red)}.bot-disarm-button:disabled{opacity:.55}.bot-disarm-error{grid-column:1/-1;margin:0;padding:9px 11px;border:1px solid rgba(242,118,118,.65);border-radius:5px;background:rgba(242,118,118,.13);color:var(--red);font:800 10px/1.4 var(--mono);overflow-wrap:anywhere}.bot-disarm-error[hidden]{display:none}
     .bot-ledger-counts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}.bot-ledger-counts>div{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:#081510}.bot-ledger-counts span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.13em}.bot-ledger-counts strong{display:block;margin-top:8px;font:700 20px/1.2 var(--mono)}.bot-ledger-counts small{display:block;margin-top:5px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em}.bot-ledger-scope{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:12px}.bot-ledger-scope h3,.bot-ledger-scope p{margin:0}.bot-ledger-scope h3{margin-top:5px}.bot-ledger-scope p:last-child{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.5}.bot-event-ledger{margin-top:0}.bot-event-ledger table{min-width:1120px}.bot-event-ledger td{font-family:var(--mono);font-size:9px}.bot-event-ledger .bot-refused{color:var(--red)}.bot-event-ledger .bot-clear{color:var(--green)}.bot-record-link{color:var(--cyan);text-decoration:none}.bot-record-link:hover,.bot-record-link:focus-visible{text-decoration:underline}.bot-raw-side{white-space:pre-wrap}.bot-ledger-source{margin:6px 0 0;color:var(--muted);font:700 8px/1.4 var(--mono)}.bot-ledger-source.source-fault{color:var(--red)}
     .lane-summary-card{min-width:0}.lane-summary-arm{padding:5px 8px;border:1px solid currentColor;border-radius:4px;color:var(--muted);font:800 8px/1 var(--mono);letter-spacing:.08em}.lane-summary-arm[data-state="on"]{color:var(--green)}.lane-summary-facts{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-facts>div{padding:9px 10px;min-width:0;border-right:1px solid var(--line)}.lane-summary-facts>div:last-child{border-right:0}.lane-summary-facts span,.lane-summary-block span,.lane-summary-last span,.lane-summary-today span{display:block;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{display:block;margin-top:5px;font:700 10px/1.3 var(--mono);overflow-wrap:anywhere}
     .lane-summary-matrix{margin-top:10px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-matrix-head,.lane-summary-matrix-row{display:grid;grid-template-columns:minmax(82px,1.35fr) .5fr .8fr .36fr;align-items:center}.lane-summary-matrix-head{background:#07110e;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{min-width:0;padding:6px 5px;border-right:1px solid var(--line)}.lane-summary-matrix-head span:last-child,.lane-summary-matrix-row>div:last-child{border-right:0}.lane-summary-matrix-row{border-top:1px solid var(--line);font:700 7px/1.2 var(--mono)}.lane-summary-matrix-row>div:first-child{color:var(--text);white-space:nowrap}.lane-summary-matrix-row>div[data-evidence]{text-align:center}.lane-summary-matrix-row small{display:none}.lane-summary-matrix .clear{color:var(--green)}.lane-summary-matrix .refused{color:var(--amber)}.lane-summary-matrix .unmeasured{color:var(--muted)}
@@ -2155,7 +2158,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
       .nav{grid-column:1/-1;order:3;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;gap:2px;overflow:visible}.nav-button{min-width:0;min-height:34px;padding:7px 4px;font-size:10px;line-height:1.15;white-space:normal}.nav-button.active:after{left:8px;right:8px;bottom:0}
       main{padding:18px 10px 36px}.page-heading{margin-bottom:16px}.page-heading h2{font-size:21px}.panel{padding:14px}.panel-head{gap:9px;margin-bottom:13px}.panel-head h3{font-size:16px}.metric-card{min-height:108px;padding:14px}.metric-value{font-size:25px;margin:9px 0}.metric-foot{font-size:9px}
       .lane-summary-card .panel-head{align-items:center}.lane-summary-arm{max-width:48%;text-align:right;line-height:1.25}.lane-summary-matrix-head,.lane-summary-matrix-row{grid-template-columns:minmax(96px,1.45fr) .52fr .8fr .38fr}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{padding:7px 4px}.lane-summary-matrix-row{font-size:8px}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{font-size:11px}
-      #bot>.bot-lane-summary-card{display:block}#bot>*:not(.bot-lane-summary-card){display:none}
+      #bot>.bot-disarm-strip,#bot>.bot-lane-summary-card{display:grid}#bot>*:not(.bot-disarm-strip):not(.bot-lane-summary-card){display:none}.bot-disarm-strip{grid-template-columns:minmax(0,1fr) auto;position:relative;top:auto}.bot-disarm-copy{grid-template-columns:1fr}.bot-disarm-copy>small{grid-column:1}.bot-disarm-button{min-width:82px;min-height:44px;padding:9px 10px}
       #system>.mobile-system-brief{display:block}#system>*:not(.mobile-system-brief){display:none}
       .system-health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-health-tile{min-height:48px;padding:10px 8px;font-size:8px;gap:6px}.system-health-details{display:none}.system-overall{max-width:52%;line-height:1.25;text-align:right}.system-health-meta{font-size:7px}
       .pnl-calendar-head{display:grid}.pnl-calendar-tools{width:100%;flex-wrap:wrap;justify-content:space-between}
@@ -3542,6 +3545,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     const intendedArmOff = summary.arm?.value === 'OFF' && summary.blocking === 'ARM_OFF · INTENDED';
     textAll('[data-vsim="lane-summary-arm"]', armStage ? armStage + (intendedArmOff ? ' · intended' : '') : '—');
     arms.forEach(arm => { arm.dataset.state = String(summary.arm?.value || '').toLowerCase(); });
+    if (summary.arm?.value === 'ON' || summary.arm?.value === 'OFF') {
+      setLaneState(summary.arm.value === 'ON');
+    }
     textAll('[data-vsim="lane-summary-position"]', summary.position?.value === 'NOT_MEASURED'
       ? '—' : (summary.position?.value || '—'));
     textAll('[data-vsim="lane-summary-fills"]', number(summary.fills?.provenInstructions || 0)
@@ -3651,17 +3657,17 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   function setLaneState(armed) {
-    const node = q('[data-e3="lane-state"]');
-    if (!node) return;
-    node.dataset.state = armed ? 'armed' : 'disarmed';
-    text(node, armed ? 'ARMED' : 'DISARMED');
+    qa('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]').forEach(node => {
+      node.dataset.state = armed ? 'armed' : 'disarmed';
+      text(node, armed ? 'ARMED' : 'DISARMED');
+    });
   }
 
   function showLaneError(message) {
-    const node = q('[data-e3="lane-error"]');
-    if (!node) return;
-    text(node, message || '');
-    node.hidden = !message;
+    qa('[data-e3="lane-error"], [data-vsim="bot-disarm-error"]').forEach(node => {
+      text(node, message || '');
+      node.hidden = !message;
+    });
   }
 
   function showLanePreviewResult(message) {
@@ -3779,7 +3785,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       clearKill: 'Clear the independent kill switch after verifying its cause is gone?',
     };
     if (action === 'laneArm' || action === 'laneDisarm') {
-      const stateNode = q('[data-e3="lane-state"]');
+      if (action === 'laneDisarm'
+        && !window.confirm('DISARM Lane 1? Stops new orders — does not cancel or flatten.')) return;
+      const stateNode = q('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]');
       const previousArmed = stateNode && stateNode.dataset.state === 'armed';
       const laneButtons = qa('[data-action="laneArm"], [data-action="laneDisarm"]');
       showLaneError(null);

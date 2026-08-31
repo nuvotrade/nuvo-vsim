@@ -81,7 +81,11 @@ test('pane C is confined to Engine spine and Overview source remains untouched',
   const laneEnd = script.indexOf("if (['pause','resume','kill','clearKill']", laneStart);
   assert.ok(laneStart > 0 && laneEnd > laneStart);
   const laneBranch = script.slice(laneStart, laneEnd);
-  assert.doesNotMatch(laneBranch, /confirm|alert|scroll|location|hash/u);
+  assert.match(laneBranch,
+    /action === 'laneDisarm'[\s\S]{0,120}window\.confirm\('DISARM Lane 1\? Stops new orders — does not cancel or flatten\.'\)/u);
+  assert.equal((laneBranch.match(/window\.confirm\(/gu) || []).length, 1,
+    'DISARM uses one confirmation and no dialog chain');
+  assert.doesNotMatch(laneBranch, /window\.alert|scroll|location|hash/u);
   assert.doesNotMatch(script, /Arm LANE_1_SPY until you click DISARM/u);
   assert.doesNotMatch(script, /Disarm LANE_1_SPY now/u);
 });

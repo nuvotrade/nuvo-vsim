@@ -8,10 +8,29 @@ test('phone monitoring layout reaches every live tab and uses dedicated BOT and 
     assert.match(html, new RegExp(`data-view="${view}"`, 'u'));
   }
   assert.match(html, /grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/u);
-  assert.match(html, /#bot>\.bot-lane-summary-card\{display:block\}/u);
+  assert.match(html, /#bot>\.bot-disarm-strip,#bot>\.bot-lane-summary-card\{display:grid\}/u);
   assert.match(html, /#system>\.mobile-system-brief\{display:block\}/u);
   assert.match(html, /Principal-confirmed alert configuration; not runtime evidence\./u);
   assert.doesNotMatch(html, /Evidence and measurement notes|lane-summary-details|lane-summary-source/u);
+});
+
+test('BOT emergency DISARM is the first phone surface and reports coordinator truth', async () => {
+  const html = await (await fullDashboard(undefined, { e3SpineTab: true })).text();
+  const botStart = html.indexOf('<section class="view" id="bot"');
+  const stripStart = html.indexOf('class="panel bot-disarm-strip"', botStart);
+  const headingStart = html.indexOf('class="page-heading"', botStart);
+  assert.ok(botStart >= 0 && stripStart > botStart && stripStart < headingStart,
+    'DISARM surface is the first BOT child');
+  assert.match(html, /data-action="laneDisarm">DISARM<\/button>/u);
+  assert.match(html, /Stops new orders — does not cancel or flatten/u);
+  assert.match(html, /data-vsim="bot-disarm-state"[^>]+role="status"[^>]*>DISARMED/u);
+  assert.match(html, /data-vsim="bot-disarm-error" role="alert" aria-live="assertive" hidden/u);
+
+  const script = liveDashboardScript({ e3SpineTab: true });
+  assert.match(script, /qa\('\[data-e3="lane-state"\], \[data-vsim="bot-disarm-state"\]'\)/u);
+  assert.match(script, /qa\('\[data-e3="lane-error"\], \[data-vsim="bot-disarm-error"\]'\)/u);
+  assert.match(script, /if \(outcome\.error\) showLaneError\(outcome\.error\);\s*else setLaneState\(outcome\.armed\);/u);
+  assert.doesNotMatch(script, /bot-disarm-state[^\n]{0,180}(?:fetch|api\()/u);
 });
 
 test('phone portfolio tables become labeled cards instead of clipped or horizontal tables', async () => {
