@@ -1,0 +1,39 @@
+{
+  "mode": "OFFLINE_ARCHIVE_AND_INGRESS_ISOLATION_CHECK_NOT_A_RECEIPT_READER",
+  "id": "eba4d1ac-3e3f-4735-92bb-0309732c1f52",
+  "eventType": "LANE_1_ORDER_PREVIEW",
+  "createdAt": "2026-08-31T17:55:40.448Z",
+  "sourceArtifact": "/Users/nuvo/Documents/Codex/2026-08-31/nuvo-preview-live-mapping/VALIDATION_RECEIPT.json",
+  "artifactBytes": 6053,
+  "artifactSha256": "16510810bc0badb255128c4bb0d80c83d0a99c8e289a18241311bc0e6d9fdc05",
+  "provenance": "Saved parsed-detail JSON export; not original D1 detail_json wire bytes or a fresh D1 read.",
+  "archiveDecodeAndRoundTrip": "PASS",
+  "archiveUnchanged": true,
+  "preserved": {
+    "signal": "LONG",
+    "brokerInstruction": "BUY",
+    "quantity": 1,
+    "quantityType": "number",
+    "symbol": "SPY",
+    "replayBodySide": "BUY",
+    "tvBodyBindingSha256": "21baaecb3006248b6bf21c186684c855d55e5255b5c004970033221762a2188c"
+  },
+  "newDiagnosticFields": "ABSENT_UNRECORDED_NOT_NULL_REJECTION",
+  "previewProjectionWriter": {
+    "unchangedVsProduction": true,
+    "sha256": "58eb0d880c702f057d9c26a3b0988ad1e70764af9a7f918b1249d3d34b0dd3e1"
+  },
+  "runtimeIngressSelector": "EXCLUDES_PREVIEW_RECEIPT",
+  "receiptIdAsIngress": {
+    "status": 404,
+    "faultCode": "LANE_1_PREVIEW_SOURCE_NOT_FOUND"
+  },
+  "queries": [
+    "SELECT id,detail_json,created_at FROM operational_audit\n    WHERE owner_id=? AND event_type='LANE_1_TV_INGRESS'\n    ORDER BY created_at DESC LIMIT 50",
+    "SELECT id,detail_json,created_at FROM operational_audit\n    WHERE id=? AND owner_id=? AND event_type='LANE_1_TV_INGRESS' LIMIT 1"
+  ],
+  "networkCalls": 0,
+  "writeCalls": 0,
+  "historicalPreviewReceiptReader": "NONE_FOUND_IN_CURRENT_WORKER_OR_DASHBOARD",
+  "backwardReadThroughProductionReader": "NOT_PROVEN_NO_SUCH_READER"
+}

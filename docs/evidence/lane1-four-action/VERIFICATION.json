@@ -1,0 +1,902 @@
+{
+  "sourceGit": "ffe157a0c0e23fbd43078a64d613e4fd82e445e8",
+  "guardGit": "198a9db26b92ad8c22bf0f7b6f9dfd25ee0798f4",
+  "productionSourceGit": "ed08909f3b3cdab2404a790d2a2a777e1b9d8afb",
+  "scope": "LOCAL_ONLY_NO_UPLOAD_NO_WEBHOOK_NO_BROKER_NO_ARM",
+  "backwardReadEvidence": "BACKWARD_READ.json",
+  "fullTestNameInventory": "TEST_NAME_INVENTORY.json",
+  "historicalReceiptReaderFinding": "No persisted preview-receipt reader in the current Worker/dashboard. Archive decode and ingress isolation pass; production backward-read is NOT PROVEN. No migration or new reader added.",
+  "finalEvidenceAudit": {
+    "suiteRerunPass": 672,
+    "suiteRerunFail": 0,
+    "fourthLocalBuildSha256": "b5dce61b1a129a8843f1b5392036e8cd241602b56cd9661830b3494bc9090e86",
+    "fourthLocalBuildBytes": 1984156,
+    "runtimeSourceUnchangedSinceSourceGit": true,
+    "note": "Fourth build follows the documentation/offline-receipt-audit additions. No candidate runtime change. Original three builds include the clean export."
+  },
+  "baseline": {
+    "tests": 642,
+    "pass": 642,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "candidate": {
+    "tests": 672,
+    "pass": 672,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "addedTests": [
+    "four-action ingress: raw lowercase buy is distinguishable from accepted BUY",
+    "four-action ingress: diagnostic representation preserves scalar types and omits nested values",
+    "four-action ingress: wrong secret never writes an authenticated diagnostic receipt",
+    "four-action preview: historical alias rows are not reinterpreted or edited",
+    "four-action preview: BUY keeps exact intent while flat and captures a synthetic refusal",
+    "four-action preview: SELL keeps exact intent while flat and captures a synthetic refusal",
+    "four-action preview: SELL_SHORT keeps exact intent while flat and captures a synthetic refusal",
+    "four-action preview: BUY_TO_COVER keeps exact intent while flat and captures a synthetic refusal",
+    "four-action: legacy LONG refuses before state access",
+    "four-action: legacy SHORT refuses before state access",
+    "four-action: legacy EXIT refuses before state access",
+    "four-action: legacy COVER refuses before state access",
+    "four-action: case folding trimming and coercion are forbidden",
+    "four-action: numeric one exact SPY and exact body keys remain required",
+    "four-action: SELL while SHORT refuses and never constructs a cover dispatch",
+    "four-action: seal preserves every exact instruction independently of position",
+    "four-action: seal refuses missing aliases and contradictory normalized direction",
+    "four-action: Monday BUY binding remains identical and aliases are not replayable",
+    "four-action: BUY remains exact through synthetic controller seal and receipt",
+    "four-action: DISARMED BUY never reads positions claims or sends",
+    "four-action: UNKNOWN position refuses BUY before claim",
+    "four-action: SELL remains exact through synthetic controller seal and receipt",
+    "four-action: DISARMED SELL never reads positions claims or sends",
+    "four-action: UNKNOWN position refuses SELL before claim",
+    "four-action: SELL_SHORT remains exact through synthetic controller seal and receipt",
+    "four-action: DISARMED SELL_SHORT never reads positions claims or sends",
+    "four-action: UNKNOWN position refuses SELL_SHORT before claim",
+    "four-action: BUY_TO_COVER remains exact through synthetic controller seal and receipt",
+    "four-action: DISARMED BUY_TO_COVER never reads positions claims or sends",
+    "four-action: UNKNOWN position refuses BUY_TO_COVER before claim"
+  ],
+  "replacedNames": [
+    "TV vocabulary is locked and SELL or EXIT flattens either side",
+    "every valid no-send TV alert returns 200 and never an order conflict",
+    "SHORT opens from flat and SELL covers it without a preview gate",
+    "ARM remains live after EXIT and a later opening starts a new episode",
+    "durable Principal ARM enables LONG and EXIT while environment stays OFF"
+  ],
+  "replacementNames": [
+    "TV vocabulary is exactly four broker instructions with explicit exit intent",
+    "contradictory TV instructions return named refusals before any claim or send",
+    "SELL_SHORT opens and only BUY_TO_COVER closes the synthetic short round trip",
+    "ARM remains live after explicit SELL and a later opening starts a new episode",
+    "durable Principal ARM enables BUY and SELL while environment stays OFF"
+  ],
+  "mutations": {
+    "parser": {
+      "mode": "offline in-memory module edits; no application writes",
+      "total": 15,
+      "detected": 15,
+      "results": [
+        {
+          "name": "restore SELL/EXIT alias",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "TV vocabulary is exactly four broker instructions with explicit exit intent",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "accept LONG alias",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: legacy LONG refuses before state access",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "accept SHORT alias",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: legacy SHORT refuses before state access",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "accept COVER alias",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: legacy COVER refuses before state access",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "case insensitive matching",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: case folding trimming and coercion are forbidden",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "trimming matching",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: case folding trimming and coercion are forbidden",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "string coercion matching",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: case folding trimming and coercion are forbidden",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "SELL while SHORT constructs cover",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: seal preserves every exact instruction independently of position",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "restore position-based builder interpretation",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: seal preserves every exact instruction independently of position",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "reinterpret SELL through both state check and builder",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: SELL while SHORT refuses and never constructs a cover dispatch",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "skip signal/instruction agreement",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "four-action: seal refuses missing aliases and contradictory normalized direction",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "normalize raw side in stored message",
+          "file": "cloudflare/lane-1-runtime.js",
+          "test": "four-action ingress: raw lowercase buy is distinguishable from accepted BUY",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "normalize display side again",
+          "file": "cloudflare/lane-1-runtime.js",
+          "test": "four-action ingress: raw lowercase buy is distinguishable from accepted BUY",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "backfill rejected acceptedInstruction from raw",
+          "file": "cloudflare/lane-1-runtime.js",
+          "test": "four-action ingress: raw lowercase buy is distinguishable from accepted BUY",
+          "healthy": "PASS",
+          "detected": true
+        },
+        {
+          "name": "omit rejection receipt",
+          "file": "cloudflare/lane-1-runtime.js",
+          "test": "four-action ingress: raw lowercase buy is distinguishable from accepted BUY",
+          "healthy": "PASS",
+          "detected": true
+        }
+      ]
+    },
+    "guards": {
+      "mutationMode": "in-memory loader; no application writes",
+      "detected": 26,
+      "total": 26,
+      "results": [
+        {
+          "name": "missing positions default FLAT",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "missing positions never means FLAT",
+          "detected": true
+        },
+        {
+          "name": "coerce quantity strings",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "missing and nonnumeric long/short quantities refuse without coercion",
+          "detected": true
+        },
+        {
+          "name": "net away gross exposure",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "gross and fractional exposure cannot net to an allowed position",
+          "detected": true
+        },
+        {
+          "name": "ignore coordinator/broker disagreement",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "known coordinator/broker disagreement refuses",
+          "detected": true
+        },
+        {
+          "name": "skip quantity contract",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "instruction quantity is numeric one only",
+          "detected": true
+        },
+        {
+          "name": "allow SELL while flat",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "FLAT + SELL =>",
+          "detected": true
+        },
+        {
+          "name": "allow BUY while long",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "LONG + BUY =>",
+          "detected": true
+        },
+        {
+          "name": "allow SELL_SHORT while short",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "SHORT + SELL_SHORT =>",
+          "detected": true
+        },
+        {
+          "name": "allow COVER while flat",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "FLAT + BUY_TO_COVER =>",
+          "detected": true
+        },
+        {
+          "name": "skip working-order refusal",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "working and pending SPY orders block",
+          "detected": true
+        },
+        {
+          "name": "skip nested orders",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "SPY in a second leg or child of a terminal parent cannot be skipped",
+          "detected": true
+        },
+        {
+          "name": "ignore capped results",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "capped order result is not proof of no working orders",
+          "detected": true
+        },
+        {
+          "name": "ignore final account change",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "final account or position change refuses",
+          "detected": true
+        },
+        {
+          "name": "ignore order-history change",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "changed terminal order history or query window refuses even while flat",
+          "detected": true
+        },
+        {
+          "name": "allow stale final snapshot",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "slow future or invalid final reads refuse",
+          "detected": true
+        },
+        {
+          "name": "ignore final DISARM",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "final DISARM wins over an earlier armed snapshot",
+          "detected": true
+        },
+        {
+          "name": "ignore expired ARM",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "expired or missing final ARM window refuses",
+          "detected": true
+        },
+        {
+          "name": "ignore changed claim",
+          "file": "src/lane/lane-1-position-guards.js",
+          "test": "changed claim stage identity instruction or accepted order refuses",
+          "detected": true
+        },
+        {
+          "name": "skip final comparison at transport boundary",
+          "file": "cloudflare/schwab-client.js",
+          "test": "position changes after initial read => exact refusal and zero POST",
+          "detected": true
+        },
+        {
+          "name": "reuse initial snapshot instead of rereading broker",
+          "file": "cloudflare/schwab-client.js",
+          "test": "working order appears after initial read => exact refusal and zero POST",
+          "detected": true
+        },
+        {
+          "name": "skip final coordinator check at transport boundary",
+          "file": "cloudflare/schwab-client.js",
+          "test": "Principal disarms during broker reads => exact refusal and zero POST",
+          "detected": true
+        },
+        {
+          "name": "broker failure becomes empty data",
+          "file": "cloudflare/schwab-client.js",
+          "test": "orders endpoint fails => exact refusal and zero POST",
+          "detected": true
+        },
+        {
+          "name": "skip partial response checks",
+          "file": "cloudflare/schwab-client.js",
+          "test": "partial HTTP 206 list => exact refusal and zero POST",
+          "detected": true
+        },
+        {
+          "name": "runtime drops baseline snapshot",
+          "file": "cloudflare/lane-1-runtime.js",
+          "test": "production runtime wiring carries snapshot and claim identity through to the final recheck",
+          "detected": true
+        },
+        {
+          "name": "reconciliation skips unknown coordinator",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "reconciliation reports unknown coordinator state instead of skipping it",
+          "detected": true
+        },
+        {
+          "name": "reconciliation skips broker shape check",
+          "file": "src/lane/lane-1-spy-v2.js",
+          "test": "reconciliation reports unknown broker state instead of calling it an external flatten",
+          "detected": true
+        }
+      ]
+    },
+    "preview": {
+      "scope": "offline in-memory module mutations; no source writes",
+      "killed": 13,
+      "total": 13,
+      "results": [
+        {
+          "mutant": "quantity guard removed",
+          "test": "live-body negative mutation refuses: missing order quantity",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "string quantity coerced",
+          "test": "live-derived response mapping fails closed on quantity \"1\"",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "legacy leg quantity fallback",
+          "test": "live-body negative mutation refuses: legacy leg quantity cannot replace missing order quantity",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "symbol guard removed",
+          "test": "omitted lists cannot bypass echoed contract: missing symbol; mismatch is retained",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "legacy finalSymbol fallback",
+          "test": "live-body negative mutation refuses: legacy finalSymbol cannot replace missing instrument symbol",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "single-leg guard removed",
+          "test": "two live-derived legs with order-level quantity exactly one refuse",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "reject guard removed",
+          "test": "nonempty rejects added to the live warns-only body refuses",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "review guard removed",
+          "test": "nonempty reviews added to the live warns-only body refuses",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "asset allowlists removed",
+          "test": "live-body negative mutation refuses: unknown assets agree",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "asset agreement removed",
+          "test": "live-body negative mutation refuses: allowed assets disagree leg EQUITY",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "old wrong mapping restored",
+          "test": "production-byte mapping: unchanged redacted live BUY SPY one-share body with warns only clears",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "old receipt quantity projection restored",
+          "test": "production-byte mapping: unchanged redacted live BUY SPY one-share body with warns only clears",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        },
+        {
+          "mutant": "OPTION refusal guard removed",
+          "test": "omitted lists cannot bypass echoed contract: option asset; mismatch is retained",
+          "healthy": "PASS",
+          "mutated": "FAIL_EXPECTED",
+          "killed": true
+        }
+      ]
+    }
+  },
+  "runtimeHashes": {
+    "src/lane/lane-1-position-guards.js": "bc59b699ec470163403024035b3250fc09d3a623396df0802d4216117f6b4c53",
+    "src/lane/lane-1-spy-v2.js": "8b09220f9d521171686c0a5ea88e8cb46acc1820bf03ed0aa3d38f994294221e",
+    "cloudflare/schwab-client.js": "78ee28592c7fb3367339e7e6a9a5b8b33fb9f21147a9d9557fb8658fdf3993e9",
+    "cloudflare/lane-1-runtime.js": "83078799da919fcc470a9bf43fd5b072dc51b935f9262f9cf6f27123e3f03612"
+  },
+  "filesVsProduction": [
+    "cloudflare/lane-1-runtime.js",
+    "cloudflare/schwab-client.js",
+    "docs/LANE_1_STATE_GUARDS_PACKET.md",
+    "docs/evidence/lane1-state-guards/VERIFICATION.json",
+    "scripts/lane1-four-action-mutations.mjs",
+    "scripts/lane1-state-guard-mutations.mjs",
+    "src/lane/lane-1-position-guards.js",
+    "src/lane/lane-1-spy-v2.js",
+    "test/fixtures/lane-1-synthetic-state.js",
+    "test/helpers/lane-1-state-probes.js",
+    "test/lane-1-dispatch-recheck.test.js",
+    "test/lane-1-ingress-preview.test.js",
+    "test/lane-1-position-guards.test.js",
+    "test/lane-1-production-adapters.test.js",
+    "test/lane-1-spy-v2.test.js"
+  ],
+  "runtimeHunksVsProduction": [
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -151 +151 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -236 +236 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -238 +238 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -434,3 +434,5 @@ function brokerV2Adapter(env, ownerId) {"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -582,0 +585,2 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -586,3 +590,23 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -592 +616,4 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -624,0 +652,6 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "cloudflare/schwab-client.js",
+      "hunk": "@@ -10,0 +11,4 @@ import { resolveSchwabFillEvidence } from '../src/economic/schwab-fill-identity."
+    },
+    {
+      "file": "cloudflare/schwab-client.js",
+      "hunk": "@@ -697 +701 @@ export class SchwabD1Client {"
+    },
+    {
+      "file": "cloudflare/schwab-client.js",
+      "hunk": "@@ -702,0 +707,14 @@ export class SchwabD1Client {"
+    },
+    {
+      "file": "cloudflare/schwab-client.js",
+      "hunk": "@@ -960,14 +978,27 @@ export class SchwabD1Client {"
+    },
+    {
+      "file": "cloudflare/schwab-client.js",
+      "hunk": "@@ -1000,2 +1031,2 @@ export class SchwabD1Client {"
+    },
+    {
+      "file": "cloudflare/schwab-client.js",
+      "hunk": "@@ -1007,0 +1039,4 @@ export class SchwabD1Client {"
+    },
+    {
+      "file": "cloudflare/schwab-client.js",
+      "hunk": "@@ -1008,0 +1044,7 @@ export class SchwabD1Client {"
+    },
+    {
+      "file": "src/lane/lane-1-position-guards.js",
+      "hunk": "@@ -0,0 +1,155 @@"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -4,0 +5,2 @@ import { moneyCents } from '../economic/money-cents.js';"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -34,3 +36,5 @@ export function normalizeLane1V21Signal(side) {"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -86 +90 @@ function faultCode(error) {"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -87,0 +92,3 @@ export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -91,2 +98,4 @@ export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -98 +107 @@ export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -207,4 +216,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -214,5 +226 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -253,0 +262 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -255 +264,4 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -262 +274 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -265,0 +278,2 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -273 +287 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -293 +307 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -321 +335 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -322,0 +337,3 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -323,0 +341 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    }
+  ],
+  "runtimeHunksVsGuards": [
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -151 +151 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -236 +236 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -238 +238 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -584,0 +585,2 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -588,3 +590,23 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -594 +616,4 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "cloudflare/lane-1-runtime.js",
+      "hunk": "@@ -626,0 +652,6 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -36,3 +36,5 @@ export function normalizeLane1V21Signal(side) {"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -88 +90 @@ function faultCode(error) {"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -89,0 +92,3 @@ export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -93,2 +98,4 @@ export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -100 +107 @@ export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -209 +216 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -219,5 +226 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    },
+    {
+      "file": "src/lane/lane-1-spy-v2.js",
+      "hunk": "@@ -263 +266 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle"
+    }
+  ],
+  "preservedFiles": [
+    {
+      "path": "cloudflare/wrangler.jsonc",
+      "unchanged": true,
+      "sha256": "081eeae7ad365c1a54628dac6bc6d415d590c0b62a1fcaa42e1bf150824c3bd9"
+    },
+    {
+      "path": "cloudflare/worker.js",
+      "unchanged": true,
+      "sha256": "99e6312c015f3d200de61eb9f16cd381468728d18102be8f5d20841d120840be"
+    },
+    {
+      "path": "cloudflare/platform.js",
+      "unchanged": true,
+      "sha256": "9d5348ec92aeb0d6bbe17b7962a94ec31b2e188c4dfb81fd868f0a2baac7a6e1"
+    },
+    {
+      "path": "cloudflare/preview-response-evidence.js",
+      "unchanged": true,
+      "sha256": "0235fb540b548745133acc87fb14540c2b8a4fe9a3802b9a2fd9b7e81b767a64"
+    },
+    {
+      "path": "cloudflare/preview-evidence-codec.js",
+      "unchanged": true,
+      "sha256": "a7a1d09e106ef59ca86afd49fc4095882b0ae8356d7fc5d9ebd3a990ed22d106"
+    },
+    {
+      "path": "package.json",
+      "unchanged": true,
+      "sha256": "5a66ccee5b766850b2bb201b34b5f2911f8acf1c7a9a7509c50c2afa44ff96fa"
+    },
+    {
+      "path": "package-lock.json",
+      "unchanged": true,
+      "sha256": "5005dabef58b0c653d939103894ad47bc13a429bf3ddf8e148edceddcf31d957"
+    }
+  ],
+  "bundles": {
+    "candidateA": {
+      "sha256": "b5dce61b1a129a8843f1b5392036e8cd241602b56cd9661830b3494bc9090e86",
+      "bytes": 1984156
+    },
+    "candidateB": {
+      "sha256": "b5dce61b1a129a8843f1b5392036e8cd241602b56cd9661830b3494bc9090e86",
+      "bytes": 1984156
+    },
+    "rollback": {
+      "version": "42a4f738-5e2e-4e69-8c91-c451a609b3a7",
+      "sha256": "8ff5da076e633838ab4828ae8e0a09e491ea7c3723a45481c96d611dbd542a65",
+      "bytes": 1971149
+    },
+    "cleanExport": {
+      "sha256": "b5dce61b1a129a8843f1b5392036e8cd241602b56cd9661830b3494bc9090e86",
+      "bytes": 1984156,
+      "sourceGit": "ffe157a0c0e23fbd43078a64d613e4fd82e445e8",
+      "dependencyMode": "isolated npm ci --ignore-scripts --no-audit --no-fund",
+      "path": "/tmp/nuvo-four-action-clean-3zqZ0G/cloudflare/.wrangler/clean-export/entry.js",
+      "tests": {
+        "tests": 672,
+        "pass": 672,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    }
+  },
+  "liveBindingComparison": "NOT_RUN_REQUIRED_BEFORE_TRAFFIC_SWITCH",
+  "previewHelperAudit": {
+    "scope": "test helper instrumentation only; no application edit",
+    "existingDefaultBuyTests": 90,
+    "allDefaultsUnchanged": true,
+    "tests": [
+      "complete broker response is saved before refusal, not just our scalar summary",
+      "capture failure never clears a preview and never retries Schwab",
+      "D1 failure cannot discard the already saved complete broker response",
+      "failed preview saves reject and exact raw hash without relaxing the gate",
+      "failed preview saves review and exact raw hash without relaxing the gate",
+      "failed preview saves null and malformed arrays and exact raw hash without relaxing the gate",
+      "failed preview saves missing validation and exact raw hash without relaxing the gate",
+      "failed preview saves malformed JSON hash without inventing empty rejects or reviews",
+      "failed preview saves broker rejection fields on non-2xx without changing its refusal code",
+      "receipt storage failure is explicit, remains disarmed, and never claims a proof",
+      "warnings alone still clear an exact preview; success does not write a refusal receipt",
+      "exact preview clears with both rejects and reviews omitted; receipt retains omission, warning, and raw hash",
+      "exact preview clears with only rejects omitted; receipt retains omission, warning, and raw hash",
+      "exact preview clears with only reviews omitted; receipt retains omission, warning, and raw hash",
+      "exact preview clears with all optional lists omitted; receipt retains omission, warning, and raw hash",
+      "preview refuses explicit rejects=null instead of treating it as omitted",
+      "preview refuses explicit rejects=\"not an array\" instead of treating it as omitted",
+      "preview refuses explicit rejects={} instead of treating it as omitted",
+      "preview refuses explicit rejects=0 instead of treating it as omitted",
+      "preview refuses explicit rejects=false instead of treating it as omitted",
+      "preview refuses explicit reviews=null instead of treating it as omitted",
+      "preview refuses explicit reviews=\"not an array\" instead of treating it as omitted",
+      "preview refuses explicit reviews={} instead of treating it as omitted",
+      "preview refuses explicit reviews=0 instead of treating it as omitted",
+      "preview refuses explicit reviews=false instead of treating it as omitted",
+      "preview refuses explicit warns=null instead of treating it as omitted",
+      "preview refuses explicit warns=\"not an array\" instead of treating it as omitted",
+      "preview refuses explicit warns={} instead of treating it as omitted",
+      "preview refuses explicit warns=0 instead of treating it as omitted",
+      "preview refuses explicit warns=false instead of treating it as omitted",
+      "preview refuses explicit alerts=null instead of treating it as omitted",
+      "preview refuses explicit alerts=\"not an array\" instead of treating it as omitted",
+      "preview refuses explicit alerts={} instead of treating it as omitted",
+      "preview refuses explicit alerts=0 instead of treating it as omitted",
+      "preview refuses explicit alerts=false instead of treating it as omitted",
+      "preview refuses a non-object validation result null",
+      "preview refuses a non-object validation result []",
+      "preview refuses a non-object validation result \"malformed validation\"",
+      "preview refuses a non-object validation result true",
+      "preview refuses a non-object validation result 42",
+      "a nonempty rejects list blocks even when the other list is omitted and severity says WARN",
+      "a nonempty reviews list blocks even when the other list is omitted and severity says WARN",
+      "omitted lists cannot bypass echoed contract: LIMIT order; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: TRIGGER strategy; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: extended session; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: GTC duration; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: second leg; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: child order; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: SELL instruction; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: quantity two; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: wrong symbol; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: option asset; mismatch is retained",
+      "omitted lists cannot bypass echoed contract: missing symbol; mismatch is retained",
+      "omitted validation lists cannot make a missing echoed order clear",
+      "production-byte mapping: unchanged redacted live BUY SPY one-share body with warns only clears",
+      "live-derived response mapping fails closed on quantity true",
+      "live-derived response mapping fails closed on quantity \"1\"",
+      "live-derived response mapping fails closed on quantity 0",
+      "live-derived response mapping fails closed on quantity 1.1",
+      "live-derived response mapping fails closed on quantity null",
+      "live-derived response mapping fails closed on legs null",
+      "live-derived response mapping fails closed on legs {}",
+      "live-derived response mapping fails closed on legs []",
+      "live-derived response mapping fails closed on malformed children null",
+      "live-derived response mapping fails closed on malformed children {}",
+      "live-derived response mapping fails closed on malformed children false",
+      "live-derived response mapping fails closed on legacy-only request-shaped echo",
+      "live-derived response mapping fails closed on mixed response and request leg shapes",
+      "two live-derived legs with order-level quantity exactly one refuse",
+      "nonempty rejects added to the live warns-only body refuses",
+      "nonempty reviews added to the live warns-only body refuses",
+      "explicit EQUITY on both live-derived asset paths also clears",
+      "live-body negative mutation refuses: missing order quantity",
+      "live-body negative mutation refuses: legacy leg quantity cannot replace missing order quantity",
+      "live-body negative mutation refuses: legacy finalSymbol cannot replace missing instrument symbol",
+      "live-body negative mutation refuses: symbol number",
+      "live-body negative mutation refuses: symbol lowercase",
+      "live-body negative mutation refuses: symbol array",
+      "live-body negative mutation refuses: quantity object",
+      "live-body negative mutation refuses: empty legs",
+      "live-body negative mutation refuses: missing instrument",
+      "live-body negative mutation refuses: null instrument",
+      "live-body negative mutation refuses: missing leg asset",
+      "live-body negative mutation refuses: missing instrument asset",
+      "live-body negative mutation refuses: unknown assets agree",
+      "live-body negative mutation refuses: OPTION assets agree",
+      "live-body negative mutation refuses: leg asset null",
+      "live-body negative mutation refuses: instrument asset array",
+      "live-body negative mutation refuses: allowed assets disagree leg EQUITY",
+      "live-body negative mutation refuses: allowed assets disagree instrument EQUITY"
+    ]
+  },
+  "toolchain": {
+    "node": "24.18.0",
+    "npm": "11.16.0",
+    "wrangler": "4.125.0"
+  },
+  "testChanges": {
+    "existingTestBodiesEdited": 7,
+    "renamedOrRevised": 5,
+    "categoryCounts": {
+      "assertionChanged": 2,
+      "fixtureTokenChanged": 5
+    },
+    "assertionChanges": [
+      {
+        "old": "TV vocabulary is locked and SELL or EXIT flattens either side",
+        "new": "TV vocabulary is exactly four broker instructions with explicit exit intent",
+        "before": "LONG/SHORT/EXIT aliases accepted; SELL exitScope ANY",
+        "after": "BUY/SELL/SELL_SHORT/BUY_TO_COVER only; SELL exitScope LONG; BUY_TO_COVER exitScope SHORT; four aliases return null"
+      },
+      {
+        "old": "every valid no-send TV alert returns 200 and never an order conflict",
+        "new": "contradictory TV instructions return named refusals before any claim or send",
+        "before": "already-flat / already-in / must-exit-first no-op dispositions; market-only call absence",
+        "after": "exact instruction-specific fault code for all eight illegal known-position cells; zero claim and zero market calls; HTTP 200 sent:false preserved"
+      }
+    ],
+    "fixtureTokenChanges": [
+      {
+        "old": "SHORT opens from flat and SELL covers it without a preview gate",
+        "new": "SELL_SHORT opens and only BUY_TO_COVER closes the synthetic short round trip",
+        "change": "Input SHORT→SELL_SHORT and SELL→BUY_TO_COVER. Same expected broker instructions and FLAT result."
+      },
+      {
+        "old": "ARM remains live after EXIT and a later opening starts a new episode",
+        "new": "ARM remains live after explicit SELL and a later opening starts a new episode",
+        "change": "Input LONG→BUY, EXIT→SELL, SHORT→SELL_SHORT. Assertions unchanged."
+      },
+      {
+        "old": "a valid TV body reports faults with HTTP 200; malformed bodies remain 400",
+        "new": "a valid TV body reports faults with HTTP 200; malformed bodies remain 400",
+        "change": "LONG→BUY; extra-field negative input EXIT→SELL keeps that negative testing extra-field refusal, not a retired alias."
+      },
+      {
+        "old": "custody drift blocks before either market order",
+        "new": "custody drift blocks before either market order",
+        "change": "EXIT→SELL so the existing drift assertion remains reachable; no assertion change."
+      },
+      {
+        "old": "durable Principal ARM enables LONG and EXIT while environment stays OFF",
+        "new": "durable Principal ARM enables BUY and SELL while environment stays OFF",
+        "change": "LONG→BUY, EXIT→SELL. Existing order/authority assertions unchanged."
+      }
+    ],
+    "sharedHelper": "previewReceiptFixture gained optional instruction=BUY / positionSide=FLAT. All 90 existing callers retain those defaults; no test body or refusal assertion in those 90 was edited. Existing deep-equal order assertion parameterized; independent exact leg-instruction assertion added."
+  },
+  "limitations": [
+    "No live identity/ARM/binding query this turn; last recorded version is not a fresh production stamp.",
+    "No upload, traffic switch, alert authoring, real preview, webhook, broker order, cleanup or credential mutation.",
+    "D1 operational-audit writes retain existing best-effort behavior. A storage outage can prevent ingress/refusal receipts; HTTP rejection does not claim storage success.",
+    "Diagnostic representation preserves JSON scalar ticker/side/qty values. Secret, extra keys and nested field values are omitted with removedPaths; not wire bytes.",
+    "acceptedInstruction denotes authenticated parser/shape acceptance, not ARM permission, broker clearance or execution.",
+    "Production response schemas for SELL, SELL_SHORT and BUY_TO_COVER remain unproven; added directional capture tests use clearly synthetic non-2xx bytes.",
+    "60-day order lookback gap remains PRINCIPAL_ASSERTED (2026-08-31), not API-proven. Missing/truncated/partial/unreachable reads still refuse."
+  ]
+}

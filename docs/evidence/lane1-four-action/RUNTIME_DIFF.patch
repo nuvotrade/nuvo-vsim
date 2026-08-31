@@ -1,0 +1,524 @@
+diff --git a/cloudflare/lane-1-runtime.js b/cloudflare/lane-1-runtime.js
+index 702dde6..2e67f6b 100644
+--- a/cloudflare/lane-1-runtime.js
++++ b/cloudflare/lane-1-runtime.js
+@@ -148,7 +148,7 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
+   const seal = await lane1V2ProposalSeal({ signal: binding.normalized.signal,
+     rawSignalSide: binding.replayBody.side,
+     tvBodyBindingSha256: binding.tvBodyBindingSha256,
+-    positionSide: before.positionSide ?? 'FLAT', now: instant, uuid,
++    positionSide: before.positionSide ?? null, now: instant, uuid,
+     prior: before.open?.seal ?? null });
+   if (!env.EVIDENCE?.put || !env.EVIDENCE?.get) {
+     return refuse('LANE_1_PREVIEW_CAPTURE_BUCKET_REQUIRED');
+@@ -233,9 +233,9 @@ export async function previewStoredLane1Ingress({ env, ownerId, ingressId,
+     ...responseEvidence,
+     schwabEndpoint: '/previewOrder', accountMask: preview.accountMask ?? null,
+     coordinatorBefore: { armed: before.armed === true, stage: before.stage,
+-      positionSide: before.positionSide ?? 'FLAT', updatedAt: before.updatedAt ?? null },
++      positionSide: before.positionSide ?? null, updatedAt: before.updatedAt ?? null },
+     coordinatorAfter: { armed: after.armed === true, stage: after.stage,
+-      positionSide: after.positionSide ?? 'FLAT', updatedAt: after.updatedAt ?? null },
++      positionSide: after.positionSide ?? null, updatedAt: after.updatedAt ?? null },
+     previewedAt: new Date(instant).toISOString(),
+   });
+   return { status: 200, body: { state: 'DISARMED', disposition: 'previewed',
+@@ -431,9 +431,11 @@ function brokerV2Adapter(env, ownerId) {
+   const durableArm = async () => (await coordinator.status())?.armed === true;
+   return {
+     position: () => client.lane1V2NetSpyPosition(ownerId, { accountHash: accountHash() }),
+-    async placeMarket({ instruction }) {
+-      const accepted = await client.placeLane1V21Market(ownerId, { instruction },
+-        { accountHash: accountHash(), durableArm: await durableArm() });
++    sendSnapshot: () => client.lane1V21SendSnapshot(ownerId, { accountHash: accountHash() }),
++    async placeMarket({ instruction, clientOrderId, expectedSnapshot }) {
++      const accepted = await client.placeLane1V21Market(ownerId, { instruction, clientOrderId },
++        { accountHash: accountHash(), durableArm: await durableArm(), expectedSnapshot,
++          readCoordinator: () => coordinator.status() });
+       accountByOrder.set(accepted.brokerOrderId, accepted.accountHash); return accepted;
+     },
+     waitForFill: async (context) => client.waitForLane1EquityFill(ownerId,
+@@ -580,16 +582,41 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {
+     });
+   }
+   const authenticated = await secretMatches(body?.secret, env.LANE_1_TV_WEBHOOK_SECRET);
++  let ingressProof = null;
++  let ingressDiagnostic = null;
+   if (authenticated) {
+     const replayBody = replayBodyFromAuthenticatedLane1V21Signal(body);
+     const binding = replayBody ? await bindLane1V21ReplayBody(replayBody) : null;
+-    await recordOperationalProof(env, ownerId, 'LANE_1_TV_INGRESS', {
+-      receivedAt: new Date().toISOString(),
+-      side: String(body?.side ?? '').trim().toUpperCase() || null,
++    // Redacted representation, NOT wire bytes. Preserve allowed scalar values
++    // exactly; do not persist arbitrary nested input or the authentication secret.
++    const rawMessage = {};
++    const removedPaths = [];
++    for (const key of Object.keys(body)) {
++      const path = `/${key.replace(/~/gu, '~0').replace(/\//gu, '~1')}`;
++      if (!['ticker', 'side', 'qty'].includes(key)) { removedPaths.push(path); continue; }
++      const value = body[key];
++      if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) rawMessage[key] = value;
++      else removedPaths.push(path);
++    }
++    const isTape = String(body?.kind ?? '').trim().toUpperCase() === 'TAPE';
++    ingressDiagnostic = {
++      // Diagnostic text is not normalized into an apparently accepted token.
++      // Shape acceptance is not ARM permission, dispatch, or a broker fill.
++      side: typeof body?.side === 'string' ? body.side : null,
++      sideType: body?.side === null ? 'null' : Array.isArray(body?.side) ? 'array' : typeof body?.side,
++      rawMessage, rawMessageFormat: 'REDACTED_SIGNAL_FIELDS_V1', removedPaths,
++      acceptedInstruction: binding?.replayBody.side ?? null,
++      signalContract: 'LANE_1_FOUR_ACTION_V1',
++      ingressKind: isTape ? 'TAPE' : 'ORDER_SIGNAL',
++      signalShapeAccepted: isTape ? null : binding !== null,
++      signalFaultCode: isTape || binding !== null ? null : 'LANE_1_INVALID_SIGNAL',
+       replayEligible: binding !== null,
+       replayBody: binding?.replayBody ?? null,
+       tvBodyBindingSha256: binding?.tvBodyBindingSha256 ?? null,
+-    }).catch(() => {});
++    };
++    ingressProof = await recordOperationalProof(env, ownerId, 'LANE_1_TV_INGRESS', {
++      receivedAt: new Date().toISOString(), ...ingressDiagnostic,
++    }).catch(() => null);
+   }
+   if (String(body?.kind ?? '').trim().toUpperCase() === 'TAPE') {
+     if (!authenticated) {
+@@ -622,6 +649,12 @@ export async function handleLane1TvWebhook({ request, env, ownerId }) {
+   try { result = await createLane1Runtime(env, ownerId).signal(body); }
+   catch (error) { result = { status: 200, body: { state: 'FAULT',
+     faultCode: error.message, sent: false } }; }
++  if (authenticated && result.status === 400 && ingressDiagnostic) {
++    await recordOperationalProof(env, ownerId, 'LANE_1_TV_SIGNAL_REFUSED', {
++      ...ingressDiagnostic, sourceIngressId: ingressProof?.id ?? null,
++      httpStatus: result.status, faultCode: result.body.faultCode, sent: false,
++    }).catch(() => null);
++  }
+   return new Response(JSON.stringify(result.body), {
+     status: result.status,
+     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+diff --git a/cloudflare/schwab-client.js b/cloudflare/schwab-client.js
+index 054968c..c268e05 100644
+--- a/cloudflare/schwab-client.js
++++ b/cloudflare/schwab-client.js
+@@ -8,6 +8,10 @@ const encoder = new TextEncoder();
+ const decoder = new TextDecoder();
+ import { normalizedBrokerEventKey } from './guardian.js';
+ import { resolveSchwabFillEvidence } from '../src/economic/schwab-fill-identity.js';
++import {
++  assertLane1DispatchCoordinator, assertLane1InstructionState, assertLane1SendSnapshot,
++  assertLane1SnapshotUnchanged, lane1OrderState, readLane1SpyPosition,
++} from '../src/lane/lane-1-position-guards.js';
+ 
+ export async function fetchLane1PreviewOnly(url, init, fetcher = fetch) {
+   let destination;
+@@ -694,12 +698,26 @@ export class SchwabD1Client {
+     throw new Error('SCHWAB_TOKEN_REFRESH_BUSY');
+   }
+ 
+-  async _read(path, token) {
++  async _read(path, token, { completeOrderList = false } = {}) {
+     const response = await fetch(`${TRADER_URL}${path}`, {
+       headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+       signal: AbortSignal.timeout(8_000),
+     });
+     if (!response.ok) throw new Error(`SCHWAB_READ_${response.status}:${path.split('?')[0]}`);
++    if (completeOrderList) {
++      // Do not promote partial/page-limited success to an empty working set.
++      if (response.status !== 200 || ['content-range', 'link', 'x-next-page',
++        'x-next-cursor', 'x-has-more', 'x-truncated'].some((name) => response.headers.has(name))) {
++        throw new Error('LANE_1_ORDER_READ_INCOMPLETE');
++      }
++      let orders;
++      try { orders = JSON.parse(await boundedText(response)); }
++      catch { throw new Error('LANE_1_ORDER_READ_INCOMPLETE'); }
++      const total = response.headers.get('x-total-count');
++      if (total !== null && (!/^\d+$/u.test(total) || !Array.isArray(orders)
++        || Number(total) !== orders.length)) throw new Error('LANE_1_ORDER_READ_INCOMPLETE');
++      return orders;
++    }
+     return response.json();
+   }
+ 
+@@ -957,20 +975,33 @@ export class SchwabD1Client {
+     if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+     const account = await this._laneAccountHash(ownerId, accountHash);
+     const packet = await this._read(`/accounts/${encodeURIComponent(account.accountHash)}?fields=positions`, account.token);
+-    const positions = packet?.securitiesAccount?.positions ?? [];
+-    const rows = positions.filter((row) => String(row?.instrument?.symbol ?? '').trim().toUpperCase() === 'SPY');
+-    const longQuantity = rows.reduce((sum, row) => sum + Number(row?.longQuantity ?? 0), 0);
+-    const shortQuantity = rows.reduce((sum, row) => sum + Number(row?.shortQuantity ?? 0), 0);
+-    const netQuantity = longQuantity - shortQuantity;
+-    if (!Number.isInteger(netQuantity) || Math.abs(netQuantity) > 1) {
+-      throw new Error(`LANE_1_POSITION_LIMIT_FAULT:${netQuantity}`);
+-    }
+-    return {
+-      symbol: 'SPY', netQuantity,
+-      positionSide: netQuantity === 1 ? 'LONG' : netQuantity === -1 ? 'SHORT' : 'FLAT',
+-      acquiredAt: new Date().toISOString(),
+-      accountHash: account.accountHash,
+-    };
++    return { ...readLane1SpyPosition(packet), acquiredAt: new Date().toISOString(),
++      accountHash: account.accountHash };
++  }
++
++  async lane1V21SendSnapshot(ownerId, { accountHash = null } = {}) {
++    if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
++    const account = await this._laneAccountHash(ownerId, accountHash);
++    return this._lane1V21SendSnapshot(account);
++  }
++
++  async _lane1V21SendSnapshot(account, ordersFrom = new Date(Date.now() - 60 * DAY_MS).toISOString()) {
++    const readStartedAt = new Date().toISOString();
++    const base = `/accounts/${encodeURIComponent(account.accountHash)}`;
++    // Live reads, never D1. Bound: no working SPY orders entered within this
++    // 60-day query. Older orders are NOT covered. Principal asserted on
++    // 2026-08-31 that none exist in ...315 and none will be placed; not API proof.
++    const query = new URLSearchParams({ fromEnteredTime: ordersFrom,
++      toEnteredTime: new Date(Date.now() + 60_000).toISOString(), maxResults: '3000' });
++    const [packet, orders] = await Promise.all([
++      this._read(`${base}?fields=positions`, account.token),
++      this._read(`${base}/orders?${query}`, account.token, { completeOrderList: true }),
++    ]);
++    const position = readLane1SpyPosition(packet);
++    const orderStateSha256 = await digest(JSON.stringify(lane1OrderState(orders)));
++    return { ...position, accountHash: account.accountHash, orderStateSha256,
++      orderCheckBound: 'NO_WORKING_SPY_ORDER_IN_60_DAY_QUERY',
++      ordersFrom, ordersTo: query.get('toEnteredTime'), readStartedAt, acquiredAt: new Date().toISOString() };
+   }
+ 
+   async placeLane1V2Bracket(ownerId, { signal }, { accountHash = null } = {}) {
+@@ -997,15 +1028,26 @@ export class SchwabD1Client {
+     };
+   }
+ 
+-  async placeLane1V21Market(ownerId, { instruction }, {
+-    accountHash = null, durableArm = false,
++  async placeLane1V21Market(ownerId, { instruction, clientOrderId }, {
++    accountHash = null, durableArm = false, expectedSnapshot = null, readCoordinator = null,
+   } = {}) {
+     if (this.env.NUVO_LANE_1_SPY_ARMED !== 'ON' && durableArm !== true) {
+       throw new Error('LANE_1_DISARMED');
+     }
+     if (!this.configured()) throw new Error('SCHWAB_READ_ONLY_NOT_CONFIGURED');
+     const requestBody = buildLane1SchwabMarketOrder({ instruction });
++    assertLane1SendSnapshot(expectedSnapshot);
++    const expected = structuredClone(expectedSnapshot);
++    assertLane1InstructionState({ instruction, positionSide: expected.positionSide, quantity: 1 });
++    if (typeof readCoordinator !== 'function') throw new Error('LANE_1_DISPATCH_COORDINATOR_REQUIRED');
+     const account = await this._laneAccountHash(ownerId, accountHash);
++    if (account.accountHash !== expected.accountHash) throw new Error('LANE_1_POSITION_STATE_DRIFT:ACCOUNT_CHANGED');
++    // Final reads run after token/account selection and before the only POST.
++    // No retries, custody cache, optional-check fallback, or claim creation.
++    const current = await this._lane1V21SendSnapshot(account, expected.ordersFrom);
++    const state = await readCoordinator();
++    assertLane1DispatchCoordinator(state, { instruction, clientOrderId, positionSide: expected.positionSide });
++    assertLane1SnapshotUnchanged(expected, current);
+     const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders`, {
+       method: 'POST',
+       headers: {
+diff --git a/src/lane/lane-1-position-guards.js b/src/lane/lane-1-position-guards.js
+new file mode 100644
+index 0000000..1807cff
+--- /dev/null
++++ b/src/lane/lane-1-position-guards.js
+@@ -0,0 +1,155 @@
++// Internal broker-state guards only. This module does not interpret TV messages.
++const SIDES = Object.freeze(['FLAT', 'LONG', 'SHORT']);
++const TRANSITIONS = Object.freeze({
++  BUY: Object.freeze({ from: 'FLAT', to: 'LONG', refusal: 'LANE_1_BUY_REQUIRES_FLAT' }),
++  SELL: Object.freeze({ from: 'LONG', to: 'FLAT', refusal: 'LANE_1_SELL_REQUIRES_LONG' }),
++  SELL_SHORT: Object.freeze({ from: 'FLAT', to: 'SHORT', refusal: 'LANE_1_SELL_SHORT_REQUIRES_FLAT' }),
++  BUY_TO_COVER: Object.freeze({ from: 'SHORT', to: 'FLAT', refusal: 'LANE_1_BUY_TO_COVER_REQUIRES_SHORT' }),
++});
++
++function drift(reason) {
++  throw new Error(`LANE_1_POSITION_STATE_DRIFT:${reason}`);
++}
++
++export function readLane1SpyPosition(packet) {
++  const positions = packet?.securitiesAccount?.positions;
++  if (!Array.isArray(positions)) drift('BROKER_POSITION_UNKNOWN:positions');
++  let longQuantity = 0;
++  let shortQuantity = 0;
++  for (const row of positions) {
++    const symbol = row?.instrument?.symbol;
++    // An unidentified row cannot be assumed not to be SPY.
++    if (typeof symbol !== 'string' || !symbol.trim()) drift('BROKER_POSITION_UNKNOWN:symbol');
++    if (symbol.trim().toUpperCase() !== 'SPY') continue;
++    for (const field of ['longQuantity', 'shortQuantity']) {
++      if (typeof row[field] !== 'number' || !Number.isFinite(row[field]) || row[field] < 0) {
++        drift(`BROKER_POSITION_UNKNOWN:${field}`);
++      }
++    }
++    longQuantity += row.longQuantity;
++    shortQuantity += row.shortQuantity;
++  }
++  // Gross exposure matters: +2/-1 is not the permitted one-share long.
++  if (!Number.isInteger(longQuantity) || !Number.isInteger(shortQuantity)
++    || longQuantity + shortQuantity > 1) throw new Error('LANE_1_POSITION_LIMIT_FAULT');
++  const netQuantity = longQuantity - shortQuantity;
++  return { symbol: 'SPY', longQuantity, shortQuantity, netQuantity,
++    positionSide: netQuantity === 1 ? 'LONG' : netQuantity === -1 ? 'SHORT' : 'FLAT' };
++}
++
++export function assertLane1PositionAgreement(durableSide, position) {
++  if (!SIDES.includes(position?.positionSide) || position?.symbol !== 'SPY') {
++    drift('BROKER_POSITION_UNKNOWN');
++  }
++  const expectedLong = position.positionSide === 'LONG' ? 1 : 0;
++  const expectedShort = position.positionSide === 'SHORT' ? 1 : 0;
++  if (position.longQuantity !== expectedLong || position.shortQuantity !== expectedShort
++    || position.netQuantity !== expectedLong - expectedShort) drift('BROKER_POSITION_UNKNOWN:quantities');
++  if (!SIDES.includes(durableSide)) drift('COORDINATOR_POSITION_UNKNOWN');
++  if (durableSide !== position.positionSide) drift('COORDINATOR_BROKER_DISAGREEMENT');
++}
++
++export function assertLane1InstructionState({ instruction, positionSide, quantity }) {
++  if (!SIDES.includes(positionSide)) drift('POSITION_UNKNOWN');
++  if (quantity !== 1) throw new Error('LANE_1_QUANTITY_MUST_BE_ONE');
++  if (!Object.hasOwn(TRANSITIONS, instruction)) throw new Error('LANE_1_INSTRUCTION_UNKNOWN');
++  const transition = TRANSITIONS[instruction];
++  if (positionSide !== transition.from) throw new Error(transition.refusal);
++  return transition.to;
++}
++
++const TERMINAL = Object.freeze(['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'REPLACED']);
++const PENDING = Object.freeze(['AWAITING_PARENT_ORDER', 'AWAITING_CONDITION',
++  'AWAITING_STOP_CONDITION', 'AWAITING_MANUAL_REVIEW', 'ACCEPTED', 'AWAITING_UR_OUT',
++  'PENDING_ACTIVATION', 'QUEUED', 'WORKING', 'PENDING_CANCEL', 'PENDING_REPLACE',
++  'PENDING_ACKNOWLEDGEMENT', 'PENDING_RECALL', 'NEW', 'PARTIALLY_FILLED']);
++
++// A terminal parent does not make its children terminal. Inspect every leg and
++// child; malformed/unknown orders are not silently treated as an empty list.
++export function lane1OrderState(orders) {
++  if (!Array.isArray(orders)) throw new Error('LANE_1_WORKING_ORDER_STATE_UNKNOWN');
++  if (orders.length >= 3000) throw new Error('LANE_1_ORDER_READ_LIMIT_REACHED');
++  const rows = [];
++  function visit(order, depth = 0) {
++    if (depth > 16 || !order || typeof order !== 'object'
++      || ![...TERMINAL, ...PENDING].includes(order.status)) {
++      throw new Error('LANE_1_WORKING_ORDER_STATE_UNKNOWN');
++    }
++    const children = order.childOrderStrategies;
++    if (children !== undefined && !Array.isArray(children)) {
++      throw new Error('LANE_1_WORKING_ORDER_STATE_UNKNOWN');
++    }
++    const legs = order.orderLegCollection;
++    // OCO wrappers may have children and no legs of their own.
++    if ((!Array.isArray(legs) || legs.length === 0)
++      && !(order.orderStrategyType === 'OCO' && children?.length > 0 && legs === undefined)) {
++      throw new Error('LANE_1_WORKING_ORDER_STATE_UNKNOWN');
++    }
++    let spy = false;
++    for (const leg of legs ?? []) {
++      const symbol = leg?.instrument?.symbol;
++      if (typeof symbol !== 'string' || !symbol.trim()) throw new Error('LANE_1_WORKING_ORDER_STATE_UNKNOWN');
++      if (symbol.trim().toUpperCase() === 'SPY'
++        || leg.instrument.underlyingSymbol === 'SPY') spy = true;
++    }
++    if (spy) {
++      if (!TERMINAL.includes(order.status)) throw new Error('LANE_1_WORKING_ORDER_PRESENT');
++      if (!['string', 'number'].includes(typeof order.orderId) || !String(order.orderId).trim()) {
++        throw new Error('LANE_1_WORKING_ORDER_STATE_UNKNOWN');
++      }
++      // Retain terminal identities too: a newly filled external round trip may
++      // leave position quantity unchanged but must still invalidate the read.
++      rows.push({ orderId: String(order.orderId), status: order.status });
++    }
++    for (const child of children ?? []) visit(child, depth + 1);
++  }
++  for (const order of orders) visit(order);
++  return rows.sort((a, b) => a.orderId.localeCompare(b.orderId) || a.status.localeCompare(b.status));
++}
++
++export function assertLane1SendSnapshot(snapshot) {
++  assertLane1PositionAgreement(snapshot?.positionSide, snapshot);
++  if (typeof snapshot.accountHash !== 'string' || !snapshot.accountHash
++    || snapshot.orderCheckBound !== 'NO_WORKING_SPY_ORDER_IN_60_DAY_QUERY'
++    || typeof snapshot.orderStateSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(snapshot.orderStateSha256)
++    || !Number.isFinite(Date.parse(snapshot.readStartedAt))
++    || !Number.isFinite(Date.parse(snapshot.acquiredAt))
++    || !Number.isFinite(Date.parse(snapshot.ordersFrom)) || !Number.isFinite(Date.parse(snapshot.ordersTo))) {
++    throw new Error('LANE_1_SEND_SNAPSHOT_REQUIRED');
++  }
++}
++
++export function assertLane1SnapshotUnchanged(expected, current, now = Date.now()) {
++  assertLane1SendSnapshot(expected);
++  assertLane1SendSnapshot(current);
++  if (expected.accountHash !== current.accountHash) drift('ACCOUNT_CHANGED');
++  if (expected.positionSide !== current.positionSide
++    || expected.longQuantity !== current.longQuantity || expected.shortQuantity !== current.shortQuantity) {
++    drift('PRE_DISPATCH_POSITION_CHANGED');
++  }
++  if (expected.ordersFrom !== current.ordersFrom || expected.orderStateSha256 !== current.orderStateSha256) {
++    throw new Error('LANE_1_PRE_DISPATCH_ORDER_STATE_CHANGED');
++  }
++  const age = now - Date.parse(current.readStartedAt);
++  const end = Date.parse(current.acquiredAt);
++  if (!Number.isFinite(now) || age < 0 || age > 5000 || end > now
++    || end < Date.parse(current.readStartedAt)) throw new Error('LANE_1_PRE_DISPATCH_READ_STALE');
++}
++
++export function assertLane1DispatchCoordinator(state, { instruction, clientOrderId, positionSide }, now = Date.now()) {
++  if (state?.armed !== true) throw new Error('LANE_1_DISARMED');
++  if (!Number.isFinite(Date.parse(state.expiresAt)) || Date.parse(state.expiresAt) <= now) {
++    throw new Error('LANE_1_ARM_WINDOW_EXPIRED');
++  }
++  if (!SIDES.includes(state.positionSide) || state.positionSide !== positionSide) {
++    drift('PRE_DISPATCH_COORDINATOR_CHANGED');
++  }
++  assertLane1InstructionState({ instruction, positionSide, quantity: 1 });
++  const signal = instruction === 'BUY' ? 'LONG' : instruction === 'SELL_SHORT' ? 'SHORT' : 'EXIT';
++  const pending = signal === 'EXIT' ? state.exit : state.open;
++  if (typeof clientOrderId !== 'string' || !clientOrderId || state.stage !== `${signal}_SENDING`
++    || pending?.seal?.clientOrderId !== clientOrderId
++    || pending?.seal?.brokerInstruction !== instruction || pending?.brokerOrderId) {
++    throw new Error('LANE_1_DISPATCH_CLAIM_CHANGED');
++  }
++}
+diff --git a/src/lane/lane-1-spy-v2.js b/src/lane/lane-1-spy-v2.js
+index 80b04d0..917cc0a 100644
+--- a/src/lane/lane-1-spy-v2.js
++++ b/src/lane/lane-1-spy-v2.js
+@@ -2,6 +2,8 @@ import { fromEquityBrokerEvents } from '../economic/from-broker-events.js';
+ import { foldEquityRoundTrip } from '../economic/fold-resolved-unit.js';
+ import { emitResolvedUnitBundleRuntime } from '../economic/emit-resolved-unit-bundle-runtime.js';
+ import { moneyCents } from '../economic/money-cents.js';
++import { assertLane1InstructionState, assertLane1PositionAgreement,
++  assertLane1SendSnapshot } from './lane-1-position-guards.js';
+ 
+ export const LANE_1_SPY_V2 = 'LANE_1_SPY_V2_1_MARKET_ONLY';
+ export const LANE_1_SPY_MARKET_V2_1 = 'LANE_1_SPY_MARKET_ONLY_V2_1';
+@@ -31,9 +33,11 @@ async function secretMatches(supplied, expected) {
+ }
+ 
+ export function normalizeLane1V21Signal(side) {
+-  if (side === 'BUY' || side === 'LONG') return { signal: 'LONG', exitScope: null };
+-  if (side === 'SHORT') return { signal: 'SHORT', exitScope: null };
+-  if (side === 'EXIT' || side === 'SELL') return { signal: 'EXIT', exitScope: 'ANY' };
++  // Exact authored broker instruction. No aliases, trimming, or coercion.
++  if (side === 'BUY') return { signal: 'LONG', exitScope: null };
++  if (side === 'SELL_SHORT') return { signal: 'SHORT', exitScope: null };
++  if (side === 'SELL') return { signal: 'EXIT', exitScope: 'LONG' };
++  if (side === 'BUY_TO_COVER') return { signal: 'EXIT', exitScope: 'SHORT' };
+   return null;
+ }
+ 
+@@ -83,19 +87,24 @@ function faultCode(error) {
+     ?? 'LANE_1_SYSTEM_FAULT';
+ }
+ 
+-export async function lane1V2ProposalSeal({ signal, rawSignalSide = signal,
++export async function lane1V2ProposalSeal({ signal, rawSignalSide,
+   tvBodyBindingSha256, positionSide, now, uuid, prior = null }) {
++  const normalized = normalizeLane1V21Signal(rawSignalSide);
++  if (!normalized) throw new Error('LANE_1_INVALID_SIGNAL');
++  if (signal !== normalized.signal) throw new Error('LANE_1_INSTRUCTION_BINDING_MISMATCH');
+   const sealedAt = new Date(now).toISOString();
+   const decisionId = `DEC-LANE1-SPY-V2-${uuid()}`;
+   const proposalId = `PROP-LANE1-SPY-V2-${uuid()}`;
+-  const brokerInstruction = signal === 'LONG' ? 'BUY' : signal === 'SHORT' ? 'SELL_SHORT'
+-    : positionSide === 'LONG' ? 'SELL' : 'BUY_TO_COVER';
++  // Position validates dispatch separately; it must never choose the instruction.
++  // The same builder also constructs DISARMED previews, including close refusals
++  // while flat. Such a preview does not assert that the position exists.
++  const brokerInstruction = rawSignalSide;
+   const seed = {
+     recordType: 'SEALED_EQUITY_PROPOSAL', lane: 'LANE_1_SPY', laneContract: LANE_1_SPY_V2,
+     authorityLevel: 2, principalException: 'LANE_1_SPY', decisionId, proposalId,
+     parentProposalHash: prior?.proposalHash ?? null, symbol: 'SPY', assetType: 'EQUITY',
+     signalSource: 'TRADINGVIEW_WEBHOOK', rawSignalSide, signal,
+-    tvBodyBindingSha256, positionSide: positionSide ?? signal,
++    tvBodyBindingSha256, positionSide: positionSide ?? null,
+     brokerInstruction, quantityShares: 1,
+     orderType: 'MARKET', session: 'NORMAL', duration: 'DAY', sealedAt,
+   };
+@@ -204,18 +213,17 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
+     if (disarmed.changed !== false) await notify({ type: 'DISARMED', reason: 'TTL_EXPIRED' });
+     return noSend('ttl-expired', disarmed, { reason: 'TTL_EXPIRED' });
+   }
+-  async function custodyDisposition(state, signal, exitScope) {
+-    const custody = await broker.position();
+-    const durableSide = state.positionSide ?? 'FLAT';
+-    if (custody.positionSide !== durableSide) {
++  function custodyDisposition(state, custody, instruction) {
++    assertLane1SendSnapshot(custody);
++    const durableSide = state.positionSide;
++    // Unknown fields refuse before comparison; they must not match FLAT.
++    try { assertLane1PositionAgreement(durableSide, custody); }
++    catch (error) {
++      if (error.message !== 'LANE_1_POSITION_STATE_DRIFT:COORDINATOR_BROKER_DISAGREEMENT') throw error;
+       return noSend('reconciliation-required', state, { faultCode: 'LANE_1_POSITION_STATE_DRIFT',
+         durablePositionSide: durableSide, custodyPositionSide: custody.positionSide });
+     }
+-    if (signal === 'EXIT' && durableSide === 'FLAT') return noSend('already-flat', state);
+-    if (signal === durableSide) return noSend('already-in', state, { positionSide: durableSide });
+-    if (signal !== 'EXIT' && durableSide !== 'FLAT') {
+-      return noSend('must-exit-first', state, { positionSide: durableSide, requestedSide: signal });
+-    }
++    assertLane1InstructionState({ instruction, positionSide: durableSide, quantity: 1 });
+     return null;
+   }
+   async function recordFault(error, accepted = null) {
+@@ -251,18 +259,24 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
+       const expired = await expire(state, instant); if (expired) return expired;
+       if (!effectivelyArmed || !state?.armed) return noSend('disarmed', state,
+         { tvBodyBindingSha256 });
++      let expectedSnapshot;
+       let custody;
+-      try { custody = await custodyDisposition(state, normalized.signal, normalized.exitScope); }
++      try {
++        expectedSnapshot = await broker.sendSnapshot();
++        custody = custodyDisposition(state, expectedSnapshot, body.side);
++      }
+       catch (error) { return recordFault(error); }
+       if (custody) return custody;
+       let session;
+       try { session = await marketSession(); } catch (error) { return recordFault(error); }
+       if (session !== 'RTH') return noSend('market-closed', state);
+ 
+-      const positionSide = state.positionSide ?? 'FLAT';
++      const positionSide = state.positionSide;
+       const seal = await lane1V2ProposalSeal({ signal: normalized.signal,
+         rawSignalSide: body.side, tvBodyBindingSha256, positionSide,
+         now: instant, uuid, prior: state.open?.seal ?? null });
++      try { assertLane1InstructionState({ instruction: seal.brokerInstruction, positionSide, quantity: 1 }); }
++      catch (error) { return recordFault(error); }
+       const claim = await coordinator.claim({ signal: normalized.signal, seal });
+       if (!claim.claimed) return noSend('duplicate-in-flight', claim.state);
+       state = claim.state;
+@@ -270,7 +284,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
+       try {
+         if (normalized.signal !== 'EXIT') {
+           accepted = await broker.placeMarket({ instruction: seal.brokerInstruction,
+-            clientOrderId: seal.clientOrderId, durableArm });
++            clientOrderId: seal.clientOrderId, durableArm, expectedSnapshot });
+           state = await coordinator.recordAccepted({ signal: normalized.signal,
+             brokerOrderId: accepted.brokerOrderId, acceptedAt: accepted.acceptedAt });
+           const fill = await broker.waitForFill({ side: seal.brokerInstruction,
+@@ -290,7 +304,7 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
+         }
+ 
+         accepted = await broker.placeMarket({ instruction: seal.brokerInstruction,
+-          clientOrderId: seal.clientOrderId, durableArm });
++          clientOrderId: seal.clientOrderId, durableArm, expectedSnapshot });
+         state = await coordinator.recordAccepted({ signal: 'EXIT',
+           brokerOrderId: accepted.brokerOrderId, acceptedAt: accepted.acceptedAt });
+         const fill = await broker.waitForFill({ side: seal.brokerInstruction,
+@@ -318,9 +332,13 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
+     },
+     async reconcile() {
+       const state = await coordinator.status();
+-      if (!['LONG', 'SHORT'].includes(state?.positionSide)) return null;
++      if (state?.positionSide === 'FLAT') return null;
+       try {
++        if (!['LONG', 'SHORT'].includes(state?.positionSide)) {
++          throw new Error('LANE_1_POSITION_STATE_DRIFT:COORDINATOR_POSITION_UNKNOWN');
++        }
+         const custody = await broker.position();
++        assertLane1PositionAgreement(custody?.positionSide, custody);
+         if (custody.positionSide === state.positionSide) return null;
+         if (custody.positionSide !== 'FLAT') throw new Error('LANE_1_POSITION_STATE_DRIFT');
+         throw new Error('LANE_1_EXTERNAL_FLATTEN_IDENTITY_REQUIRED');
