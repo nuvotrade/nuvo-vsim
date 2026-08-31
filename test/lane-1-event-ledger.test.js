@@ -95,6 +95,8 @@ test('BOT tab is a read-only Phase 1 surface with no order or ARM action', () =>
   assert.match(html, /id="bot"/u);
   assert.match(html, /LANE_1 · SPY 1 SHARE/u);
   assert.match(html, /BOT summary/u);
+  assert.doesNotMatch(html, /Evidence and measurement notes|lane-summary-details|lane-summary-source/u);
+  assert.match(html, /title="Principal-confirmed alert configuration; not runtime evidence\."/u);
   assert.doesNotMatch(html, /Five scoreboards|1 \/ 5/u);
   assert.match(html, /P&amp;L · <span data-vsim="bot-pnl-status">NOT_MEASURED/u);
   assert.match(html, /data-vsim="bot-order-reason">NEVER ARMED/u);

@@ -2087,12 +2087,11 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
           </article>`;
   const laneSummaryCard = `<article class="panel lane-summary-card" aria-labelledby="lane-summary-title"><div class="panel-head"><div><p class="kicker">LANE_1 · SPY 1 SHARE</p><h3 id="lane-summary-title">BOT summary</h3></div><strong class="lane-summary-arm" data-vsim="lane-summary-arm">—</strong></div>
     <div class="lane-summary-facts"><div><span>Position</span><strong data-vsim="lane-summary-position">—</strong></div><div><span>Fills</span><strong data-vsim="lane-summary-fills">0 of 4</strong></div></div>
-    <div class="lane-summary-matrix" role="table" aria-label="Lane 1 evidence by instruction"><div class="lane-summary-matrix-head" role="row"><span role="columnheader">Instruction</span><span role="columnheader">Alert</span><span role="columnheader">Preview</span><span role="columnheader">Fill</span></div><div data-vsim="lane-summary-matrix-body"></div></div>
+    <div class="lane-summary-matrix" role="table" aria-label="Lane 1 evidence by instruction"><div class="lane-summary-matrix-head" role="row"><span role="columnheader">Instruction</span><span role="columnheader" title="Principal-confirmed alert configuration; not runtime evidence.">Alert</span><span role="columnheader">Preview</span><span role="columnheader">Fill</span></div><div data-vsim="lane-summary-matrix-body"></div></div>
     <div class="lane-summary-last"><span>Last signal</span><strong data-vsim="lane-summary-last">—</strong></div>
     <div class="lane-summary-today"><span>Today</span><strong data-vsim="lane-summary-today">— realized · — open</strong></div>
     <div class="lane-summary-block"><span>Blocking</span><strong data-vsim="lane-summary-blocking">—</strong></div>
-    <details class="lane-summary-details"><summary>Evidence and measurement notes</summary><div data-vsim="lane-summary-details">Checking D1 and ACCOUNT_COORDINATOR.</div></details>
-    <p class="lane-summary-source" data-vsim="lane-summary-source">Checking live stores.</p></article>`;
+    </article>`;
   const bot = `<section class="view" id="bot" aria-labelledby="bot-title">
     <div class="page-heading"><div><p class="kicker">LANE_1_SPY · append-only operational evidence</p><h2 id="bot-title">BOT event ledger</h2></div><span class="readonly-tag">PHASE 1 · READ ONLY</span></div>
     <div class="bot-ledger-counts" aria-label="Lane 1 event counts">
@@ -2141,7 +2140,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .bot-ledger-counts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}.bot-ledger-counts>div{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:#081510}.bot-ledger-counts span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.13em}.bot-ledger-counts strong{display:block;margin-top:8px;font:700 20px/1.2 var(--mono)}.bot-ledger-counts small{display:block;margin-top:5px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em}.bot-ledger-scope{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:12px}.bot-ledger-scope h3,.bot-ledger-scope p{margin:0}.bot-ledger-scope h3{margin-top:5px}.bot-ledger-scope p:last-child{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.5}.bot-event-ledger{margin-top:0}.bot-event-ledger table{min-width:1120px}.bot-event-ledger td{font-family:var(--mono);font-size:9px}.bot-event-ledger .bot-refused{color:var(--red)}.bot-event-ledger .bot-clear{color:var(--green)}.bot-record-link{color:var(--cyan);text-decoration:none}.bot-record-link:hover,.bot-record-link:focus-visible{text-decoration:underline}.bot-raw-side{white-space:pre-wrap}.bot-ledger-source{margin:6px 0 0;color:var(--muted);font:700 8px/1.4 var(--mono)}.bot-ledger-source.source-fault{color:var(--red)}
     .lane-summary-card{min-width:0}.lane-summary-arm{padding:5px 8px;border:1px solid currentColor;border-radius:4px;color:var(--muted);font:800 8px/1 var(--mono);letter-spacing:.08em}.lane-summary-arm[data-state="on"]{color:var(--green)}.lane-summary-facts{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-facts>div{padding:9px 10px;min-width:0;border-right:1px solid var(--line)}.lane-summary-facts>div:last-child{border-right:0}.lane-summary-facts span,.lane-summary-block span,.lane-summary-last span,.lane-summary-today span{display:block;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{display:block;margin-top:5px;font:700 10px/1.3 var(--mono);overflow-wrap:anywhere}
     .lane-summary-matrix{margin-top:10px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-matrix-head,.lane-summary-matrix-row{display:grid;grid-template-columns:minmax(82px,1.35fr) .5fr .8fr .36fr;align-items:center}.lane-summary-matrix-head{background:#07110e;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{min-width:0;padding:6px 5px;border-right:1px solid var(--line)}.lane-summary-matrix-head span:last-child,.lane-summary-matrix-row>div:last-child{border-right:0}.lane-summary-matrix-row{border-top:1px solid var(--line);font:700 7px/1.2 var(--mono)}.lane-summary-matrix-row>div:first-child{color:var(--text);white-space:nowrap}.lane-summary-matrix-row>div[data-evidence]{text-align:center}.lane-summary-matrix-row small{display:none}.lane-summary-matrix .clear{color:var(--green)}.lane-summary-matrix .refused{color:var(--amber)}.lane-summary-matrix .unmeasured{color:var(--muted)}
-    .lane-summary-last,.lane-summary-today,.lane-summary-block{margin-top:9px;padding-top:8px;border-top:1px solid var(--line)}.lane-summary-block strong{display:block;margin-top:5px;color:var(--amber);font:800 9px/1.3 var(--mono)}.lane-summary-details{margin-top:9px;border-top:1px solid var(--line);color:var(--muted);font:7px/1.45 var(--mono)}.lane-summary-details summary{padding:8px 0 3px;cursor:pointer;text-transform:uppercase;letter-spacing:.08em}.lane-summary-details div{padding:4px 0;white-space:pre-line}.lane-summary-source{margin:6px 0 0;color:var(--muted);font:7px/1.35 var(--mono)}@media(max-width:760px){.bot-ledger-counts{grid-template-columns:repeat(2,1fr)}.bot-ledger-scope{grid-template-columns:1fr}}
+    .lane-summary-last,.lane-summary-today,.lane-summary-block{margin-top:9px;padding-top:8px;border-top:1px solid var(--line)}.lane-summary-block strong{display:block;margin-top:5px;color:var(--amber);font:800 9px/1.3 var(--mono)}@media(max-width:760px){.bot-ledger-counts{grid-template-columns:repeat(2,1fr)}.bot-ledger-scope{grid-template-columns:1fr}}
   </style>`;
   const calculatorStyles = `<style>
     .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}
@@ -3553,26 +3552,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         + (last.outcome === 'PREVIEW · CLEAR' ? 'previewed'
           : last.outcome === 'PREVIEW · REFUSED_NO_POSITION' ? 'preview no pos'
             : String(last.outcome || 'recorded').toLowerCase().replaceAll('_', ' ')) : '—');
-    const notes = ['Alerts: PRINCIPAL_CONFIRMED · SPY 5m; checkmarks are configuration, not runtime proof.',
-      'Previews: ' + ['BUY','SELL','SELL_SHORT','BUY_TO_COVER'].map(instruction => {
-        const item = summary.matrix?.[instruction]?.preview || {};
-        return instruction + '=' + (item.status || 'NOT_MEASURED')
-          + (item.receiptId ? ' (' + item.receiptId + ')' : '');
-      }).join(' · '),
-      'Fills: ACCOUNT_COORDINATOR history · ' + number(summary.fills?.today || 0)
-        + ' today · ' + number(summary.fills?.total || 0) + ' total.',
-      'Broker reconciliation: NOT_MEASURED · '
-        + (summary.brokerReconciliation?.reason || 'source unavailable') + '.',
-      'POSITION_DRIFT: ' + (summary.brokerReconciliation?.positionDrift || 'NOT_MEASURED') + '.',
-      'Realized: ' + (realized.reason || realized.source || 'NOT_MEASURED') + '.',
-      'Open: ' + (openPnl.reason || openPnl.source || 'NOT_MEASURED') + '.',
-      'Aggregate: ' + (summary.pnl?.aggregate?.reason || 'NOT_MEASURED') + '.'];
-    text(q('[data-vsim="lane-summary-details"]'), notes.join('\\n'));
-    const source = q('[data-vsim="lane-summary-source"]');
-    text(source, ledger.availability === 'COMPLETE'
-      ? 'LIVE STORE · D1 operational audit + ACCOUNT_COORDINATOR history/state'
-      : 'SOURCE FAULT · prior card values retained where available');
-    if (source) source.classList.toggle('source-fault', ledger.availability !== 'COMPLETE');
   }
 
   function renderLane1EventLedger(ledger) {
@@ -3636,9 +3615,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       const sourceNode = q('[data-vsim="bot-ledger-source-status"]');
       text(sourceNode, 'SOURCE FAULT · ' + error.message + ' · prior rows retained');
       if (sourceNode) sourceNode.classList.add('source-fault');
-      const summarySource = q('[data-vsim="lane-summary-source"]');
-      text(summarySource, 'SOURCE FAULT · ' + error.message + ' · prior card values retained');
-      if (summarySource) summarySource.classList.add('source-fault');
     }
   }
 
