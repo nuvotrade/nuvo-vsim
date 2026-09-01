@@ -1,6 +1,9 @@
 import { DurableObject, WorkflowEntrypoint } from 'cloudflare:workers';
 import { executeShadowWorkflow } from './worker.js';
 import { SchwabD1Client } from './schwab-client.js';
+import {
+  CUSTODY_REFRESH_DEBOUNCE_MS, performCustodyRefresh, queueCustodyRefresh,
+} from './custody-refresh.js';
 
 const LOCK_TTL_MS = 15 * 60 * 1000;
 
@@ -138,6 +141,21 @@ export class VsimAccountCoordinator extends DurableObject {
     const task = this.snapshotTail.then(() => new SchwabD1Client(this.env).snapshot(ownerId));
     this.snapshotTail = task.catch(() => undefined);
     return task;
+  }
+
+  async refreshCustody(ownerId, { minimumAgeMs = CUSTODY_REFRESH_DEBOUNCE_MS } = {}) {
+    const thresholdMs = Math.max(CUSTODY_REFRESH_DEBOUNCE_MS, Number(minimumAgeMs) || 0);
+    const queued = queueCustodyRefresh(this.snapshotTail, () => performCustodyRefresh({
+      thresholdMs,
+      readStored: async () => {
+        const row = await this.env.DB.prepare(`SELECT snapshot_hash,observed_at
+          FROM custody_latest WHERE owner_id=?`).bind(ownerId).first();
+        return { observedAt: row?.observed_at ?? null, hash: row?.snapshot_hash ?? null };
+      },
+      readBroker: () => new SchwabD1Client(this.env).snapshot(ownerId),
+    }));
+    this.snapshotTail = queued.next;
+    return queued.task;
   }
 
   #laneState(extra = {}) {

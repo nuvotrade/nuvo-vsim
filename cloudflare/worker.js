@@ -20,6 +20,13 @@ import {
 import { D1R2EvidencePersistence } from './evidence-persistence.js';
 import { handleVsimMcp } from './mcp-server.js';
 import { SchwabD1Client } from './schwab-client.js';
+import {
+  CUSTODY_REFRESH_DEBOUNCE_MS, custodyRefreshFailure, custodyRefreshPolicy,
+  performCustodyRefresh,
+} from './custody-refresh.js';
+export {
+  CUSTODY_REFRESH_DEBOUNCE_MS, custodyRefreshFailure, custodyRefreshPolicy,
+} from './custody-refresh.js';
 import { mapCustodyRisk } from './custody-risk.js';
 import {
   evaluateGuardian, guardianDiscordPayload, guardianReport, GUARDIAN_MANDATE_VERSION, GUARDIAN_STATES,
@@ -1664,6 +1671,18 @@ async function reconciledSnapshot(env, ownerId) {
   return accountCoordinator(env, ownerId).reconciledSnapshot(ownerId);
 }
 
+async function refreshCustodySnapshot(env, ownerId) {
+  if (env.ACCOUNT_COORDINATOR) {
+    return accountCoordinator(env, ownerId).refreshCustody(ownerId, {
+      minimumAgeMs: CUSTODY_REFRESH_DEBOUNCE_MS,
+    });
+  }
+  return performCustodyRefresh({
+    readStored: () => loadLatestCustody(env, ownerId).catch(() => null),
+    readBroker: () => reconciledSnapshot(env, ownerId),
+  });
+}
+
 export async function triggerShadowCycle(env, ownerId, { source = 'MCP', idempotencyKey = null } = {}) {
   if (!authorityAtLeast(configuredAuthority(env), AUTHORITY.SHADOW)) {
     return toolEnvelope(env, {}, { code: 'AUTHORITY_DENIED', message: 'Authority level does not permit shadow ranking.' });
@@ -2095,11 +2114,12 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     </article>`;
   const mobileSystemCard = `<article class="panel system-brief mobile-system-brief" aria-label="System status"></article>`;
   const botStatusCard = `<article class="panel bot-status-card" aria-labelledby="bot-status-title">
-    <div class="bot-status-head"><div><p class="kicker">LANE_1 · LIVE CONTROL</p><h2 id="bot-status-title" data-vsim="bot-broker-symbol">Schwab · —</h2></div><div class="bot-status-actions"><button class="cc-directive bot-quick-disarm" type="button" data-action="laneDisarm">DISARM</button><details class="bot-control-menu"><summary aria-label="BOT controls">•••</summary><div><button type="button" data-action="laneArm" data-vsim="bot-menu-arm">ARM</button><button type="button" data-action="laneDisarm" data-vsim="bot-menu-disarm">DISARM</button><button type="button" disabled title="Available after live-exit validation">FLATTEN</button><small>Available after live-exit validation</small></div></details></div></div>
+    <div class="bot-status-head"><div><p class="kicker">LANE_1 · LIVE CONTROL</p><h2 id="bot-status-title" data-vsim="bot-broker-symbol">Schwab · —</h2></div><div class="bot-status-actions"><button class="cc-directive bot-custody-refresh" type="button" data-action="custodyRefresh">REFRESH</button><button class="cc-directive bot-quick-disarm" type="button" data-action="laneDisarm">DISARM</button><details class="bot-control-menu"><summary aria-label="BOT controls">•••</summary><div><button type="button" data-action="laneArm" data-vsim="bot-menu-arm">ARM</button><button type="button" data-action="laneDisarm" data-vsim="bot-menu-disarm">DISARM</button><button type="button" disabled title="Available after live-exit validation">FLATTEN</button><small>Available after live-exit validation</small></div></details></div></div>
     <div class="bot-position"><strong data-vsim="bot-position">—</strong><span data-vsim="bot-position-copy">position unavailable</span></div>
     <div class="bot-pnl-grid"><div><span>OPEN P/L</span><strong data-vsim="bot-open-pnl">—</strong></div><div><span>DAY P/L</span><strong data-vsim="bot-day-pnl">—</strong></div></div>
     <div class="bot-status-row"><strong data-vsim="bot-live-state" data-state="stale">STALE</strong><strong data-vsim="bot-arm-state" data-vsim-control-state data-state="disarmed" role="status" aria-live="polite">DISARMED</strong><strong data-vsim="bot-online-state" data-state="offline">OFFLINE</strong></div>
-    <p class="bot-status-meta"><span data-vsim="bot-live-age">Custody age unavailable</span><span>Stops new orders — does not cancel or flatten</span></p>
+    <p class="bot-status-meta"><span data-vsim="bot-live-age">Custody age unavailable</span><span data-vsim="bot-refresh-status">Stored snapshot</span><span>Stops new orders — does not cancel or flatten</span></p>
+    <p class="bot-refresh-error" data-vsim="bot-refresh-error" role="alert" aria-live="assertive" hidden></p>
     <p class="bot-disarm-error" data-vsim="bot-disarm-error" role="alert" aria-live="assertive" hidden></p>
   </article>`;
   const bot = `<section class="view" id="bot" aria-labelledby="bot-title">
@@ -2142,13 +2162,13 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}}
   </style>`;
   const operationalStyles = `<style>
-    #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}#overview .system-brief .health-list li{align-items:center;gap:10px;padding:8px 0}#overview .system-brief .health-label{display:grid;grid-template-columns:10px 1fr;align-items:center;min-width:0}#overview .system-brief .health-label small{grid-column:2;color:var(--muted);font-size:7px;margin-top:2px;font-family:ui-monospace,monospace}#overview .system-brief .health-value{text-align:right;font-size:8px}#overview .system-brief .health-green{background:var(--green);box-shadow:0 0 6px rgba(96,226,168,.6)}#overview .system-brief .health-red{background:var(--red);box-shadow:0 0 6px rgba(242,118,118,.45)}#overview .system-brief .health-amber{background:var(--amber)}#overview .system-brief .health-tape{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font:8px/1.45 ui-monospace,monospace;white-space:normal}#overview .system-brief .tv-live-widget{margin-top:8px;min-height:44px;overflow:hidden;border:1px solid var(--line);border-radius:5px;background:#07110e}#overview .system-brief .tv-live-widget .tv-placeholder{padding:13px;color:var(--red);font:8px ui-monospace,monospace}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
+    #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}#overview .metric-card[data-custody-state="stale"]{border-color:rgba(244,186,97,.48)}#overview .metric-card[data-custody-state="stale"] .metric-value{color:#71877e;opacity:.72}#overview .metric-card[data-custody-state="stale"] .metric-foot{color:var(--amber)}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}#overview .system-brief .health-list li{align-items:center;gap:10px;padding:8px 0}#overview .system-brief .health-label{display:grid;grid-template-columns:10px 1fr;align-items:center;min-width:0}#overview .system-brief .health-label small{grid-column:2;color:var(--muted);font-size:7px;margin-top:2px;font-family:ui-monospace,monospace}#overview .system-brief .health-value{text-align:right;font-size:8px}#overview .system-brief .health-green{background:var(--green);box-shadow:0 0 6px rgba(96,226,168,.6)}#overview .system-brief .health-red{background:var(--red);box-shadow:0 0 6px rgba(242,118,118,.45)}#overview .system-brief .health-amber{background:var(--amber)}#overview .system-brief .health-tape{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font:8px/1.45 ui-monospace,monospace;white-space:normal}#overview .system-brief .tv-live-widget{margin-top:8px;min-height:44px;overflow:hidden;border:1px solid var(--line);border-radius:5px;background:#07110e}#overview .system-brief .tv-live-widget .tv-placeholder{padding:13px;color:var(--red);font:8px ui-monospace,monospace}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
   </style>`;
   const systemHealthStyles = `<style>
     #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-red{color:var(--red)}.system-neutral{color:var(--muted)}.system-neutral .health-light{box-shadow:none}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
   </style>`;
   const botLedgerStyles = `<style>
-    .bot-status-card{margin-bottom:12px;padding:22px;border-color:#24302e;background:linear-gradient(145deg,#111820,#0a1118);box-shadow:0 18px 42px rgba(0,0,0,.18)}.bot-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.bot-status-head h2{margin:5px 0 0;font-size:22px}.bot-status-actions{display:flex;align-items:center;gap:8px}.bot-quick-disarm{margin:0;border-color:var(--red);color:var(--red)}.bot-control-menu{position:relative}.bot-control-menu summary{display:grid;place-items:center;width:42px;height:38px;border:1px solid var(--line);border-radius:7px;color:var(--text);cursor:pointer;list-style:none;font:800 14px/1 var(--mono)}.bot-control-menu summary::-webkit-details-marker{display:none}.bot-control-menu>div{position:absolute;z-index:8;right:0;top:46px;display:grid;min-width:210px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#0a1513;box-shadow:0 14px 30px rgba(0,0,0,.45)}.bot-control-menu button{padding:10px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);text-align:left;font:800 10px/1.2 var(--mono);cursor:pointer}.bot-control-menu button:disabled{color:var(--muted);cursor:not-allowed}.bot-control-menu small{padding:8px 10px 4px;color:var(--muted);font:8px/1.35 var(--mono)}.bot-position{display:flex;align-items:center;gap:8px;margin-top:18px}.bot-position strong{padding:7px 11px;border:1px solid var(--line);border-radius:999px;font:800 11px/1 var(--mono)}.bot-position span{color:var(--muted);font:10px/1.2 var(--mono)}.bot-pnl-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px}.bot-pnl-grid>div{padding:18px;border:1px solid var(--line);border-radius:9px;background:rgba(5,11,15,.48)}.bot-pnl-grid span{display:block;color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.13em}.bot-pnl-grid strong{display:block;margin-top:9px;font:800 26px/1.1 var(--mono);font-variant-numeric:tabular-nums}.bot-status-row{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}.bot-status-row strong{padding:8px 12px;border:1px solid currentColor;border-radius:999px;color:var(--red);font:800 9px/1 var(--mono);letter-spacing:.1em}.bot-status-row strong[data-state="live"],.bot-status-row strong[data-state="armed"],.bot-status-row strong[data-state="online"]{color:var(--green);background:rgba(35,196,143,.1)}.bot-status-row strong[data-state="stale"],.bot-status-row strong[data-state="unconfirmed"]{color:var(--amber);background:rgba(244,186,97,.08)}.bot-status-meta{display:flex;justify-content:space-between;gap:16px;margin:12px 0 0;color:var(--muted);font:8px/1.4 var(--mono)}.bot-disarm-error{margin:14px 0 0;padding:10px 12px;border:1px solid rgba(242,118,118,.65);border-radius:6px;background:rgba(242,118,118,.13);color:var(--red);font:800 10px/1.4 var(--mono);overflow-wrap:anywhere}.bot-disarm-error[hidden]{display:none}
+    .bot-status-card{margin-bottom:12px;padding:22px;border-color:#24302e;background:linear-gradient(145deg,#111820,#0a1118);box-shadow:0 18px 42px rgba(0,0,0,.18)}.bot-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.bot-status-head h2{margin:5px 0 0;font-size:22px}.bot-status-actions{display:flex;align-items:center;gap:8px}.bot-quick-disarm{margin:0;border-color:var(--red);color:var(--red)}.bot-custody-refresh{margin:0}.bot-control-menu{position:relative}.bot-control-menu summary{display:grid;place-items:center;width:42px;height:38px;border:1px solid var(--line);border-radius:7px;color:var(--text);cursor:pointer;list-style:none;font:800 14px/1 var(--mono)}.bot-control-menu summary::-webkit-details-marker{display:none}.bot-control-menu>div{position:absolute;z-index:8;right:0;top:46px;display:grid;min-width:210px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#0a1513;box-shadow:0 14px 30px rgba(0,0,0,.45)}.bot-control-menu button{padding:10px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);text-align:left;font:800 10px/1.2 var(--mono);cursor:pointer}.bot-control-menu button:disabled{color:var(--muted);cursor:not-allowed}.bot-control-menu small{padding:8px 10px 4px;color:var(--muted);font:8px/1.35 var(--mono)}.bot-position{display:flex;align-items:center;gap:8px;margin-top:18px}.bot-position strong{padding:7px 11px;border:1px solid var(--line);border-radius:999px;font:800 11px/1 var(--mono)}.bot-position span{color:var(--muted);font:10px/1.2 var(--mono)}.bot-pnl-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px}.bot-pnl-grid>div{padding:18px;border:1px solid var(--line);border-radius:9px;background:rgba(5,11,15,.48)}.bot-pnl-grid span{display:block;color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.13em}.bot-pnl-grid strong{display:block;margin-top:9px;font:800 26px/1.1 var(--mono);font-variant-numeric:tabular-nums}.bot-status-row{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}.bot-status-row strong{padding:8px 12px;border:1px solid currentColor;border-radius:999px;color:var(--red);font:800 9px/1 var(--mono);letter-spacing:.1em}.bot-status-row strong[data-state="live"],.bot-status-row strong[data-state="armed"],.bot-status-row strong[data-state="online"]{color:var(--green);background:rgba(35,196,143,.1)}.bot-status-row strong[data-state="stale"],.bot-status-row strong[data-state="unconfirmed"]{color:var(--amber);background:rgba(244,186,97,.08)}.bot-status-meta{display:flex;justify-content:space-between;gap:16px;margin:12px 0 0;color:var(--muted);font:8px/1.4 var(--mono)}.bot-refresh-error,.bot-disarm-error{margin:14px 0 0;padding:10px 12px;border:1px solid rgba(242,118,118,.65);border-radius:6px;background:rgba(242,118,118,.13);color:var(--red);font:800 10px/1.4 var(--mono);overflow-wrap:anywhere}.bot-refresh-error[hidden],.bot-disarm-error[hidden]{display:none}
     .bot-ledger-counts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}.bot-ledger-counts>div{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:#081510}.bot-ledger-counts span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.13em}.bot-ledger-counts strong{display:block;margin-top:8px;font:700 20px/1.2 var(--mono)}.bot-ledger-counts small{display:block;margin-top:5px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em}.bot-ledger-scope{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:12px}.bot-ledger-scope h3,.bot-ledger-scope p{margin:0}.bot-ledger-scope h3{margin-top:5px}.bot-ledger-scope p:last-child{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.5}.bot-event-ledger{margin-top:0}.bot-event-ledger table{min-width:1120px}.bot-event-ledger td{font-family:var(--mono);font-size:9px}.bot-event-ledger .bot-refused{color:var(--red)}.bot-event-ledger .bot-clear{color:var(--green)}.bot-record-link{color:var(--cyan);text-decoration:none}.bot-record-link:hover,.bot-record-link:focus-visible{text-decoration:underline}.bot-raw-side{white-space:pre-wrap}.bot-ledger-source{margin:6px 0 0;color:var(--muted);font:700 8px/1.4 var(--mono)}.bot-ledger-source.source-fault{color:var(--red)}
     .lane-summary-card{min-width:0}.lane-summary-arm{padding:5px 8px;border:1px solid currentColor;border-radius:4px;color:var(--muted);font:800 8px/1 var(--mono);letter-spacing:.08em}.lane-summary-arm[data-state="on"]{color:var(--green)}.lane-summary-facts{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-facts>div{padding:9px 10px;min-width:0;border-right:1px solid var(--line)}.lane-summary-facts>div:last-child{border-right:0}.lane-summary-facts span,.lane-summary-block span,.lane-summary-last span,.lane-summary-today span{display:block;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{display:block;margin-top:5px;font:700 10px/1.3 var(--mono);overflow-wrap:anywhere}
     .lane-summary-matrix{margin-top:10px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-matrix-head,.lane-summary-matrix-row{display:grid;grid-template-columns:minmax(82px,1.35fr) .5fr .8fr .36fr;align-items:center}.lane-summary-matrix-head{background:#07110e;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{min-width:0;padding:6px 5px;border-right:1px solid var(--line)}.lane-summary-matrix-head span:last-child,.lane-summary-matrix-row>div:last-child{border-right:0}.lane-summary-matrix-row{border-top:1px solid var(--line);font:700 7px/1.2 var(--mono)}.lane-summary-matrix-row>div:first-child{color:var(--text);white-space:nowrap}.lane-summary-matrix-row>div[data-evidence]{text-align:center}.lane-summary-matrix-row small{display:none}.lane-summary-matrix .clear{color:var(--green)}.lane-summary-matrix .refused{color:var(--amber)}.lane-summary-matrix .unmeasured{color:var(--muted)}
@@ -2162,7 +2182,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
       .nav{grid-column:1/-1;order:3;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;gap:2px;overflow:visible}.nav-button{min-width:0;min-height:34px;padding:7px 4px;font-size:10px;line-height:1.15;white-space:normal}.nav-button.active:after{left:8px;right:8px;bottom:0}
       main{padding:18px 10px 36px}.page-heading{margin-bottom:16px}.page-heading h2{font-size:21px}.panel{padding:14px}.panel-head{gap:9px;margin-bottom:13px}.panel-head h3{font-size:16px}.metric-card{min-height:108px;padding:14px}.metric-value{font-size:25px;margin:9px 0}.metric-foot{font-size:9px}
       .lane-summary-card .panel-head{align-items:center}.lane-summary-arm{max-width:48%;text-align:right;line-height:1.25}.lane-summary-matrix-head,.lane-summary-matrix-row{grid-template-columns:minmax(96px,1.45fr) .52fr .8fr .38fr}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{padding:7px 4px}.lane-summary-matrix-row{font-size:8px}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{font-size:11px}
-      #bot>.bot-status-card{display:block}#bot>*:not(.bot-status-card){display:none}.bot-status-card{padding:16px}.bot-status-head h2{font-size:19px}.bot-status-actions{gap:6px}.bot-quick-disarm{min-height:44px;padding:9px 10px}.bot-control-menu summary{width:44px;height:44px}.bot-pnl-grid{gap:8px}.bot-pnl-grid>div{padding:14px}.bot-pnl-grid strong{font-size:22px}.bot-status-meta{display:grid;gap:5px}.bot-control-menu>div{position:fixed;top:auto;right:12px;bottom:18px;left:12px}
+      #bot>.bot-status-card{display:block}#bot>*:not(.bot-status-card){display:none}.bot-status-card{padding:16px}.bot-status-head{display:grid}.bot-status-head h2{font-size:19px}.bot-status-actions{justify-content:space-between;gap:6px}.bot-quick-disarm,.bot-custody-refresh{min-height:44px;padding:9px 10px}.bot-control-menu summary{width:44px;height:44px}.bot-pnl-grid{gap:8px}.bot-pnl-grid>div{padding:14px}.bot-pnl-grid strong{font-size:22px}.bot-status-meta{display:grid;gap:5px}.bot-control-menu>div{position:fixed;top:auto;right:12px;bottom:18px;left:12px}
       #system>.mobile-system-brief{display:block}#system>*:not(.mobile-system-brief){display:none}
       .system-health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-health-tile{min-height:48px;padding:10px 8px;font-size:8px;gap:6px}.system-health-details{display:none}.system-overall{max-width:52%;line-height:1.25;text-align:right}.system-health-meta{font-size:7px}
       .pnl-calendar-head{display:grid}.pnl-calendar-tools{width:100%;flex-wrap:wrap;justify-content:space-between}
@@ -3272,6 +3292,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     const completeMarks = positions.every(position => present(position.marketValue));
     const marked = completeMarks ? positions.reduce((sum, position) => sum + Number(position.marketValue), 0) : null;
     const cards = qa('#overview .metric-card');
+    const custodyObservedMs = Date.parse(custody.observedAt || '');
+    const custodyAgeMs = Number.isFinite(custodyObservedMs)
+      ? Math.max(0, Date.now() - custodyObservedMs) : null;
+    const custodyAgeMinutes = custodyAgeMs === null ? null : Math.floor(custodyAgeMs / 60_000);
+    const custodyStale = custodyAgeMs === null || custodyAgeMs > 20 * 60 * 1000;
+    const custodyAgeLabel = custodyAgeMinutes === null ? 'age unavailable'
+      : custodyAgeMinutes < 1 ? '<1m old' : custodyAgeMinutes + 'm old';
     if (cards[0]) { text(q('.metric-label', cards[0]), 'Net asset value'); text(q('.metric-value', cards[0]), money(account.nav)); text(q('.metric-foot', cards[0]), 'Schwab read-only · ' + when(custody.observedAt)); }
     if (cards[1]) {
       text(q('.metric-label', cards[1]), 'Signed cash balance');
@@ -3290,7 +3317,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       const dayPnlVerified = present(account.dayProfitLoss)
         && account.dayProfitLossSource === 'SCHWAB_SUM_RECONCILED_POSITION_DAY_PROFIT_LOSS';
       const dayPnl = dayPnlVerified ? Number(account.dayProfitLoss) : null;
-      const dayPnlStale = portfolio && portfolio.option_analytics_freshness === 'LAST_MARKET_QUOTE';
+      const dayPnlStale = custodyStale
+        || portfolio && portfolio.option_analytics_freshness === 'LAST_MARKET_QUOTE';
       cards[3].classList.add('today-pnl-card');
       cards[3].dataset.pnlState = !dayPnlVerified ? 'unavailable' : dayPnl < 0 ? 'loss' : 'gain';
       text(q('.metric-label', cards[3]), "Today's P&L");
@@ -3308,6 +3336,11 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
           + (dayPnlStale ? ' · STALE option marks included' : '')
         : 'Schwab day P&L is incomplete · no estimated balance change shown');
     }
+    cards.slice(0, 4).forEach(card => {
+      card.dataset.custodyState = custodyStale ? 'stale' : 'fresh';
+      const foot = q('.metric-foot', card);
+      if (foot) foot.textContent += ' · ' + (custodyStale ? 'STALE SNAPSHOT · ' : 'snapshot ') + custodyAgeLabel;
+    });
     text(q('#overview .snapshot strong'), when(custody.observedAt));
 
     const environment = q('#decisions .environment-panel');
@@ -3802,7 +3835,55 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
 
   let currentStatus = null;
   let laneControlInFlight = false;
-  async function refresh() {
+  let custodyRefreshInFlight = null;
+  function showCustodyRefreshError(message) {
+    const node = q('[data-vsim="bot-refresh-error"]');
+    if (!node) return;
+    node.hidden = !message;
+    text(node, message || '');
+  }
+
+  async function refreshCustody(button = null) {
+    if (custodyRefreshInFlight) return custodyRefreshInFlight;
+    const buttons = qa('[data-action="custodyRefresh"]');
+    buttons.forEach(node => { node.disabled = true; });
+    if (button) button.disabled = true;
+    showCustodyRefreshError(null);
+    text(q('[data-vsim="bot-refresh-status"]'), 'Refreshing Schwab custody…');
+    custodyRefreshInFlight = (async () => {
+      try {
+        const result = await bounded(api('/api/operator/custody/refresh', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirm: 'REFRESH_READ_ONLY_CUSTODY' }),
+        }), 20_000, 'SCHWAB_CUSTODY_REFRESH_TIMEOUT');
+        text(q('[data-vsim="bot-refresh-status"]'), result.debounced
+          ? 'Fresh snapshot · broker call skipped' : 'Updated from Schwab');
+        await refresh({ requestCustody: false });
+        return result;
+      } catch (error) {
+        if (error.message === 'SCHWAB_CUSTODY_RATE_LIMITED') {
+          showCustodyRefreshError(null);
+          text(q('[data-vsim="bot-refresh-status"]'), 'Stored snapshot · Schwab rate limited');
+          text(q('.header-status strong'), 'Custody stale');
+          text(q('.safety-title'), '◇  CUSTODY DEGRADED');
+          await refresh({ requestCustody: false }).catch(() => {});
+          return null;
+        }
+        const message = 'CUSTODY REFRESH FAILED — showing stored snapshot. ' + error.message;
+        showCustodyRefreshError(message);
+        text(q('[data-vsim="bot-refresh-status"]'), 'Stored snapshot · refresh failed');
+        text(q('.header-status strong'), 'Custody refresh failed');
+        text(q('.safety-title'), '◇  CUSTODY DEGRADED');
+        return null;
+      } finally {
+        custodyRefreshInFlight = null;
+        buttons.forEach(node => { node.disabled = false; });
+      }
+    })();
+    return custodyRefreshInFlight;
+  }
+
+  async function refresh({ requestCustody = true } = {}) {
     const requests = [api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
       api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope)),
       api('/api/lane-1-spy/ledger?limit=250')];
@@ -3814,16 +3895,26 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3], payloads[4]); renderBrokerActivity(payloads[4], payloads[2]); renderPerformance(payloads[4], payloads[3]);
     renderLane1EventLedger(payloads[6], currentStatus);
     if (E3_SPINE_ENABLED) renderE3Spine(payloads[7]);
-    text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
-    text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
+    const custodyObservedMs = Date.parse(currentStatus?.custody?.observedAt || '');
+    const custodyAgeMs = Number.isFinite(custodyObservedMs) ? Date.now() - custodyObservedMs : null;
+    const custodyConnection = (currentStatus?.systemHealth?.rows || [])
+      .find(row => row.label === 'SCHWAB');
+    const custodyFresh = custodyAgeMs !== null && custodyAgeMs >= 0
+      && custodyAgeMs <= 20 * 60 * 1000 && custodyConnection?.color === 'GREEN';
+    text(q('.header-status strong'), custodyFresh ? 'Shadow connected' : 'Custody stale');
+    text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
+    text(q('.safety-title'), custodyFresh ? '◇  LIVE PROTECTED SHADOW' : '◇  CUSTODY DEGRADED');
     const market = currentStatus.marketCheck;
-    text(q('.safety-banner p'), market && market.ok
+    text(q('.safety-banner p'), !custodyFresh
+      ? 'Stored Schwab custody is stale or unavailable. Figures remain visible with age; broker mutation is disabled.'
+      : market && market.ok
       ? 'Live Schwab custody, verified market data, and D1/R2 evidence are connected. Broker order mutation is disabled.'
       : 'Schwab custody and D1/R2 evidence are connected. New-trade market data is '
         + (market ? 'blocked or stale' : 'not yet verified') + '; broker order mutation is disabled.');
     const versions = currentStatus.systemHealth && currentStatus.systemHealth.versions || {};
     text(q('footer span:nth-child(3)'), 'Dashboard ' + String(versions.dashboard || currentStatus.version || '').slice(0, 12)
       + ' · Market ' + String(versions.market || 'unknown').slice(0, 12));
+    if (requestCustody) window.setTimeout(() => { refreshCustody().catch(() => {}); }, 0);
   }
 
   async function operate(action, button) {
@@ -3867,6 +3958,10 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       kill: 'Trip the independent kill switch and block every new cycle?',
       clearKill: 'Clear the independent kill switch after verifying its cause is gone?',
     };
+    if (action === 'custodyRefresh') {
+      await refreshCustody(button);
+      return;
+    }
     if (action === 'laneArm' || action === 'laneDisarm') {
       const contractNode = q('[data-vsim="bot-broker-symbol"]');
       const ticker = contractNode?.dataset.ticker || 'unmeasured ticker';
@@ -4157,14 +4252,28 @@ async function route(request, env, ctx) {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     const body = await request.json().catch(() => ({}));
     if (body.confirm !== 'REFRESH_READ_ONLY_CUSTODY') return json({ error: 'EXPLICIT_CUSTODY_REFRESH_REQUIRED' }, 400);
-    const snapshot = await reconciledSnapshot(env, owner.id);
-    await audit(env, owner.id, 'CUSTODY_READ_ONLY_REFRESHED', {
-      snapshotHash: snapshot.snapshotHash,
-      positionCount: snapshot.positions.length,
-      openOrderCount: snapshot.openOrders.length,
-      observedAt: new Date(snapshot.asOf).toISOString(),
-    });
-    return json({ ok: true, observedAt: snapshot.asOf, snapshotHash: snapshot.snapshotHash });
+    const stored = await loadLatestCustody(env, owner.id).catch(() => null);
+    try {
+      const result = await refreshCustodySnapshot(env, owner.id);
+      if (result.refreshed) {
+        await audit(env, owner.id, 'CUSTODY_READ_ONLY_REFRESHED', {
+          snapshotHash: result.snapshotHash,
+          positionCount: result.positionCount,
+          openOrderCount: result.openOrderCount,
+          observedAt: result.observedAt,
+        });
+      }
+      return json({ ok: true, ...result });
+    } catch (error) {
+      const failure = custodyRefreshFailure(error);
+      const policy = custodyRefreshPolicy(stored);
+      await audit(env, owner.id, 'CUSTODY_READ_ONLY_REFRESH_FAILED', {
+        faultCode: failure.code, storedObservedAt: stored?.observedAt ?? null,
+      }).catch(() => {});
+      return json({ ok: false, error: failure.code, message: failure.message,
+        storedObservedAt: stored?.observedAt ?? null, storedSnapshotHash: stored?.hash ?? null,
+        ageMs: policy.ageMs, thresholdMs: policy.thresholdMs }, failure.status);
+    }
   }
   if (url.pathname === '/api/operator/broker/backfill' && request.method === 'POST') {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }

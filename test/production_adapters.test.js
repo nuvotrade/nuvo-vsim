@@ -127,7 +127,8 @@ describe('protected live dashboard', () => {
       '/api/operator/controls', '/api/operator/broker/backfill', '/api/cycle']) {
       assert.match(source, new RegExp(path.replaceAll('/', '\\/'), 'u'));
     }
-    assert.doesNotMatch(source, /\/api\/operator\/(custody\/refresh|market\/check|baseline)/u);
+    assert.match(source, /\/api\/operator\/custody\/refresh/u);
+    assert.doesNotMatch(source, /\/api\/operator\/(market\/check|baseline)/u);
     assert.doesNotMatch(source, /submitOrder|replaceOrder|cancelOrder/u);
     assert.match(source, /Signed cash balance/u);
     assert.match(source, /account\.cash/u);
