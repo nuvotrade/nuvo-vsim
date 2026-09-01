@@ -50,6 +50,10 @@ const cases = [
     'laneControlInFlight = false;\n        laneButtons.forEach(node => { node.disabled = false; });',
     'laneButtons.forEach(node => { node.disabled = false; });',
     viewTest, 'lane control is single-flight and always releases after failure'],
+  ['restore modal confirmation before DISARM', worker,
+    'if (laneControlInFlight) return;',
+    "if (laneControlInFlight) return;\n      if (action === 'laneDisarm' && !window.confirm('Confirm DISARM')) return;",
+    mobileTest, 'BOT emergency DISARM is the first phone surface and reports coordinator truth'],
 ];
 
 const results = [];

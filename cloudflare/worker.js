@@ -3814,8 +3814,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     };
     if (action === 'laneArm' || action === 'laneDisarm') {
       if (laneControlInFlight) return;
-      if (action === 'laneDisarm'
-        && !window.confirm('DISARM Lane 1? Stops new orders — does not cancel or flatten.')) return;
       laneControlInFlight = true;
       const stateNode = q('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]');
       const previousArmed = stateNode && stateNode.dataset.state === 'armed';

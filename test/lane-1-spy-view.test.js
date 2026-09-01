@@ -81,10 +81,8 @@ test('pane C is confined to Engine spine and Overview source remains untouched',
   const laneEnd = script.indexOf("if (['pause','resume','kill','clearKill']", laneStart);
   assert.ok(laneStart > 0 && laneEnd > laneStart);
   const laneBranch = script.slice(laneStart, laneEnd);
-  assert.match(laneBranch,
-    /action === 'laneDisarm'[\s\S]{0,120}window\.confirm\('DISARM Lane 1\? Stops new orders — does not cancel or flatten\.'\)/u);
-  assert.equal((laneBranch.match(/window\.confirm\(/gu) || []).length, 1,
-    'DISARM uses one confirmation and no dialog chain');
+  assert.equal((laneBranch.match(/window\.confirm\(/gu) || []).length, 0,
+    'DISARM starts immediately with no modal confirmation');
   assert.doesNotMatch(laneBranch, /window\.alert|scroll|location|hash/u);
   assert.doesNotMatch(script, /Arm LANE_1_SPY until you click DISARM/u);
   assert.doesNotMatch(script, /Disarm LANE_1_SPY now/u);
@@ -135,6 +133,7 @@ test('lane control is single-flight and always releases after failure', () => {
   assert.match(branch, /if \(laneControlInFlight\) return;/u);
   assert.match(branch, /laneControlInFlight = true;/u);
   assert.match(branch, /finally \{\s*laneControlInFlight = false;/u);
+  assert.doesNotMatch(branch, /window\.confirm/u);
   assert.ok(branch.indexOf('if (laneControlInFlight) return;')
     < branch.indexOf('operations[action]()'), 'guard precedes the write');
   assert.ok(branch.indexOf('laneControlInFlight = false;')

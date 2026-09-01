@@ -38,6 +38,9 @@ test('BOT emergency DISARM is the first phone surface and reports coordinator tr
   assert.match(script, /function setLaneUnconfirmed\(\)[\s\S]{0,260}text\(node, 'UNCONFIRMED'\)/u);
   assert.match(script, /if \(laneControlInFlight\) return;/u);
   assert.match(script, /finally \{\s*laneControlInFlight = false;/u);
+  const disarmBranchStart = script.indexOf("if (action === 'laneArm' || action === 'laneDisarm')");
+  const disarmBranchEnd = script.indexOf("if (action === 'lanePreview')", disarmBranchStart);
+  assert.doesNotMatch(script.slice(disarmBranchStart, disarmBranchEnd), /window\.confirm/u);
   assert.doesNotMatch(script, /bot-disarm-state[^\n]{0,180}(?:fetch|api\()/u);
 });
 
