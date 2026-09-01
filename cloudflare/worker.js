@@ -2093,15 +2093,18 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     <div class="lane-summary-today"><span>Today</span><strong data-vsim="lane-summary-today">— realized · — open</strong></div>
     <div class="lane-summary-block"><span>Blocking</span><strong data-vsim="lane-summary-blocking">—</strong></div>
     </article>`;
-  const mobileLaneSummaryCard = laneSummaryCard
-    .replace('lane-summary-card', 'lane-summary-card bot-lane-summary-card')
-    .replaceAll('lane-summary-title', 'bot-lane-summary-title');
   const mobileSystemCard = `<article class="panel system-brief mobile-system-brief" aria-label="System status"></article>`;
-  const botDisarmStrip = `<article class="panel bot-disarm-strip" aria-label="Lane 1 emergency stop"><div class="bot-disarm-copy"><span>LANE_1 · ORDER GATE</span><strong data-vsim="bot-disarm-state" data-state="disarmed" role="status" aria-live="polite">DISARMED</strong><small>Stops new orders — does not cancel or flatten</small></div><button class="cc-directive bot-disarm-button" type="button" data-action="laneDisarm">DISARM</button><p class="bot-disarm-error" data-vsim="bot-disarm-error" role="alert" aria-live="assertive" hidden></p></article>`;
+  const botStatusCard = `<article class="panel bot-status-card" aria-labelledby="bot-status-title">
+    <div class="bot-status-head"><div><p class="kicker">LANE_1 · LIVE CONTROL</p><h2 id="bot-status-title" data-vsim="bot-broker-symbol">Schwab · —</h2></div><div class="bot-status-actions"><button class="cc-directive bot-quick-disarm" type="button" data-action="laneDisarm">DISARM</button><details class="bot-control-menu"><summary aria-label="BOT controls">•••</summary><div><button type="button" data-action="laneArm" data-vsim="bot-menu-arm">ARM</button><button type="button" data-action="laneDisarm" data-vsim="bot-menu-disarm">DISARM</button><button type="button" disabled title="Available after live-exit validation">FLATTEN</button><small>Available after live-exit validation</small></div></details></div></div>
+    <div class="bot-position"><strong data-vsim="bot-position">—</strong><span data-vsim="bot-position-copy">position unavailable</span></div>
+    <div class="bot-pnl-grid"><div><span>OPEN P/L</span><strong data-vsim="bot-open-pnl">—</strong></div><div><span>DAY P/L</span><strong data-vsim="bot-day-pnl">—</strong></div></div>
+    <div class="bot-status-row"><strong data-vsim="bot-live-state" data-state="stale">STALE</strong><strong data-vsim="bot-arm-state" data-vsim-control-state data-state="disarmed" role="status" aria-live="polite">DISARMED</strong><strong data-vsim="bot-online-state" data-state="offline">OFFLINE</strong></div>
+    <p class="bot-status-meta"><span data-vsim="bot-live-age">Custody age unavailable</span><span>Stops new orders — does not cancel or flatten</span></p>
+    <p class="bot-disarm-error" data-vsim="bot-disarm-error" role="alert" aria-live="assertive" hidden></p>
+  </article>`;
   const bot = `<section class="view" id="bot" aria-labelledby="bot-title">
-    ${botDisarmStrip}
+    ${botStatusCard}
     <div class="page-heading"><div><p class="kicker">LANE_1_SPY · append-only operational evidence</p><h2 id="bot-title">BOT event ledger</h2></div><span class="readonly-tag">PHASE 1 · READ ONLY</span></div>
-    ${mobileLaneSummaryCard}
     <div class="bot-ledger-counts" aria-label="Lane 1 event counts">
       <div><span>SIGNAL</span><strong data-vsim="bot-count-signal">0</strong></div>
       <div><span>REFUSED</span><strong data-vsim="bot-count-refused">0</strong></div>
@@ -2145,21 +2148,21 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-red{color:var(--red)}.system-neutral{color:var(--muted)}.system-neutral .health-light{box-shadow:none}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
   </style>`;
   const botLedgerStyles = `<style>
-    .bot-disarm-strip{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:14px;margin-bottom:12px;padding:13px 15px;border-color:rgba(242,118,118,.5);background:linear-gradient(135deg,rgba(48,25,24,.82),rgba(8,21,16,.96))}.bot-disarm-copy{display:grid;grid-template-columns:auto auto;align-items:center;justify-content:start;gap:5px 10px;min-width:0}.bot-disarm-copy>span{color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.12em}.bot-disarm-copy>strong{padding:4px 7px;border:1px solid currentColor;border-radius:4px;color:var(--red);font:800 8px/1 var(--mono);letter-spacing:.09em}.bot-disarm-copy>strong[data-state="armed"]{color:var(--green)}.bot-disarm-copy>small{grid-column:1/-1;color:var(--text);font:700 9px/1.35 var(--mono)}.bot-disarm-button{min-width:92px;margin:0;border-color:var(--red);color:var(--red)}.bot-disarm-button:disabled{opacity:.55}.bot-disarm-error{grid-column:1/-1;margin:0;padding:9px 11px;border:1px solid rgba(242,118,118,.65);border-radius:5px;background:rgba(242,118,118,.13);color:var(--red);font:800 10px/1.4 var(--mono);overflow-wrap:anywhere}.bot-disarm-error[hidden]{display:none}
+    .bot-status-card{margin-bottom:12px;padding:22px;border-color:#24302e;background:linear-gradient(145deg,#111820,#0a1118);box-shadow:0 18px 42px rgba(0,0,0,.18)}.bot-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.bot-status-head h2{margin:5px 0 0;font-size:22px}.bot-status-actions{display:flex;align-items:center;gap:8px}.bot-quick-disarm{margin:0;border-color:var(--red);color:var(--red)}.bot-control-menu{position:relative}.bot-control-menu summary{display:grid;place-items:center;width:42px;height:38px;border:1px solid var(--line);border-radius:7px;color:var(--text);cursor:pointer;list-style:none;font:800 14px/1 var(--mono)}.bot-control-menu summary::-webkit-details-marker{display:none}.bot-control-menu>div{position:absolute;z-index:8;right:0;top:46px;display:grid;min-width:210px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#0a1513;box-shadow:0 14px 30px rgba(0,0,0,.45)}.bot-control-menu button{padding:10px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);text-align:left;font:800 10px/1.2 var(--mono);cursor:pointer}.bot-control-menu button:disabled{color:var(--muted);cursor:not-allowed}.bot-control-menu small{padding:8px 10px 4px;color:var(--muted);font:8px/1.35 var(--mono)}.bot-position{display:flex;align-items:center;gap:8px;margin-top:18px}.bot-position strong{padding:7px 11px;border:1px solid var(--line);border-radius:999px;font:800 11px/1 var(--mono)}.bot-position span{color:var(--muted);font:10px/1.2 var(--mono)}.bot-pnl-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px}.bot-pnl-grid>div{padding:18px;border:1px solid var(--line);border-radius:9px;background:rgba(5,11,15,.48)}.bot-pnl-grid span{display:block;color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.13em}.bot-pnl-grid strong{display:block;margin-top:9px;font:800 26px/1.1 var(--mono);font-variant-numeric:tabular-nums}.bot-status-row{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}.bot-status-row strong{padding:8px 12px;border:1px solid currentColor;border-radius:999px;color:var(--red);font:800 9px/1 var(--mono);letter-spacing:.1em}.bot-status-row strong[data-state="live"],.bot-status-row strong[data-state="armed"],.bot-status-row strong[data-state="online"]{color:var(--green);background:rgba(35,196,143,.1)}.bot-status-row strong[data-state="stale"],.bot-status-row strong[data-state="unconfirmed"]{color:var(--amber);background:rgba(244,186,97,.08)}.bot-status-meta{display:flex;justify-content:space-between;gap:16px;margin:12px 0 0;color:var(--muted);font:8px/1.4 var(--mono)}.bot-disarm-error{margin:14px 0 0;padding:10px 12px;border:1px solid rgba(242,118,118,.65);border-radius:6px;background:rgba(242,118,118,.13);color:var(--red);font:800 10px/1.4 var(--mono);overflow-wrap:anywhere}.bot-disarm-error[hidden]{display:none}
     .bot-ledger-counts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}.bot-ledger-counts>div{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:#081510}.bot-ledger-counts span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.13em}.bot-ledger-counts strong{display:block;margin-top:8px;font:700 20px/1.2 var(--mono)}.bot-ledger-counts small{display:block;margin-top:5px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em}.bot-ledger-scope{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-bottom:12px}.bot-ledger-scope h3,.bot-ledger-scope p{margin:0}.bot-ledger-scope h3{margin-top:5px}.bot-ledger-scope p:last-child{margin-top:7px;color:var(--muted);font-size:10px;line-height:1.5}.bot-event-ledger{margin-top:0}.bot-event-ledger table{min-width:1120px}.bot-event-ledger td{font-family:var(--mono);font-size:9px}.bot-event-ledger .bot-refused{color:var(--red)}.bot-event-ledger .bot-clear{color:var(--green)}.bot-record-link{color:var(--cyan);text-decoration:none}.bot-record-link:hover,.bot-record-link:focus-visible{text-decoration:underline}.bot-raw-side{white-space:pre-wrap}.bot-ledger-source{margin:6px 0 0;color:var(--muted);font:700 8px/1.4 var(--mono)}.bot-ledger-source.source-fault{color:var(--red)}
     .lane-summary-card{min-width:0}.lane-summary-arm{padding:5px 8px;border:1px solid currentColor;border-radius:4px;color:var(--muted);font:800 8px/1 var(--mono);letter-spacing:.08em}.lane-summary-arm[data-state="on"]{color:var(--green)}.lane-summary-facts{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-facts>div{padding:9px 10px;min-width:0;border-right:1px solid var(--line)}.lane-summary-facts>div:last-child{border-right:0}.lane-summary-facts span,.lane-summary-block span,.lane-summary-last span,.lane-summary-today span{display:block;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{display:block;margin-top:5px;font:700 10px/1.3 var(--mono);overflow-wrap:anywhere}
     .lane-summary-matrix{margin-top:10px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.lane-summary-matrix-head,.lane-summary-matrix-row{display:grid;grid-template-columns:minmax(82px,1.35fr) .5fr .8fr .36fr;align-items:center}.lane-summary-matrix-head{background:#07110e;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{min-width:0;padding:6px 5px;border-right:1px solid var(--line)}.lane-summary-matrix-head span:last-child,.lane-summary-matrix-row>div:last-child{border-right:0}.lane-summary-matrix-row{border-top:1px solid var(--line);font:700 7px/1.2 var(--mono)}.lane-summary-matrix-row>div:first-child{color:var(--text);white-space:nowrap}.lane-summary-matrix-row>div[data-evidence]{text-align:center}.lane-summary-matrix-row small{display:none}.lane-summary-matrix .clear{color:var(--green)}.lane-summary-matrix .refused{color:var(--amber)}.lane-summary-matrix .unmeasured{color:var(--muted)}
     .lane-summary-last,.lane-summary-today,.lane-summary-block{margin-top:9px;padding-top:8px;border-top:1px solid var(--line)}.lane-summary-block strong{display:block;margin-top:5px;color:var(--amber);font:800 9px/1.3 var(--mono)}@media(max-width:760px){.bot-ledger-counts{grid-template-columns:repeat(2,1fr)}.bot-ledger-scope{grid-template-columns:1fr}}
   </style>`;
   const mobileStyles = `<style>
-    .bot-lane-summary-card,.mobile-system-brief{display:none}
+    .mobile-system-brief{display:none}
     @media(max-width:660px){
       html,body,.shell,.topbar,.nav,main,.view,.panel,.metric-card{min-width:0;max-width:100%}
       body{font-size:13px}.topbar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;padding:12px}.brand{min-width:0}.brand h1{font-size:20px}.header-status{margin-left:0;min-width:0}.header-status strong{font-size:11px}.header-status small{font-size:9px}
       .nav{grid-column:1/-1;order:3;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;height:auto;gap:2px;overflow:visible}.nav-button{min-width:0;min-height:34px;padding:7px 4px;font-size:10px;line-height:1.15;white-space:normal}.nav-button.active:after{left:8px;right:8px;bottom:0}
       main{padding:18px 10px 36px}.page-heading{margin-bottom:16px}.page-heading h2{font-size:21px}.panel{padding:14px}.panel-head{gap:9px;margin-bottom:13px}.panel-head h3{font-size:16px}.metric-card{min-height:108px;padding:14px}.metric-value{font-size:25px;margin:9px 0}.metric-foot{font-size:9px}
       .lane-summary-card .panel-head{align-items:center}.lane-summary-arm{max-width:48%;text-align:right;line-height:1.25}.lane-summary-matrix-head,.lane-summary-matrix-row{grid-template-columns:minmax(96px,1.45fr) .52fr .8fr .38fr}.lane-summary-matrix-head span,.lane-summary-matrix-row>div{padding:7px 4px}.lane-summary-matrix-row{font-size:8px}.lane-summary-facts strong,.lane-summary-last strong,.lane-summary-today strong{font-size:11px}
-      #bot>.bot-disarm-strip,#bot>.bot-lane-summary-card{display:grid}#bot>*:not(.bot-disarm-strip):not(.bot-lane-summary-card){display:none}.bot-disarm-strip{grid-template-columns:minmax(0,1fr) auto;position:relative;top:auto}.bot-disarm-copy{grid-template-columns:1fr}.bot-disarm-copy>small{grid-column:1}.bot-disarm-button{min-width:82px;min-height:44px;padding:9px 10px}
+      #bot>.bot-status-card{display:block}#bot>*:not(.bot-status-card){display:none}.bot-status-card{padding:16px}.bot-status-head h2{font-size:19px}.bot-status-actions{gap:6px}.bot-quick-disarm{min-height:44px;padding:9px 10px}.bot-control-menu summary{width:44px;height:44px}.bot-pnl-grid{gap:8px}.bot-pnl-grid>div{padding:14px}.bot-pnl-grid strong{font-size:22px}.bot-status-meta{display:grid;gap:5px}.bot-control-menu>div{position:fixed;top:auto;right:12px;bottom:18px;left:12px}
       #system>.mobile-system-brief{display:block}#system>*:not(.mobile-system-brief){display:none}
       .system-health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-health-tile{min-height:48px;padding:10px 8px;font-size:8px;gap:6px}.system-health-details{display:none}.system-overall{max-width:52%;line-height:1.25;text-align:right}.system-health-meta{font-size:7px}
       .pnl-calendar-head{display:grid}.pnl-calendar-tools{width:100%;flex-wrap:wrap;justify-content:space-between}
@@ -2236,13 +2239,14 @@ export function resolveLaneControlOutcome({ action, previousArmed, result = null
         : 'LANE_1_PRINCIPAL_DISARM_READBACK_MISSING');
     return { armed: prior, error: `DISARM UNCONFIRMED — the lane may still be armed. Cancel any in-flight order at Schwab directly. (${String(detail)})` };
   }
-  const failure = error?.message ?? error ?? result?.faultCode ?? result?.error
-    ?? result?.message ?? null;
-  if (failure) return { armed: prior, error: `${verb} failed: ${String(failure)}` };
-  const accepted = arming ? result?.armed === true
-    : result?.armed === false || result?.state === 'DISARMED';
-  if (!accepted) return { armed: prior, error: `${verb} failed: LANE_1_${verb}_REJECTED` };
-  return { armed: arming, error: null };
+  if (readback?.armed === true && readback?.state === 'FLAT') {
+    return { armed: true, error: null };
+  }
+  const detail = readbackError?.message ?? readbackError ?? error?.message ?? error
+    ?? result?.faultCode ?? result?.error ?? result?.message
+    ?? (readback ? 'LANE_1_PRINCIPAL_ARM_STATE_MISMATCH'
+      : 'LANE_1_PRINCIPAL_ARM_READBACK_MISSING');
+  return { armed: prior, error: `ARM UNCONFIRMED — the lane remains in its prior state. (${String(detail)})` };
 }
 
 export function liveDashboardScript({ e3SpineTab = false } = {}) {
@@ -3555,7 +3559,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       make('p', 'Append-only Schwab order, execution, cash, assignment, exercise, and transfer events. Raw broker packets remain protected.', 'connector-note'));
   }
 
-  function renderLane1SummaryCard(ledger) {
+  function renderLane1SummaryCard(ledger, status) {
     const summary = ledger && ledger.summary;
     if (!summary) return;
     const textAll = (selector, value) => qa(selector).forEach(node => text(node, value));
@@ -3609,11 +3613,60 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         + (last.outcome === 'PREVIEW · CLEAR' ? 'previewed'
           : last.outcome === 'PREVIEW · REFUSED_NO_POSITION' ? 'preview no pos'
             : String(last.outcome || 'recorded').toLowerCase().replaceAll('_', ' ')) : '—');
+    const instrument = summary.instrument || {};
+    const brokerSymbol = q('[data-vsim="bot-broker-symbol"]');
+    text(brokerSymbol, instrument.ticker
+      ? (instrument.broker || 'Schwab') + ' · ' + instrument.ticker : 'Schwab · —');
+    if (brokerSymbol) {
+      brokerSymbol.dataset.ticker = instrument.ticker || '';
+      brokerSymbol.dataset.quantity = Number.isSafeInteger(instrument.quantityShares)
+        ? String(instrument.quantityShares) : '';
+    }
+    const positionValue = summary.position?.value;
+    const positionMeasured = positionValue && positionValue !== 'NOT_MEASURED';
+    text(q('[data-vsim="bot-position"]'), positionMeasured ? positionValue.split(' ')[0] : '—');
+    text(q('[data-vsim="bot-position-copy"]'), positionMeasured
+      ? positionValue === 'FLAT' ? 'no position' : positionValue : 'position unavailable');
+    const botRealized = summary.pnl?.realizedToday || {};
+    const dayPnl = Number.isSafeInteger(botRealized.valueCents) ? botRealized.valueCents / 100 : null;
+    const mark = Number(status?.systemHealth?.tape?.[String(instrument.ticker || '').toLowerCase()]);
+    const open = summary.openPosition || null;
+    const marketRow = (status?.systemHealth?.rows || []).find(row => row.label === 'MARKET');
+    const botOpenPnl = open && Number.isFinite(mark) && marketRow?.color === 'GREEN'
+      ? ((open.side === 'LONG' ? mark - open.openingPriceUsdPerShare
+        : open.openingPriceUsdPerShare - mark) * open.quantityShares)
+        - (open.openingFeeCents / 100) : null;
+    const setPnl = (selector, value) => {
+      const node = q(selector); text(node, Number.isFinite(value) ? moneyExact(value) : '—');
+      if (node) node.className = Number.isFinite(value) ? value > 0 ? 'positive'
+        : value < 0 ? 'negative' : 'neutral' : 'unmeasured';
+    };
+    setPnl('[data-vsim="bot-open-pnl"]', botOpenPnl);
+    setPnl('[data-vsim="bot-day-pnl"]', dayPnl);
+    const observedAt = Date.parse(status?.custody?.observedAt || '');
+    const custodyAgeMs = Number.isFinite(observedAt) ? Math.max(0, Date.now() - observedAt) : null;
+    const schwabRow = (status?.systemHealth?.rows || []).find(row => row.label === 'SCHWAB');
+    const custodyLive = custodyAgeMs !== null && custodyAgeMs <= 20 * 60 * 1000
+      && schwabRow?.color === 'GREEN';
+    const liveNode = q('[data-vsim="bot-live-state"]');
+    text(liveNode, custodyLive ? 'LIVE' : 'STALE');
+    if (liveNode) liveNode.dataset.state = custodyLive ? 'live' : 'stale';
+    const ageMinutes = custodyAgeMs === null ? null : Math.floor(custodyAgeMs / 60_000);
+    text(q('[data-vsim="bot-live-age"]'), ageMinutes === null ? 'Custody age unavailable'
+      : 'Custody ' + (ageMinutes < 1 ? '<1m' : ageMinutes + 'm') + ' old · live threshold 20m');
+    const connectors = new Map((status?.systemHealth?.rows || [])
+      .filter(row => ['D1','SCHWAB','MARKET','TV','DISCORD'].includes(row.label))
+      .map(row => [row.label, row.color]));
+    const online = ['D1','SCHWAB','MARKET','TV','DISCORD']
+      .every(label => connectors.get(label) === 'GREEN');
+    const onlineNode = q('[data-vsim="bot-online-state"]');
+    text(onlineNode, online ? 'ONLINE' : 'OFFLINE');
+    if (onlineNode) onlineNode.dataset.state = online ? 'online' : 'offline';
   }
 
-  function renderLane1EventLedger(ledger) {
+  function renderLane1EventLedger(ledger, status = currentStatus) {
     if (!ledger) return;
-    renderLane1SummaryCard(ledger);
+    renderLane1SummaryCard(ledger, status);
     const counts = ledger.counts || {};
     ['signal','refused','preview','order','fill'].forEach(kind => {
       const value = counts[kind.toUpperCase()];
@@ -3676,14 +3729,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   function setLaneState(armed) {
-    qa('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]').forEach(node => {
+    qa('[data-e3="lane-state"], [data-vsim="bot-disarm-state"], [data-vsim-control-state]').forEach(node => {
       node.dataset.state = armed ? 'armed' : 'disarmed';
       text(node, armed ? 'ARMED' : 'DISARMED');
     });
+    qa('[data-vsim="bot-menu-arm"]').forEach(node => { node.hidden = armed; });
+    qa('[data-vsim="bot-menu-disarm"]').forEach(node => { node.hidden = !armed; });
   }
 
   function setLaneUnconfirmed() {
-    qa('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]').forEach(node => {
+    qa('[data-e3="lane-state"], [data-vsim="bot-disarm-state"], [data-vsim-control-state]').forEach(node => {
       node.dataset.state = 'unconfirmed';
       text(node, 'UNCONFIRMED');
     });
@@ -3757,7 +3812,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     performanceState.calendar = payloads[5];
     renderOverview(currentStatus, payloads[3]); renderOpportunities(currentStatus); renderSystem(currentStatus, payloads[4]); await renderEvidence(currentStatus);
     renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3], payloads[4]); renderBrokerActivity(payloads[4], payloads[2]); renderPerformance(payloads[4], payloads[3]);
-    renderLane1EventLedger(payloads[6]);
+    renderLane1EventLedger(payloads[6], currentStatus);
     if (E3_SPINE_ENABLED) renderE3Spine(payloads[7]);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
@@ -3813,9 +3868,14 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       clearKill: 'Clear the independent kill switch after verifying its cause is gone?',
     };
     if (action === 'laneArm' || action === 'laneDisarm') {
+      const contractNode = q('[data-vsim="bot-broker-symbol"]');
+      const ticker = contractNode?.dataset.ticker || 'unmeasured ticker';
+      const quantity = contractNode?.dataset.quantity || 'unmeasured quantity';
+      if (action === 'laneArm' && !window.confirm('ARM Lane 1 for ' + ticker + ' · '
+        + quantity + ' share · long and short · market orders?')) return;
       if (laneControlInFlight) return;
       laneControlInFlight = true;
-      const stateNode = q('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]');
+      const stateNode = q('[data-e3="lane-state"], [data-vsim="bot-disarm-state"], [data-vsim-control-state]');
       const previousArmed = stateNode && stateNode.dataset.state === 'armed';
       const laneButtons = qa('[data-action="laneArm"], [data-action="laneDisarm"]');
       showLaneError(null);
@@ -3826,10 +3886,11 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
           result = await bounded(operations[action](), 5_000,
             'LANE_1_CONTROL_RESPONSE_TIMEOUT');
         } catch (caught) { error = caught; }
-        if (action === 'laneDisarm') {
+        if (action === 'laneArm' || action === 'laneDisarm') {
           try {
             readback = await bounded(operations.laneState(), 5_000,
-              'LANE_1_PRINCIPAL_DISARM_READBACK_TIMEOUT');
+              action === 'laneDisarm' ? 'LANE_1_PRINCIPAL_DISARM_READBACK_TIMEOUT'
+                : 'LANE_1_PRINCIPAL_ARM_READBACK_TIMEOUT');
           } catch (caught) { readbackError = caught; }
         }
         const outcome = resolveLaneControlOutcome({

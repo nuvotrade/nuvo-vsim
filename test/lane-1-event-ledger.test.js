@@ -86,7 +86,7 @@ test('source failure is distinguishable from an intentionally empty ledger', asy
   assert.match(ledger.sourceErrors[0], /LANE_1_COORDINATOR_HISTORY_UNAVAILABLE/u);
 });
 
-test('BOT tab is a read-only Phase 1 surface with no order or ARM action', () => {
+test('BOT tab projects Phase 1 evidence and uses only existing coordinator controls', () => {
   const source = `<html><head><title>NUVO VSIM v5 — Shadow Preview</title></head><body><nav><button class="nav-button" data-view="opportunities">Opportunities</button><button class="nav-button" data-view="evidence">Evidence</button><button class="nav-button" data-view="system">System</button></nav><main><section class="view active" id="overview"><article class="panel scorecard"><div class="panel-head"><div><p class="kicker">Five scoreboards</p><h3>Readiness</h3></div><strong class="readiness">1 / 5</strong></div>
             <div class="score-rows"><div><span>Economic</span><i></i><small>Awaiting data</small></div><div><span>Calibration</span><i></i><small>Awaiting data</small></div><div><span>Execution</span><i></i><small>Not connected</small></div><div class="ready"><span>Constitution</span><i></i><small>Clean</small></div><div><span>Survival</span><i></i><small>Awaiting data</small></div></div>
           </article></section>      <section class="view" id="evidence"></section></main><script src="app.js"></script></body></html>`;
@@ -135,6 +135,8 @@ test('Lane 1 summary distinguishes clear previews from audited no-position refus
   const ledger = await lane1EventLedger(environment(audit).env, 'owner-1');
   assert.equal(ledger.summary.arm.value, 'OFF');
   assert.equal(ledger.summary.position.value, 'FLAT');
+  assert.deepEqual(ledger.summary.instrument, { broker: 'Schwab', ticker: 'SPY',
+    quantityShares: 1, source: 'ACCEPTED_LANE_1_INGRESS' });
   assert.equal(ledger.summary.brokerReconciliation.value, 'NOT_MEASURED');
   assert.equal(ledger.summary.brokerReconciliation.positionDrift,
     'DEFINED_BUT_UNREACHABLE_UNTIL_REFRESH_PACKET');
@@ -184,4 +186,23 @@ test('Lane 1 summary counts only coordinator fills and uses EXIT_FILLED realized
   assert.equal(summary.matrix.SELL_SHORT.fill.status, 'NOT_MEASURED');
   assert.equal(summary.pnl.open.status, 'NOT_MEASURED');
   assert.equal(summary.pnl.aggregate.status, 'NOT_MEASURED');
+});
+
+test('open BOT position exposes only complete coordinator fill economics', () => {
+  const state = { armed: true, stage: 'OPEN_LONG', positionSide: 'LONG', fault: null,
+    latestUnit: { symbol: 'SPY', quantity: 1, positionSide: 'LONG', openingFillId: 'FILL-1',
+      openingPriceUsdPerShare: 766.25, openingFeeCents: 2, events: [
+        { eventType: 'EQUITY_FILL', fillId: 'FILL-1', symbol: 'SPY', side: 'BUY',
+          quantityShares: 1 },
+      ] } };
+  const summary = buildLane1BotSummary([], state);
+  assert.deepEqual(summary.instrument, { broker: 'Schwab', ticker: 'SPY', quantityShares: 1,
+    source: 'ACCOUNT_COORDINATOR_LATEST_UNIT' });
+  assert.deepEqual(summary.openPosition, { side: 'LONG', ticker: 'SPY', quantityShares: 1,
+    openingPriceUsdPerShare: 766.25, openingFeeCents: 2, openingFillId: 'FILL-1',
+    source: 'ACCOUNT_COORDINATOR_LATEST_UNIT' });
+
+  const incomplete = buildLane1BotSummary([], { ...state,
+    latestUnit: { ...state.latestUnit, openingFeeCents: null } });
+  assert.equal(incomplete.openPosition, null);
 });

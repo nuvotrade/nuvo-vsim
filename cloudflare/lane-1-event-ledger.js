@@ -113,9 +113,34 @@ export function buildLane1BotSummary(events, coordinatorState, { now = Date.now(
   const realizedCents = realizedComplete
     ? todayExits.reduce((sum, event) => sum + event.realizedPnlCents, 0) : null;
   const faultCode = coordinatorState?.fault?.faultCode ?? null;
+  const acceptedContractEvent = [...rows].reverse().find((event) =>
+    LANE_1_INSTRUCTIONS.includes(event.instruction)
+      && typeof event.rawTicker === 'string' && Number.isSafeInteger(event.quantity));
+  const configuredTicker = typeof unit?.symbol === 'string' ? unit.symbol
+    : acceptedContractEvent?.rawTicker ?? null;
+  const configuredQuantity = Number.isSafeInteger(unit?.quantity) ? unit.quantity
+    : acceptedContractEvent?.quantity ?? null;
+  const openFillEvent = ['LONG', 'SHORT'].includes(side)
+    ? unit?.events?.find((event) => event?.eventType === 'EQUITY_FILL'
+      && event.fillId === unit.openingFillId) ?? null : null;
+  const openPosition = ['LONG', 'SHORT'].includes(side)
+    && configuredTicker && Number.isSafeInteger(configuredQuantity)
+    && configuredQuantity > 0 && Number(unit?.openingPriceUsdPerShare) > 0
+    && Number.isSafeInteger(unit?.openingFeeCents)
+    && openFillEvent?.symbol === configuredTicker
+    && openFillEvent?.quantityShares === configuredQuantity
+      ? { side, ticker: configuredTicker, quantityShares: configuredQuantity,
+        openingPriceUsdPerShare: Number(unit.openingPriceUsdPerShare),
+        openingFeeCents: unit.openingFeeCents, openingFillId: unit.openingFillId,
+        source: 'ACCOUNT_COORDINATOR_LATEST_UNIT' }
+      : null;
 
   return {
     contract: 'LANE_1 · SPY 1 SHARE',
+    instrument: configuredTicker && Number.isSafeInteger(configuredQuantity)
+      ? { broker: 'Schwab', ticker: configuredTicker, quantityShares: configuredQuantity,
+        source: unit ? 'ACCOUNT_COORDINATOR_LATEST_UNIT' : 'ACCEPTED_LANE_1_INGRESS' }
+      : { status: 'NOT_MEASURED', reason: 'LANE_CONTRACT_SOURCE_UNAVAILABLE' },
     arm: stateAvailable
       ? { value: coordinatorState.armed === true ? 'ON' : 'OFF', stage: coordinatorState.stage,
         source: 'ACCOUNT_COORDINATOR' }
@@ -143,6 +168,7 @@ export function buildLane1BotSummary(events, coordinatorState, { now = Date.now(
       open: { status: 'NOT_MEASURED', reason: 'NO_LIVE_BROKER_MARK_SOURCE_IN_THIS_PACKET' },
       aggregate: { status: 'NOT_MEASURED', reason: 'PHASE_2_PAIRING_NOT_IMPLEMENTED' },
     },
+    openPosition,
     fills: { today: todayFills.length, total: fillEvents.length,
       provenInstructions: exactFills.size, targetInstructions: LANE_1_INSTRUCTIONS.length,
       source: 'ACCOUNT_COORDINATOR_HISTORY' },
@@ -211,6 +237,7 @@ export function projectLane1LedgerRow(row) {
     recordHref: recordId ? `#lane1-event-${recordId}` : null,
     sourceIngressId: typeof detail.sourceIngressId === 'string' ? detail.sourceIngressId : null,
     rawSide: ownScalar(rawMessage, 'side') ?? ownScalar(replayBody, 'side'),
+    rawTicker: ownScalar(rawMessage, 'ticker') ?? ownScalar(replayBody, 'ticker'),
     instruction: null,
     quantity: ownScalar(rawMessage, 'qty') ?? ownScalar(replayBody, 'qty')
       ?? ownScalar(detail, 'quantity'),

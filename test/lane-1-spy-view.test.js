@@ -81,8 +81,10 @@ test('pane C is confined to Engine spine and Overview source remains untouched',
   const laneEnd = script.indexOf("if (['pause','resume','kill','clearKill']", laneStart);
   assert.ok(laneStart > 0 && laneEnd > laneStart);
   const laneBranch = script.slice(laneStart, laneEnd);
-  assert.equal((laneBranch.match(/window\.confirm\(/gu) || []).length, 0,
-    'DISARM starts immediately with no modal confirmation');
+  assert.equal((laneBranch.match(/window\.confirm\(/gu) || []).length, 1,
+    'ARM confirms once while DISARM starts immediately');
+  assert.match(laneBranch, /action === 'laneArm' && !window\.confirm/u);
+  assert.doesNotMatch(laneBranch, /action === 'laneDisarm'[^\n]{0,160}window\.confirm/u);
   assert.doesNotMatch(laneBranch, /window\.alert|scroll|location|hash/u);
   assert.doesNotMatch(script, /Arm LANE_1_SPY until you click DISARM/u);
   assert.doesNotMatch(script, /Disarm LANE_1_SPY now/u);
@@ -92,6 +94,7 @@ test('lane UI reducer updates only accepted success and preserves prior state on
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneArm', previousArmed: false,
     result: { armed: true, state: 'FLAT', reason: 'PRINCIPAL_DASHBOARD_ARM' },
+    readback: { armed: true, state: 'FLAT' },
   }), { armed: true, error: null });
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneDisarm', previousArmed: true,
@@ -101,7 +104,8 @@ test('lane UI reducer updates only accepted success and preserves prior state on
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneArm', previousArmed: true,
     error: new Error('LANE_1_ARM_STATE_NOT_CLEAN'),
-  }), { armed: true, error: 'ARM failed: LANE_1_ARM_STATE_NOT_CLEAN' });
+  }), { armed: true,
+    error: 'ARM UNCONFIRMED — the lane remains in its prior state. (LANE_1_ARM_STATE_NOT_CLEAN)' });
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneDisarm', previousArmed: true,
     result: { armed: false, state: 'DISARMED' },
@@ -133,7 +137,8 @@ test('lane control is single-flight and always releases after failure', () => {
   assert.match(branch, /if \(laneControlInFlight\) return;/u);
   assert.match(branch, /laneControlInFlight = true;/u);
   assert.match(branch, /finally \{\s*laneControlInFlight = false;/u);
-  assert.doesNotMatch(branch, /window\.confirm/u);
+  assert.match(branch, /action === 'laneArm' && !window\.confirm/u);
+  assert.doesNotMatch(branch, /action === 'laneDisarm'[^\n]{0,160}window\.confirm/u);
   assert.ok(branch.indexOf('if (laneControlInFlight) return;')
     < branch.indexOf('operations[action]()'), 'guard precedes the write');
   assert.ok(branch.indexOf('laneControlInFlight = false;')
