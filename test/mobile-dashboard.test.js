@@ -29,7 +29,15 @@ test('BOT emergency DISARM is the first phone surface and reports coordinator tr
   const script = liveDashboardScript({ e3SpineTab: true });
   assert.match(script, /qa\('\[data-e3="lane-state"\], \[data-vsim="bot-disarm-state"\]'\)/u);
   assert.match(script, /qa\('\[data-e3="lane-error"\], \[data-vsim="bot-disarm-error"\]'\)/u);
-  assert.match(script, /if \(outcome\.error\) showLaneError\(outcome\.error\);\s*else setLaneState\(outcome\.armed\);/u);
+  assert.match(script, /laneState: \(\) => api\('\/api\/lane-1-spy\/state'\)/u);
+  assert.match(script, /bounded\(operations\[action\]\(\), 5_000/u);
+  assert.match(script, /bounded\(operations\.laneState\(\), 5_000/u);
+  assert.match(script, /LANE_1_PRINCIPAL_DISARM_READBACK_TIMEOUT/u);
+  assert.match(script, /DISARM UNCONFIRMED/u);
+  assert.match(script, /DISARM UNCONFIRMED — the lane may still be armed\. Cancel any in-flight order at Schwab directly\./u);
+  assert.match(script, /function setLaneUnconfirmed\(\)[\s\S]{0,260}text\(node, 'UNCONFIRMED'\)/u);
+  assert.match(script, /if \(laneControlInFlight\) return;/u);
+  assert.match(script, /finally \{\s*laneControlInFlight = false;/u);
   assert.doesNotMatch(script, /bot-disarm-state[^\n]{0,180}(?:fetch|api\()/u);
 });
 

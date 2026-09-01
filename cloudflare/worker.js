@@ -42,7 +42,8 @@ import {
 import {
   disarmLane1FromDashboard, expireLane1,
   armLane1FromDashboard, handleLane1PreviewRequest, handleLane1TvWebhook,
-  handlePrincipalFlatten, lane1Status, latestLane1ReplayIngress, validateLane1V21Market,
+  handlePrincipalFlatten, lane1ControlStateFromDashboard, lane1Status,
+  latestLane1ReplayIngress, validateLane1V21Market,
 } from './lane-1-runtime.js';
 import { lane1EventLedger } from './lane-1-event-ledger.js';
 import { buildSystemHealth, proofsForWorker } from './system-health.js';
@@ -2220,10 +2221,21 @@ export async function serveDashboard(render = fullDashboard, reportError = conso
   }
 }
 
-export function resolveLaneControlOutcome({ action, previousArmed, result = null, error = null }) {
+export function resolveLaneControlOutcome({ action, previousArmed, result = null, error = null,
+  readback = null, readbackError = null }) {
   const arming = action === 'laneArm';
   const verb = arming ? 'ARM' : 'DISARM';
   const prior = previousArmed === true;
+  if (!arming) {
+    if (readback?.armed === false && readback?.state === 'DISARMED') {
+      return { armed: false, error: null };
+    }
+    const detail = readbackError?.message ?? readbackError ?? error?.message ?? error
+      ?? result?.faultCode ?? result?.error ?? result?.message
+      ?? (readback ? 'LANE_1_PRINCIPAL_DISARM_STATE_MISMATCH'
+        : 'LANE_1_PRINCIPAL_DISARM_READBACK_MISSING');
+    return { armed: prior, error: `DISARM UNCONFIRMED — the lane may still be armed. Cancel any in-flight order at Schwab directly. (${String(detail)})` };
+  }
   const failure = error?.message ?? error ?? result?.faultCode ?? result?.error
     ?? result?.message ?? null;
   if (failure) return { armed: prior, error: `${verb} failed: ${String(failure)}` };
@@ -2250,6 +2262,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   const clear = node => { if (node) node.replaceChildren(); };
   const make = (tag, value, className) => { const node = document.createElement(tag); if (value !== undefined) node.textContent = value; if (className) node.className = className; return node; };
   const api = async (path, options) => { const response = await fetch(path, options); const body = await response.json(); if (!response.ok) throw new Error(body.error || body.reason || body.faultCode || body.message || ('HTTP ' + response.status)); return body; };
+  const bounded = (promise, timeoutMs, faultCode) => new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(faultCode)), timeoutMs);
+    Promise.resolve(promise).then(
+      value => { window.clearTimeout(timer); resolve(value); },
+      error => { window.clearTimeout(timer); reject(error); },
+    );
+  });
   const connectorOk = status => status === 'CONNECTED' || status === 'LIVE_READ_ONLY';
   const structure = value => ({ CSP: 'Cash-secured put', BULL_PUT_SPREAD: 'Bull put spread', CASH_SECURED_PUT: 'Cash-secured put' }[value] || value || '—');
   const marketDateKey = value => {
@@ -3663,6 +3682,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     });
   }
 
+  function setLaneUnconfirmed() {
+    qa('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]').forEach(node => {
+      node.dataset.state = 'unconfirmed';
+      text(node, 'UNCONFIRMED');
+    });
+  }
+
   function showLaneError(message) {
     qa('[data-e3="lane-error"], [data-vsim="bot-disarm-error"]').forEach(node => {
       text(node, message || '');
@@ -3720,6 +3746,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   let currentStatus = null;
+  let laneControlInFlight = false;
   async function refresh() {
     const requests = [api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
       api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope)),
@@ -3764,6 +3791,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       laneDisarm: () => api('/api/lane-1-spy/disarm', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
       }),
+      laneState: () => api('/api/lane-1-spy/state'),
       laneArm: () => api('/api/lane-1-spy/arm', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
       }),
@@ -3785,22 +3813,41 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       clearKill: 'Clear the independent kill switch after verifying its cause is gone?',
     };
     if (action === 'laneArm' || action === 'laneDisarm') {
+      if (laneControlInFlight) return;
       if (action === 'laneDisarm'
         && !window.confirm('DISARM Lane 1? Stops new orders — does not cancel or flatten.')) return;
+      laneControlInFlight = true;
       const stateNode = q('[data-e3="lane-state"], [data-vsim="bot-disarm-state"]');
       const previousArmed = stateNode && stateNode.dataset.state === 'armed';
       const laneButtons = qa('[data-action="laneArm"], [data-action="laneDisarm"]');
       showLaneError(null);
       laneButtons.forEach(node => { node.disabled = true; });
       try {
-        const result = await operations[action]();
-        const outcome = resolveLaneControlOutcome({ action, previousArmed, result });
-        if (outcome.error) showLaneError(outcome.error);
+        let result = null; let error = null; let readback = null; let readbackError = null;
+        try {
+          result = await bounded(operations[action](), 5_000,
+            'LANE_1_CONTROL_RESPONSE_TIMEOUT');
+        } catch (caught) { error = caught; }
+        if (action === 'laneDisarm') {
+          try {
+            readback = await bounded(operations.laneState(), 5_000,
+              'LANE_1_PRINCIPAL_DISARM_READBACK_TIMEOUT');
+          } catch (caught) { readbackError = caught; }
+        }
+        const outcome = resolveLaneControlOutcome({
+          action, previousArmed, result, error, readback, readbackError,
+        });
+        if (outcome.error) {
+          if (action === 'laneDisarm') setLaneUnconfirmed();
+          showLaneError(outcome.error);
+        }
         else setLaneState(outcome.armed);
       } catch (error) {
         const outcome = resolveLaneControlOutcome({ action, previousArmed, error });
+        if (action === 'laneDisarm') setLaneUnconfirmed();
         showLaneError(outcome.error);
       } finally {
+        laneControlInFlight = false;
         laneButtons.forEach(node => { node.disabled = false; });
       }
       return;
@@ -3956,6 +4003,10 @@ async function route(request, env, ctx) {
   }
   if (url.pathname === '/api/lane-1-spy/disarm' && request.method === 'POST') {
     const result = await disarmLane1FromDashboard({ env, ownerId: owner.id });
+    return json(result.body, result.status);
+  }
+  if (url.pathname === '/api/lane-1-spy/state' && request.method === 'GET') {
+    const result = await lane1ControlStateFromDashboard({ env, ownerId: owner.id });
     return json(result.body, result.status);
   }
   if (url.pathname === '/api/lane-1-spy/arm' && request.method === 'POST') {

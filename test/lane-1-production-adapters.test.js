@@ -7,7 +7,9 @@ import {
   extractLane1BracketStop, extractLane1SchwabFill, fetchLane1PreviewOnly, SchwabD1Client,
   schwabOrderIdFromLocation,
 } from '../cloudflare/schwab-client.js';
-import { armLane1FromDashboard, disarmLane1FromDashboard } from '../cloudflare/lane-1-runtime.js';
+import {
+  armLane1FromDashboard, disarmLane1FromDashboard, lane1ControlStateFromDashboard,
+} from '../cloudflare/lane-1-runtime.js';
 import { createLane1DiscordNotifier } from '../cloudflare/lane-1-runtime.js';
 
 test('Schwab order builder admits only one SPY equity share in NORMAL DAY session', () => {
@@ -254,21 +256,74 @@ test('dashboard DISARM persists directly without invoking the Discord notifier',
       calls.push(value);
       return { armed: false, stage: 'DISARMED' };
     },
+    async laneV2Status() {
+      calls.push({ readback: true });
+      return { armed: false, stage: 'DISARMED', updatedAt: '2026-08-28T19:00:00.000Z' };
+    },
   };
   const result = await disarmLane1FromDashboard({
     env: { ACCOUNT_COORDINATOR: { getByName: () => stub } }, ownerId: 'OWNER',
     now: () => Date.parse('2026-08-28T19:00:00.000Z'),
   });
   assert.deepEqual(result, { status: 200, body: { armed: false, state: 'DISARMED',
-    reason: 'PRINCIPAL_DASHBOARD_DISARM' } });
+    reason: 'PRINCIPAL_DASHBOARD_DISARM', updatedAt: '2026-08-28T19:00:00.000Z' } });
   assert.deepEqual(calls, [{ reason: 'PRINCIPAL_DASHBOARD_DISARM',
-    at: '2026-08-28T19:00:00.000Z' }]);
+    at: '2026-08-28T19:00:00.000Z' }, { readback: true }]);
+});
+
+test('dashboard DISARM refuses success when authoritative coordinator readback stays armed', async () => {
+  const result = await disarmLane1FromDashboard({
+    env: { ACCOUNT_COORDINATOR: { getByName: () => ({
+      laneV2Disarm: async () => ({ armed: false, stage: 'DISARMED' }),
+      laneV2Status: async () => ({ armed: true, stage: 'DISARMED' }),
+    }) } }, ownerId: 'OWNER', now: () => Date.parse('2026-08-28T19:00:00.000Z'),
+  });
+  assert.deepEqual(result, { status: 503, body: {
+    faultCode: 'LANE_1_PRINCIPAL_DISARM_UNCONFIRMED' } });
+});
+
+test('dashboard DISARM is idempotent but still requires authoritative readback', async () => {
+  let disarmCalls = 0;
+  let statusCalls = 0;
+  const result = await disarmLane1FromDashboard({
+    env: { ACCOUNT_COORDINATOR: { getByName: () => ({
+      laneV2Disarm: async () => {
+        disarmCalls += 1;
+        return { armed: false, stage: 'DISARMED', changed: false };
+      },
+      laneV2Status: async () => {
+        statusCalls += 1;
+        return { armed: false, stage: 'DISARMED', updatedAt: 'UNCHANGED' };
+      },
+    }) } }, ownerId: 'OWNER', now: () => Date.parse('2026-08-28T19:00:00.000Z'),
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { armed: false, state: 'DISARMED',
+    reason: 'PRINCIPAL_DASHBOARD_DISARM', updatedAt: 'UNCHANGED' });
+  assert.equal(disarmCalls, 1);
+  assert.equal(statusCalls, 1);
+});
+
+test('dashboard control-state read exposes coordinator truth and rejects an incomplete state', async () => {
+  const env = { ACCOUNT_COORDINATOR: { getByName: () => ({
+    laneV2Status: async () => ({ armed: false, stage: 'DISARMED', updatedAt: 'NOW' }),
+  }) } };
+  assert.deepEqual(await lane1ControlStateFromDashboard({ env, ownerId: 'OWNER' }), {
+    status: 200, body: { armed: false, state: 'DISARMED', updatedAt: 'NOW' },
+  });
+  const incomplete = { ACCOUNT_COORDINATOR: { getByName: () => ({
+    laneV2Status: async () => ({ stage: 'DISARMED' }),
+  }) } };
+  assert.deepEqual(await lane1ControlStateFromDashboard({ env: incomplete, ownerId: 'OWNER' }), {
+    status: 503, body: { faultCode: 'LANE_1_CONTROL_STATE_UNAVAILABLE' },
+  });
 });
 
 test('dashboard DISARM returns the Durable Object rejection reason fail-closed', async () => {
   const result = await disarmLane1FromDashboard({
     env: { ACCOUNT_COORDINATOR: { getByName: () => ({
       laneV2Disarm: async () => { throw new Error('LANE_1_TEST_DISARM_REJECTED: detail'); },
+      laneV2Status: async () => ({ armed: true, stage: 'FLAT' }),
     }) } }, ownerId: 'OWNER', now: () => Date.parse('2026-08-28T19:00:00.000Z'),
   });
   assert.deepEqual(result, { status: 422, body: {

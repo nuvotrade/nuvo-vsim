@@ -98,13 +98,45 @@ test('lane UI reducer updates only accepted success and preserves prior state on
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneDisarm', previousArmed: true,
     result: { armed: false, state: 'DISARMED', reason: 'PRINCIPAL_DASHBOARD_DISARM' },
+    readback: { armed: false, state: 'DISARMED' },
   }), { armed: false, error: null });
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneArm', previousArmed: true,
     error: new Error('LANE_1_ARM_STATE_NOT_CLEAN'),
   }), { armed: true, error: 'ARM failed: LANE_1_ARM_STATE_NOT_CLEAN' });
   assert.deepEqual(resolveLaneControlOutcome({
+    action: 'laneDisarm', previousArmed: true,
+    result: { armed: false, state: 'DISARMED' },
+    readback: { armed: true, state: 'DISARMED' },
+  }), { armed: true,
+    error: 'DISARM UNCONFIRMED — the lane may still be armed. Cancel any in-flight order at Schwab directly. (LANE_1_PRINCIPAL_DISARM_STATE_MISMATCH)' });
+  assert.deepEqual(resolveLaneControlOutcome({
+    action: 'laneDisarm', previousArmed: true,
+    error: new Error('LANE_1_CONTROL_RESPONSE_TIMEOUT'),
+    readback: { armed: false, state: 'DISARMED' },
+  }), { armed: false, error: null });
+  assert.deepEqual(resolveLaneControlOutcome({
+    action: 'laneDisarm', previousArmed: true,
+    readbackError: new Error('LANE_1_PRINCIPAL_DISARM_READBACK_TIMEOUT'),
+  }), { armed: true,
+    error: 'DISARM UNCONFIRMED — the lane may still be armed. Cancel any in-flight order at Schwab directly. (LANE_1_PRINCIPAL_DISARM_READBACK_TIMEOUT)' });
+  assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneDisarm', previousArmed: false,
-    result: { faultCode: 'LANE_1_TEST_DISARM_REJECTED' },
-  }), { armed: false, error: 'DISARM failed: LANE_1_TEST_DISARM_REJECTED' });
+    readbackError: new Error('ACCOUNT_COORDINATOR_UNAVAILABLE'),
+  }), { armed: false,
+    error: 'DISARM UNCONFIRMED — the lane may still be armed. Cancel any in-flight order at Schwab directly. (ACCOUNT_COORDINATOR_UNAVAILABLE)' });
+});
+
+test('lane control is single-flight and always releases after failure', () => {
+  const script = liveDashboardScript({ e3SpineTab: true });
+  const branchStart = script.indexOf("if (action === 'laneArm' || action === 'laneDisarm')");
+  const branchEnd = script.indexOf("if (action === 'lanePreview')", branchStart);
+  const branch = script.slice(branchStart, branchEnd);
+  assert.match(branch, /if \(laneControlInFlight\) return;/u);
+  assert.match(branch, /laneControlInFlight = true;/u);
+  assert.match(branch, /finally \{\s*laneControlInFlight = false;/u);
+  assert.ok(branch.indexOf('if (laneControlInFlight) return;')
+    < branch.indexOf('operations[action]()'), 'guard precedes the write');
+  assert.ok(branch.indexOf('laneControlInFlight = false;')
+    > branch.indexOf('catch (error)'), 'release occurs after the failure path');
 });

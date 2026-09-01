@@ -668,14 +668,37 @@ export async function disarmLane1FromDashboard({ env, ownerId, now = () => Date.
       faultCode: 'LANE_1_PRINCIPAL_DISARM_TIME_INVALID' } };
   }
   try {
-    const state = await coordinatorV2Adapter(env, ownerId).disarm({
+    const coordinator = coordinatorV2Adapter(env, ownerId);
+    await coordinator.disarm({
       reason: 'PRINCIPAL_DASHBOARD_DISARM', at: new Date(atMs).toISOString(),
     });
+    const state = await coordinator.status();
+    if (state?.armed !== false || state?.stage !== 'DISARMED') {
+      return { status: 503, body: {
+        faultCode: 'LANE_1_PRINCIPAL_DISARM_UNCONFIRMED' } };
+    }
     return { status: 200, body: { armed: false,
-      state: state.stage ?? 'DISARMED', reason: 'PRINCIPAL_DASHBOARD_DISARM' } };
+      state: state.stage, reason: 'PRINCIPAL_DASHBOARD_DISARM',
+      updatedAt: state.updatedAt ?? null } };
   } catch (error) {
     return { status: 422, body: {
       faultCode: String(error?.message ?? error).split(':')[0] } };
+  }
+}
+
+export async function lane1ControlStateFromDashboard({ env, ownerId }) {
+  try {
+    const state = await coordinatorV2Adapter(env, ownerId).status();
+    if (typeof state?.armed !== 'boolean' || typeof state?.stage !== 'string') {
+      return { status: 503, body: { faultCode: 'LANE_1_CONTROL_STATE_UNAVAILABLE' } };
+    }
+    return { status: 200, body: {
+      armed: state.armed, state: state.stage, updatedAt: state.updatedAt ?? null,
+    } };
+  } catch (error) {
+    return { status: 503, body: {
+      faultCode: String(error?.message ?? error).split(':')[0],
+    } };
   }
 }
 
