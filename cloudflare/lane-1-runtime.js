@@ -33,7 +33,7 @@ async function secretMatches(supplied, expected) {
   return difference === 0;
 }
 
-async function recordOperationalProof(env, ownerId, eventType, detail) {
+export async function recordOperationalProof(env, ownerId, eventType, detail) {
   if (!env.DB?.prepare || !ownerId) return null;
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();

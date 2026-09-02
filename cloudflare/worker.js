@@ -45,7 +45,7 @@ import {
   handleLane1PreviewRequest, handleLane1TvWebhook,
   handlePrincipalFlatten, lane1ControlStateFromDashboard, lane1Status,
   latestLane1ReplayIngress, readBoundedJson, reconcileLane1OpenFromBrokerLedger,
-  validateLane1V21Market,
+  recordOperationalProof, validateLane1V21Market,
 } from './lane-1-runtime.js';
 import { lane1EventLedger } from './lane-1-event-ledger.js';
 import { buildSystemHealth, proofsForWorker,
@@ -282,7 +282,8 @@ async function currentWorkerProofs(env, ownerId) {
   try {
     const rows = await env.DB.prepare(`SELECT id,event_type,detail_json,created_at
       FROM operational_audit WHERE owner_id=? AND event_type IN
-      ('LANE_1_TV_INGRESS','LANE_1_TV_TAPE','LANE_1_DISCORD_DELIVERED','LANE_1_DISCORD_FAILED')
+      ('LANE_1_TV_INGRESS','LANE_1_TV_TAPE','LANE_1_TV_ROUTE_PROBE',
+       'LANE_1_DISCORD_DELIVERED','LANE_1_DISCORD_FAILED')
       ORDER BY created_at DESC LIMIT 50`).bind(ownerId).all();
     return proofsForWorker(rows?.results ?? [], workerVersion);
   } catch {
@@ -1065,7 +1066,7 @@ async function apiStatus(env, ownerId, { custodyRefreshProbe } = {}) {
     storageHealthProbe(env, ownerId),
   ]);
   const tvIngress = tradingViewIngressHealth(workerProofs.LANE_1_TV_INGRESS,
-    env.CF_VERSION_METADATA?.id ?? 'local', Date.now());
+    env.CF_VERSION_METADATA?.id ?? 'local', Date.now(), workerProofs.LANE_1_TV_ROUTE_PROBE);
   const systemHealth = buildSystemHealth({
     dashboardVersion: env.CF_VERSION_METADATA?.id ?? 'local',
     marketVersion: marketIdentity.versionId ?? 'unknown',
@@ -3847,7 +3848,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   let laneControlInFlight = false;
   let initialSelfAudit = true;
   async function refresh() {
-    const statusRequest = initialSelfAudit
+    const isInitialSelfAudit = initialSelfAudit;
+    const statusRequest = isInitialSelfAudit
       ? api('/api/self-audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
       : api('/api/status');
     initialSelfAudit = false;
@@ -3856,6 +3858,15 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       api('/api/lane-1-spy/ledger?limit=250')];
     if (E3_SPINE_ENABLED) requests.push(api('/api/e3-spine'));
     const payloads = await Promise.all(requests);
+    if (isInitialSelfAudit && payloads[0]?.selfAudit?.tvRouteChallenge) {
+      // Leave the authenticated dashboard context and re-enter through the
+      // public TradingView door. The one-use challenge prevents public callers
+      // from generating audit writes; GET can never enter the order handler.
+      const challenge = encodeURIComponent(payloads[0].selfAudit.tvRouteChallenge);
+      await api('/lane/tv?health=1&challenge=' + challenge,
+        { method: 'GET', credentials: 'omit', cache: 'no-store' }).catch(() => null);
+      payloads[0] = await api('/api/status');
+    }
     currentStatus = payloads[0];
     performanceState.calendar = payloads[5];
     renderOverview(currentStatus, payloads[3]); renderOpportunities(currentStatus); renderSystem(currentStatus, payloads[4]); await renderEvidence(currentStatus);
@@ -4119,6 +4130,32 @@ async function route(request, env, ctx) {
   }
   if (url.pathname === '/lane/tv') {
     if (!env.ACCESS_OWNER_ID) return json({ error: 'LANE_1_OWNER_NOT_CONFIGURED' }, 503);
+    if (request.method === 'GET' && url.searchParams.get('health') === '1') {
+      const challenge = url.searchParams.get('challenge');
+      if (!challenge) return json({ error: 'TV_ROUTE_CHALLENGE_REQUIRED' }, 403);
+      const row = await env.DB.prepare(`SELECT detail_json FROM operational_audit
+        WHERE id=? AND owner_id=? AND event_type='DASHBOARD_TV_ROUTE_CHALLENGE'`).bind(
+        challenge, env.ACCESS_OWNER_ID,
+      ).first();
+      const challengeDetail = parseJson(row?.detail_json, null);
+      const currentVersion = env.CF_VERSION_METADATA?.id ?? 'local';
+      if (!challengeDetail || challengeDetail.workerVersion !== currentVersion
+        || Date.parse(challengeDetail.expiresAt ?? '') < Date.now()) {
+        return json({ error: 'TV_ROUTE_CHALLENGE_INVALID' }, 403);
+      }
+      const createdAt = nowIso();
+      const result = await env.DB.prepare(`UPDATE operational_audit
+        SET event_type='LANE_1_TV_ROUTE_PROBE',detail_json=?,created_at=?
+        WHERE id=? AND owner_id=? AND event_type='DASHBOARD_TV_ROUTE_CHALLENGE'`).bind(
+        JSON.stringify({ workerVersion: currentVersion, probeKind: 'PUBLIC_ROUTE_GET',
+          route: '/lane/tv' }), createdAt, challenge, env.ACCESS_OWNER_ID,
+      ).run();
+      if (Number(result?.meta?.changes) !== 1) {
+        return json({ error: 'TV_ROUTE_CHALLENGE_ALREADY_USED' }, 409);
+      }
+      return json({ state: 'REACHABLE', workerVersion: env.CF_VERSION_METADATA?.id ?? 'local',
+        proofId: challenge, orderDispatch: false });
+    }
     return handleLane1TvWebhook({ request, env, ownerId: env.ACCESS_OWNER_ID });
   }
   if (url.pathname === '/lane/principal-flatten') {
@@ -4162,6 +4199,10 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/self-audit' && request.method === 'POST') {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     const startedAt = nowIso();
+    const tvRouteChallenge = await recordOperationalProof(env, owner.id,
+      'DASHBOARD_TV_ROUTE_CHALLENGE', {
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
     let custodyRefreshProbe;
     try {
       const snapshot = await reconciledSnapshot(env, owner.id);
@@ -4187,7 +4228,8 @@ async function route(request, env, ctx) {
         status: row.status, detail: row.detail, asOf: row.asOf,
       }])),
     });
-    return json({ ...status, selfAudit: { startedAt, completedAt, passed } });
+    return json({ ...status, selfAudit: { startedAt, completedAt, passed,
+      tvRouteChallenge: tvRouteChallenge?.id ?? null } });
   }
   if (url.pathname === '/api/e3-spine' && request.method === 'GET') {
     if (!e3SpineTabEnabled(env)) return json({ error: 'NOT_FOUND' }, 404);

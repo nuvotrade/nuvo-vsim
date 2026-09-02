@@ -8,6 +8,7 @@ import {
   discordWebhookProbe, fullDashboard, liveDashboardScript, rewriteDesignHtml,
   schwabRealtimeMarketProbe,
 } from '../cloudflare/worker.js';
+import worker from '../cloudflare/worker.js';
 
 const NOW = Date.parse('2026-08-28T20:00:00.000Z');
 const at = (delta) => new Date(NOW + delta).toISOString();
@@ -156,6 +157,61 @@ test('accepted current-version ingress flips TV to green and records time and in
   assert.match(tv.detail, /INGRESS-CURRENT/u);
 });
 
+test('fresh external route proof makes TV live without inventing a signal', () => {
+  const routeRecord = { id: 'ROUTE-CURRENT', event_type: 'LANE_1_TV_ROUTE_PROBE',
+    created_at: at(-2_000), detail_json: JSON.stringify({ workerVersion: 'current',
+      probeKind: 'PUBLIC_ROUTE_GET', route: '/lane/tv' }) };
+  const routeProof = proofsForWorker([routeRecord], 'current').LANE_1_TV_ROUTE_PROBE;
+  const health = tradingViewIngressHealth(null, 'current', NOW, routeProof);
+  assert.equal(health.state, 'REACHABLE');
+  assert.equal(health.ok, true);
+  const model = healthy({ tradingViewIngressHealth: health, tradingViewTape: null });
+  const tv = byLabel(model).TV;
+  assert.equal(tv.color, 'GREEN');
+  assert.equal(tv.status, 'LIVE');
+  assert.match(tv.detail, /PUBLIC INGRESS ROUTE REACHABLE · NO SIGNAL REQUIRED/u);
+  assert.doesNotMatch(tv.detail, /RECENT SIGNAL/u);
+  assert.equal(model.status, 'ALL HEALTHY');
+});
+
+test('stale route proof cannot paint TradingView green', () => {
+  const routeRecord = { id: 'ROUTE-STALE', event_type: 'LANE_1_TV_ROUTE_PROBE',
+    created_at: at(-10 * 60 * 1000), detail_json: JSON.stringify({ workerVersion: 'current',
+      probeKind: 'PUBLIC_ROUTE_GET', route: '/lane/tv' }) };
+  const routeProof = proofsForWorker([routeRecord], 'current').LANE_1_TV_ROUTE_PROBE;
+  assert.equal(tradingViewIngressHealth(null, 'current', NOW, routeProof).state, 'UNPROVEN');
+});
+
+test('public TV route probe consumes one authenticated challenge and never dispatches', async () => {
+  const challengeDetail = JSON.stringify({ workerVersion: 'current',
+    expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  let consumed = false;
+  const env = {
+    NUVO_AUTHORITY_LEVEL: '2', ACCESS_OWNER_ID: 'owner',
+    CF_VERSION_METADATA: { id: 'current' },
+    DB: { prepare(sql) { return { bind(...values) { return {
+      async first() {
+        if (!sql.includes('DASHBOARD_TV_ROUTE_CHALLENGE') || values[0] !== 'challenge-1') return null;
+        return consumed ? null : { detail_json: challengeDetail };
+      },
+      async run() {
+        if (!sql.includes("SET event_type='LANE_1_TV_ROUTE_PROBE'")) throw new Error('unexpected write');
+        if (consumed) return { meta: { changes: 0 } };
+        consumed = true;
+        return { meta: { changes: 1 } };
+      },
+    }; } }; } },
+  };
+  const first = await worker.fetch(new Request(
+    'https://vsim.nuvotrade.co/lane/tv?health=1&challenge=challenge-1'), env, {});
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), { state: 'REACHABLE', workerVersion: 'current',
+    proofId: 'challenge-1', orderDispatch: false });
+  const replay = await worker.fetch(new Request(
+    'https://vsim.nuvotrade.co/lane/tv?health=1&challenge=challenge-1'), env, {});
+  assert.equal(replay.status, 403);
+});
+
 test('explicit failed authenticated ingress is red and can never report healthy', () => {
   const record = { id: 'INGRESS-BROKEN', event_type: 'LANE_1_TV_INGRESS',
     created_at: at(-2_000), detail_json: JSON.stringify({ workerVersion: 'current',
@@ -189,6 +245,10 @@ test('Worker source contains no self-referential POST to the order ingress route
   const source = readFileSync(new URL('../cloudflare/worker.js', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /PUBLIC_ORIGIN[\s\S]{0,600}\/lane\/tv/u);
   assert.doesNotMatch(source, /\/lane\/tv[\s\S]{0,180}body:\s*'\{\}'/u);
+  assert.match(source, /credentials: 'omit'/u);
+  assert.match(source, /DASHBOARD_TV_ROUTE_CHALLENGE[\s\S]{0,900}LANE_1_TV_ROUTE_PROBE/u);
+  assert.match(source, /event_type='DASHBOARD_TV_ROUTE_CHALLENGE'/u);
+  assert.match(source, /TV_ROUTE_CHALLENGE_ALREADY_USED/u);
 });
 
 test('Discord heartbeat uses silent GET validation and sends no message', async () => {

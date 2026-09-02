@@ -33,6 +33,8 @@ export function proofsForWorker(rows = [], workerVersion) {
       ingressId: record.id ?? detail.ingressId ?? null,
       acceptedInstruction: detail.acceptedInstruction ?? null,
       ingressKind: detail.ingressKind ?? null,
+      probeKind: detail.probeKind ?? null,
+      route: detail.route ?? null,
       signalShapeAccepted: detail.signalShapeAccepted === true,
       replayEligible: detail.replayEligible === true,
       spy: Number.isFinite(Number(detail.spy)) ? Number(detail.spy) : null,
@@ -45,9 +47,20 @@ export function proofsForWorker(rows = [], workerVersion) {
 
 const LANE_1_INSTRUCTIONS = new Set(['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER']);
 
-export function tradingViewIngressHealth(proof, workerVersion, now = Date.now()) {
+export function tradingViewIngressHealth(proof, workerVersion, now = Date.now(), routeProof = null) {
   const at = new Date(Number(now)).toISOString();
   if (!proof || proof.currentWorker !== true || proof.workerVersion !== workerVersion) {
+    const routeReachable = routeProof?.currentWorker === true
+      && routeProof.workerVersion === workerVersion
+      && routeProof.probeKind === 'PUBLIC_ROUTE_GET'
+      && routeProof.route === '/lane/tv'
+      && !routeProof.error
+      && fresh(routeProof.at, Number(now));
+    if (routeReachable) {
+      return Object.freeze({ attempted: true, ok: true, state: 'REACHABLE', at,
+        evidenceAt: routeProof.at, ingressId: routeProof.ingressId,
+        instruction: null, recent: true, error: null });
+    }
     return Object.freeze({ attempted: false, ok: false, state: 'UNPROVEN', at,
       evidenceAt: proof?.at ?? null, ingressId: proof?.ingressId ?? null,
       error: 'TV_INGRESS_UNPROVEN_ON_CURRENT_VERSION' });
@@ -141,26 +154,31 @@ export function buildSystemHealth({
         ?? 'MARKET SERVICE UNPROVEN'),
     providerSource);
 
-  const ingressProven = tvIngress?.state === 'HEALTHY' && tvIngress.ok === true;
+  const signalProven = tvIngress?.state === 'HEALTHY' && tvIngress.ok === true;
+  const routeProven = tvIngress?.state === 'REACHABLE' && tvIngress.ok === true;
+  const ingressProven = signalProven || routeProven;
   const ingressBroken = tvIngress?.state === 'BROKEN';
   const tvTapeFresh = tradingViewTape?.source === 'TRADINGVIEW'
     && Number.isFinite(tradingViewTape.spy) && Number.isFinite(tradingViewTape.vix)
     && fresh(tradingViewTape.asOf, nowMs, SYSTEM_HEALTH.TAPE_STALE_MS);
-  const tvBroken = ingressBroken || (ingressProven && marketOpen && !tvTapeFresh);
+  const tvBroken = ingressBroken || (signalProven && marketOpen && !tvTapeFresh);
   const tvColor = tvBroken ? 'RED' : ingressProven ? 'GREEN' : 'AMBER';
   const tvStatus = tvBroken ? 'DOWN' : ingressProven ? 'LIVE' : 'UNPROVEN';
   const evidenceIdentity = tvIngress?.ingressId
     ? ` · ingress ${tvIngress.ingressId}` : '';
   const tvDetail = ingressBroken
     ? (tvIngress?.error ?? 'TV_AUTHENTICATED_INGRESS_FAILED')
-    : ingressProven && marketOpen && !tvTapeFresh
+    : signalProven && marketOpen && !tvTapeFresh
       ? 'AUTHENTICATED INGRESS PROVEN · TRADINGVIEW TAPE STALE'
-      : ingressProven
+      : signalProven
         ? `HEALTHY · ${tvIngress.recent ? 'RECENT SIGNAL' : 'NO NEW SIGNAL'} · ${tvIngress.instruction}${evidenceIdentity}`
+        : routeProven
+          ? `HEALTHY · PUBLIC INGRESS ROUTE REACHABLE · NO SIGNAL REQUIRED${evidenceIdentity}`
         : 'UNPROVEN · NO ACCEPTED SIGNAL ON THIS VERSION · SILENCE IS NOT A FAULT';
   const tv = row('TV', tvColor, tvStatus,
     tvTapeFresh ? tradingViewTape.asOf : tvIngress?.evidenceAt,
-    tvDetail, ingressProven ? 'D1_AUTHENTICATED_INGRESS' : 'UNPROVEN');
+    tvDetail, signalProven ? 'D1_AUTHENTICATED_INGRESS'
+      : routeProven ? 'D1_PUBLIC_ROUTE_PROBE' : 'UNPROVEN');
 
   const discordOk = liveProbe(discordProbe, nowMs);
   const discord = row('DISCORD', discordOk ? 'GREEN' : 'RED', discordOk ? 'LIVE' : 'DOWN',
