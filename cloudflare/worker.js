@@ -3587,6 +3587,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     if (!(ledger.events || []).length) { const row = make('tr'); const cell = make('td', 'No broker events have been ingested yet.'); cell.colSpan = 8; row.append(cell); tbody.append(row); }
     table.append(thead, tbody); wrap.append(table); panel.append(wrap,
       make('p', 'Append-only Schwab order, execution, cash, assignment, exercise, and transfer events. Raw broker packets remain protected.', 'connector-note'));
+    const decisions = q('#decisions', root);
+    if (decisions) root.append(decisions);
   }
 
   function renderLane1SummaryCard(ledger, status) {

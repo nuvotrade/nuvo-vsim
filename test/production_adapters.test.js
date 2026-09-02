@@ -95,6 +95,7 @@ describe('protected live dashboard', () => {
     assert.doesNotMatch(rewriteSource, /data-view="decisions">Decisions/u);
     assert.match(liveDashboardScript(), /system\.append\(decisions\)/u);
     assert.match(liveDashboardScript(), /decisions\.classList\.remove\('view', 'active'\)/u);
+    assert.match(liveDashboardScript(), /const decisions = q\('#decisions', root\);\s*if \(decisions\) root\.append\(decisions\)/u);
     assert.doesNotMatch(rewriteSource, /data-view="records">Records/u);
     assert.doesNotMatch(rewriteSource, /data-view="calculators">Calculators/u);
     assert.match(rewriteSource, /Options calculators/u);
