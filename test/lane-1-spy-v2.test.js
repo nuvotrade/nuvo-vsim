@@ -12,6 +12,13 @@ function signal(side, extra = {}) {
   return { ticker: 'SPY', side, qty: 1, secret: SECRET, ...extra };
 }
 
+function capture(source, brokerOrderId, clientOrderId, instruction, id) {
+  return { schema: 'LANE_1_FILL_RAW_RESPONSE_V1', captureId: `CAPTURE-${id}`,
+    source, endpoint: source, bodyKey: `body-${id}`, manifestKey: `manifest-${id}`,
+    receivedAt: new Date(NOW + id).toISOString(), originalSha256: String(id).padStart(64, 'a'),
+    complete: true, brokerOrderId, clientOrderId, instruction };
+}
+
 test('TV replay body preserves the authored ticket without persisting the secret', async () => {
   const original = signal('BUY');
   const replayBody = replayBodyFromAuthenticatedLane1V21Signal(original);
@@ -28,7 +35,8 @@ test('TV replay body preserves the authored ticket without persisting the secret
 
 function makeHarness({ armed = true, configArmed = armed,
   positionSide = 'FLAT', custodySide = positionSide,
-  market = 'RTH', claimable = true, placeFault = null, snapshotChange = null } = {}) {
+  market = 'RTH', claimable = true, placeFault = null, fillFault = null,
+  snapshotChange = null } = {}) {
   const calls = []; const writes = []; const notices = [];
   let brokerSide = custodySide; let orderSequence = 0; let fillSequence = 0;
   let state = { armed, stage: positionSide === 'FLAT' ? 'FLAT' : 'OPEN_' + positionSide,
@@ -53,14 +61,19 @@ function makeHarness({ armed = true, configArmed = armed,
       state[field] = { ...state[field], brokerOrderId, acceptedAt };
       return structuredClone(state);
     },
+    async recordPendingFill(pending) {
+      state = { ...state, stage: pending.pendingReason === 'MISSING_FEE'
+        ? 'FILL_PENDING_FEE' : 'FILL_PENDING_EXECUTION', pendingFill: structuredClone(pending) };
+      return structuredClone(state);
+    },
     async recordOpen({ signal: requested, unit }) {
       state = { ...state, stage: 'OPEN_' + requested, positionSide: requested,
-        latestUnit: structuredClone(unit), stop: null };
+        latestUnit: structuredClone(unit), stop: null, pendingFill: null };
       return structuredClone(state);
     },
     async recordExit({ unit }) {
       state = { ...state, stage: 'FLAT', positionSide: 'FLAT', open: null, exit: null,
-        latestUnit: structuredClone(unit), stop: null };
+        latestUnit: structuredClone(unit), stop: null, pendingFill: null };
       return structuredClone(state);
     },
     async recordFault(detail) {
@@ -78,33 +91,55 @@ function makeHarness({ armed = true, configArmed = armed,
       if (snapshotChange) snapshotChange(snapshot);
       return snapshot;
     },
-    async placeMarket({ instruction, durableArm, expectedSnapshot }) {
+    async placeMarket({ instruction, clientOrderId, durableArm, expectedSnapshot }) {
       assert.deepEqual(expectedSnapshot, syntheticSnapshot(brokerSide, NOW));
       calls.push('market:' + instruction + ':' + Boolean(durableArm));
       if (placeFault) throw new Error(placeFault);
       orderSequence += 1;
       return { brokerOrderId: 'TV-ORDER-' + orderSequence,
-        acceptedAt: new Date(NOW + orderSequence * 1_000).toISOString() };
+        accountHash: 'ACCOUNT-HASH',
+        acceptedAt: new Date(NOW + orderSequence * 1_000).toISOString(),
+        orderAcceptanceEvidence: capture('SCHWAB_ORDER_ACCEPTANCE_RESPONSE', null,
+          clientOrderId, instruction, orderSequence * 10) };
     },
     async waitForFill({ side, brokerOrderId, clientOrderId }) {
       fillSequence += 1; calls.push('fill:' + side);
+      if (fillFault) {
+        const error = new Error(fillFault);
+        error.pendingFill = { brokerOrderId, clientOrderId, side, accountHash: 'ACCOUNT-HASH',
+          startedAt: new Date(NOW + fillSequence * 1_000).toISOString(),
+          deadlineAt: new Date(NOW + fillSequence * 1_000 + 120_000).toISOString(),
+          attempt: 0, evidenceOrigin: 'SCHWAB_WIRE_CAPTURE' };
+        throw error;
+      }
       if (side === 'BUY') brokerSide = 'LONG';
       if (side === 'SELL_SHORT') brokerSide = 'SHORT';
       if (side === 'SELL' || side === 'BUY_TO_COVER') brokerSide = 'FLAT';
       const opening = ['BUY', 'SELL_SHORT'].includes(side);
-      return { fillId: 'FILL-' + fillSequence, brokerOrderId, clientOrderId, side, symbol: 'SPY',
+      const fillId = 'FILL-' + fillSequence;
+      return { fillId, executionActivityId: fillId,
+        transactionActivityId: 'TX-' + fillSequence, accountHash: 'ACCOUNT-HASH',
+        brokerOrderId, clientOrderId, side, symbol: 'SPY',
         quantityShares: 1, executionPriceUsdPerShare: opening ? 771.785 : 774.305,
         feeUsd: opening ? 0 : -0.02,
         brokerOccurredAt: new Date(NOW + fillSequence * 1_000).toISOString(),
         acquiredAt: new Date(NOW + fillSequence * 1_000 + 1).toISOString(),
-        rawBrokerEvidenceSha256: String(fillSequence).padStart(64, '0') };
+        rawBrokerEvidenceSha256: String(fillSequence).padStart(64, '0'),
+        evidenceOrigin: 'SCHWAB_WIRE_CAPTURE', captureEvidence: {
+          order: capture('SCHWAB_ORDER_RESPONSE', brokerOrderId, clientOrderId, side,
+            fillSequence * 10 + 1),
+          transaction: capture('SCHWAB_TRANSACTION_RESPONSE', brokerOrderId, clientOrderId, side,
+            fillSequence * 10 + 2),
+        } };
     },
   };
   const controller = createLane1SpyV2Controller({
-    config: { armed: configArmed, armedAt: state.armedAt, ttlMs: 86_400_000, secret: SECRET,
+    config: { armed: configArmed, armedAt: state.armedAt, ttlMs: 86_400_000,
+      ownerId: 'owner-1', secret: SECRET,
       notificationsReady: true }, coordinator, broker,
     bundleStore: { async write(bundle) { writes.push(bundle); return { objectPrefix: 'test/unit' }; } },
     notifier: { async send(message) { notices.push(message); } },
+    receiptStore: { async write(receipt) { return { id: `RECEIPT-${receipt.identity.executionActivityId}` }; } },
     marketSession: async () => market, now: () => NOW,
     uuid: (() => { let n = 0; return () => '00000000-0000-4000-8000-' + String(++n).padStart(12, '0'); })(),
   });
@@ -195,6 +230,19 @@ test('ARM remains live after explicit SELL and a later opening starts a new epis
   const reopenedEvents = JSON.parse(h.writes[2].bytes['order-events.json']).appendLog;
   assert.equal(reopenedEvents.filter((row) => row.eventType === 'EQUITY_FILL').length, 1);
   assert.equal(reopenedEvents.find((row) => row.eventType === 'PROPOSAL_SEALED').signal, 'SHORT');
+});
+
+test('MISSING_FEE is durable FILL_PENDING_FEE and never a terminal fault', async () => {
+  const h = makeHarness({ fillFault: 'FILL_PENDING_FEE' });
+  const result = await h.controller.signal(signal('SELL_SHORT'));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.state, 'FILL_PENDING_FEE');
+  assert.equal(result.body.disposition, 'fill-pending-fee');
+  assert.equal(result.body.faultCode, null);
+  assert.equal(result.body.sent, true);
+  assert.equal(h.state().armed, true);
+  assert.equal(h.state().pendingFill.pendingReason, 'MISSING_FEE');
+  assert.equal(h.notices.some((notice) => notice.type === 'FAULT'), false);
 });
 
 test('a valid TV body reports faults with HTTP 200; malformed bodies remain 400', async () => {

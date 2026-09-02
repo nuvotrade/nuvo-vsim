@@ -3,13 +3,15 @@ import {
   materializeLane1SpyUnit,
 } from '../src/lane/lane-1-spy.js';
 import {
-  bindLane1V21ReplayBody, createLane1SpyV2Controller, lane1V2ProposalSeal,
-  replayBodyFromAuthenticatedLane1V21Signal,
+  appendLane1V2BrokerEvents, bindLane1V21ReplayBody, createLane1SpyV2Controller,
+  lane1V2ProposalSeal, materializeLane1V2Unit, replayBodyFromAuthenticatedLane1V21Signal,
 } from '../src/lane/lane-1-spy-v2.js';
 import { sessionStatus } from '../src/truth/providers/schwab.js';
 import { LANE_1_PREVIEW_ASSET_TYPES, SchwabD1Client } from './schwab-client.js';
 import { capturePreviewResponse } from './preview-response-evidence.js';
 import { centsToUsd, formatCents, formatExecutionPrice } from '../src/economic/money-cents.js';
+import { assertLane1FillEvidence, lane1FillIdentity,
+  sameLane1FillIdentity } from '../src/lane/lane-1-fill-contract.js';
 
 const encoder = new TextEncoder();
 const ALLOWED_NOTICES = new Set([
@@ -320,6 +322,7 @@ export function createLane1DiscordNotifier({
         message.fromSide ? `from=${message.fromSide}` : null,
         message.brokerOrderId ? `order=${message.brokerOrderId}` : null,
         message.tvBodyBindingSha256 ? `tv=${message.tvBodyBindingSha256.slice(0, 12)}` : null,
+        message.evidenceOrigin ? `origin=${message.evidenceOrigin}` : null,
         message.stop ? `stop=fill${Number(message.stop.stopPriceOffset) >= 0 ? '+' : '-'}$${Math.abs(Number(message.stop.stopPriceOffset)).toFixed(2)}` : null,
         message.stop?.status ? `stopStatus=${message.stop.status}` : null,
         message.stop?.orderId ? `stopOrder=${message.stop.orderId}` : null,
@@ -342,7 +345,7 @@ export function createLane1DiscordNotifier({
   });
 }
 
-async function readBoundedJson(request, maximumBytes = 4_096) {
+export async function readBoundedJson(request, maximumBytes = 4_096) {
   const declared = Number(request.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maximumBytes) throw new Error('LANE_1_BODY_TOO_LARGE');
   if (!request.body) throw new Error('LANE_1_BODY_REQUIRED');
@@ -390,11 +393,14 @@ function coordinatorV2Adapter(env, ownerId) {
     ensure: (value) => stub.laneV2Ensure(value),
     claim: (value) => stub.laneV2Claim(value),
     recordAccepted: (value) => stub.laneV2RecordAccepted(value),
+    recordPendingFill: (value) => stub.laneV2RecordPendingFill(value),
     recordOpen: (value) => stub.laneV2RecordOpen(value),
     recordExit: (value) => stub.laneV2RecordExit(value),
     recordFault: (value) => stub.laneV2RecordFault(value),
     recordMarketValidation: (value) => stub.laneV2RecordMarketValidation(value),
     principalArm: (value) => stub.laneV2PrincipalArm(value),
+    principalArmExisting: (value) => stub.laneV2PrincipalArmExisting(value),
+    recoverOpen: (value) => stub.laneV2RecoverOpen(value),
     disarm: (value) => stub.laneV2Disarm(value),
     status: () => stub.laneV2Status(),
   };
@@ -440,7 +446,7 @@ function brokerV2Adapter(env, ownerId) {
     },
     waitForFill: async (context) => client.waitForLane1EquityFill(ownerId,
       { ...context, accountHash: accountHash(context.brokerOrderId),
-        durableArm: await durableArm() }),
+        durableArm: await durableArm(), attempts: 1, pollMs: 0 }),
   };
 }
 
@@ -471,6 +477,18 @@ function bundleStore(env, ownerId) {
         });
       }
       return { objectPrefix: prefix };
+    },
+  };
+}
+
+function fillReceiptStore(env, ownerId) {
+  return {
+    async write(receipt) {
+      const proof = await recordOperationalProof(env, ownerId, 'LANE_1_FILL_RECEIPT', {
+        qualifiedStage0Fill: receipt.evidenceOrigin === 'SCHWAB_WIRE_CAPTURE', ...receipt,
+      });
+      if (!proof?.id) throw new Error('LANE_1_FILL_RECEIPT_WRITE_FAILED');
+      return proof;
     },
   };
 }
@@ -518,6 +536,7 @@ export function createLane1Runtime(env, ownerId, { now = () => Date.now() } = {}
     coordinator: coordinatorV2Adapter(env, ownerId),
     broker: brokerV2Adapter(env, ownerId),
     bundleStore: bundleStore(env, ownerId),
+    receiptStore: fillReceiptStore(env, ownerId),
     notifier: notifier(env, ownerId),
     marketSession: async () => {
       const instant = now();
@@ -528,6 +547,76 @@ export function createLane1Runtime(env, ownerId, { now = () => Date.now() } = {}
     },
     now,
   });
+}
+
+export async function resumeLane1PendingFill({ env, ownerId, coordinator,
+  now = () => Date.now(), dependencies = {} }) {
+  const state = await coordinator.status();
+  const pending = state?.pendingFill;
+  if (!pending || !['FILL_PENDING_EXECUTION', 'FILL_PENDING_FEE'].includes(state.stage)) {
+    return { status: 'NO_PENDING_FILL', terminal: true };
+  }
+  const instant = now();
+  if (!Number.isFinite(instant) || instant >= Date.parse(pending.deadlineAt)) {
+    const fault = await coordinator.recordFault({ faultCode: 'FILL_ECONOMICS_TIMEOUT',
+      detail: 'FILL_ECONOMICS_TIMEOUT:120_SECONDS', brokerOrderId: pending.brokerOrderId,
+      at: new Date(Number.isFinite(instant) ? instant : Date.now()).toISOString() });
+    try { await (dependencies.notifier ?? notifier(env, ownerId)).send({ type: 'FAULT',
+      faultCode: 'FILL_ECONOMICS_TIMEOUT', brokerOrderId: pending.brokerOrderId }); } catch { /* DO history is authoritative. */ }
+    return { status: fault.stage, terminal: true, faultCode: 'FILL_ECONOMICS_TIMEOUT' };
+  }
+  const client = dependencies.client ?? new SchwabD1Client(env);
+  let fill;
+  try {
+    fill = await client.waitForLane1V2RecordedFill(ownerId, {
+      brokerOrderId: pending.brokerOrderId, clientOrderId: pending.clientOrderId,
+      side: pending.side, accountHash: pending.accountHash, attempts: 1, pollMs: 0,
+    });
+  } catch (error) {
+    if (!['FILL_PENDING_EXECUTION', 'FILL_PENDING_FEE'].includes(error?.message)) throw error;
+    const next = await coordinator.recordPendingFill({ ...pending, ...error.pendingFill,
+      ownerId, signal: pending.signal, seal: pending.seal, accepted: pending.accepted,
+      startedAt: pending.startedAt, deadlineAt: pending.deadlineAt,
+      pendingReason: error.message === 'FILL_PENDING_FEE' ? 'MISSING_FEE' : pending.pendingReason,
+      attempt: Number(pending.attempt ?? 0) + 1 });
+    return { status: next.stage, terminal: false, deadlineAt: pending.deadlineAt };
+  }
+  const evidenceOrigin = fill.evidenceOrigin ?? 'SCHWAB_WIRE_CAPTURE';
+  fill.captureEvidence = { acceptance: pending.accepted?.orderAcceptanceEvidence,
+    ...fill.captureEvidence };
+  assertLane1FillEvidence(fill.captureEvidence, evidenceOrigin);
+  const identity = lane1FillIdentity({ fill,
+    tvBodyBindingSha256: pending.tvBodyBindingSha256 });
+  const events = appendLane1V2BrokerEvents(state, pending.seal, pending.accepted, fill);
+  const unit = await materializeLane1V2Unit({ events, fill, stop: null,
+    bundleStore: dependencies.bundleStore ?? bundleStore(env, ownerId) });
+  const receipt = await (dependencies.receiptStore ?? fillReceiptStore(env, ownerId)).write({
+    type: pending.signal === 'EXIT' ? 'EXIT_FILLED' : 'OPEN_FILLED',
+    signal: pending.signal, identity, evidenceOrigin,
+    captureEvidence: fill.captureEvidence, manifestHash: unit.manifestHash,
+    resolvedUnitId: unit.resolvedUnitId,
+    realizedPnlCents: pending.signal === 'EXIT' ? unit.realizedPnlCents : null,
+    recordedAt: fill.acquiredAt,
+  });
+  const next = pending.signal === 'EXIT'
+    ? await coordinator.recordExit({ unit, cancellation: null, identity, evidenceOrigin,
+      captureEvidence: fill.captureEvidence, receiptId: receipt.id })
+    : await coordinator.recordOpen({ signal: pending.signal, unit, identity, evidenceOrigin,
+      captureEvidence: fill.captureEvidence, receiptId: receipt.id });
+  const notice = pending.signal === 'EXIT'
+    ? { type: 'EXITED', side: 'FLAT', fromSide: state.positionSide, symbol: 'SPY', quantity: 1,
+      fillId: unit.closingFillId, manifestHash: unit.manifestHash,
+      priceUsdPerShare: unit.closingPriceUsdPerShare, feesCents: unit.totalFeesCents,
+      netCents: unit.realizedPnlCents, brokerOrderId: pending.brokerOrderId,
+      tvBodyBindingSha256: pending.tvBodyBindingSha256, evidenceOrigin }
+    : { type: 'OPENED', side: pending.signal, symbol: 'SPY', quantity: 1,
+      fillId: unit.openingFillId, manifestHash: unit.manifestHash,
+      priceUsdPerShare: unit.openingPriceUsdPerShare, feesCents: unit.openingFeeCents,
+      netCents: unit.netCashMovementCents, brokerOrderId: pending.brokerOrderId,
+      tvBodyBindingSha256: pending.tvBodyBindingSha256, evidenceOrigin };
+  await (dependencies.notifier ?? notifier(env, ownerId)).send(notice);
+  return { status: next.stage, terminal: true, receiptId: receipt.id,
+    manifestHash: unit.manifestHash };
 }
 
 export async function validateLane1V21Market({ env, ownerId }) {
@@ -565,6 +654,124 @@ export async function armLane1FromDashboard({ env, ownerId, now = () => Date.now
     });
     return { status: 200, body: { armed: state.armed === true,
       state: state.stage, reason: 'PRINCIPAL_DASHBOARD_ARM',
+      expiresAt: state.expiresAt } };
+  } catch (error) {
+    return { status: 422, body: { armed: false,
+      faultCode: String(error?.message ?? error).split(':')[0] } };
+  }
+}
+
+export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
+  principalConfirmation, dependencies = {} }) {
+  if (principalConfirmation !== 'RECONCILE_BROKER_LEDGER_OPEN') {
+    return { status: 400, body: { state: 'REFUSED',
+      faultCode: 'LANE_1_RECOVERY_CONFIRMATION_REQUIRED' } };
+  }
+  const coordinator = dependencies.coordinator ?? coordinatorV2Adapter(env, ownerId);
+  const client = dependencies.client ?? new SchwabD1Client(env);
+  let brokerSnapshot;
+  try {
+    // Broker first. Coordinator state must never suppress this read.
+    brokerSnapshot = await client.lane1V21SendSnapshot(ownerId, {
+      accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null,
+    });
+  } catch (error) {
+    return { status: 503, body: { state: 'UNKNOWN',
+      faultCode: 'BROKER_UNREACHABLE', detail: String(error?.message ?? error) } };
+  }
+  const state = await coordinator.status();
+  if (brokerSnapshot.positionSide === state.positionSide
+    && state.entryIdentity?.evidenceOrigin !== 'BROKER_LEDGER_RECONSTRUCTION') {
+    return { status: 200, body: { state: state.stage, disposition: 'already-reconciled',
+      positionSide: state.positionSide, acquiredAt: brokerSnapshot.acquiredAt } };
+  }
+  if (state.armed || !['FLAT', 'SHORT'].includes(state.positionSide)
+    || brokerSnapshot.positionSide !== 'SHORT'
+    || !state.open?.seal?.clientOrderId || !state.open?.brokerOrderId) {
+    return { status: 409, body: { state: 'POSITION_DRIFT',
+      faultCode: 'LANE_1_RECOVERY_CONTEXT_MISSING',
+      coordinatorPositionSide: state.positionSide ?? 'UNKNOWN',
+      brokerPositionSide: brokerSnapshot.positionSide,
+      coordinatorUpdatedAt: state.updatedAt ?? null,
+      brokerAcquiredAt: brokerSnapshot.acquiredAt } };
+  }
+  try {
+    const seal = state.open.seal;
+    if (state.entryIdentity?.evidenceOrigin === 'BROKER_LEDGER_RECONSTRUCTION') {
+      const candidate = await client.lane1V2RecoverableStoredFill(ownerId, {
+        brokerOrderId: state.open.brokerOrderId, clientOrderId: seal.clientOrderId,
+        side: 'SELL_SHORT', accountHash: brokerSnapshot.accountHash, capture: false,
+      });
+      const candidateIdentity = lane1FillIdentity({ fill: candidate,
+        tvBodyBindingSha256: seal.tvBodyBindingSha256 });
+      if (sameLane1FillIdentity(state.entryIdentity.identity, candidateIdentity)) {
+        return { status: 200, body: { state: state.stage,
+          disposition: 'BROKER_LEDGER_RECONSTRUCTION · IDEMPOTENT_NO_OP',
+          positionSide: state.positionSide,
+          receiptId: state.entryIdentity.receiptId,
+          qualifiedStage0Fill: false } };
+      }
+    }
+    const fill = await client.lane1V2RecoverableStoredFill(ownerId, {
+      brokerOrderId: state.open.brokerOrderId, clientOrderId: seal.clientOrderId,
+      side: 'SELL_SHORT', accountHash: brokerSnapshot.accountHash,
+    });
+    const evidenceOrigin = 'BROKER_LEDGER_RECONSTRUCTION';
+    assertLane1FillEvidence(fill.captureEvidence, evidenceOrigin);
+    const identity = lane1FillIdentity({ fill,
+      tvBodyBindingSha256: seal.tvBodyBindingSha256 });
+    const accepted = { brokerOrderId: state.open.brokerOrderId,
+      acceptedAt: state.open.acceptedAt ?? fill.brokerOccurredAt };
+    const events = appendLane1V2BrokerEvents(state, seal, accepted, fill);
+    const unit = await materializeLane1V2Unit({ events, fill, stop: null,
+      bundleStore: dependencies.bundleStore ?? bundleStore(env, ownerId) });
+    const receipt = await (dependencies.receiptStore ?? fillReceiptStore(env, ownerId)).write({
+      type: 'OPEN_FILLED', signal: 'SHORT', identity, evidenceOrigin,
+      captureEvidence: fill.captureEvidence, manifestHash: unit.manifestHash,
+      resolvedUnitId: unit.resolvedUnitId, qualifiedStage0Fill: false,
+      recordedAt: fill.acquiredAt,
+    });
+    const recovered = await coordinator.recoverOpen({ signal: 'SHORT', unit, identity,
+      evidenceOrigin, captureEvidence: fill.captureEvidence, receiptId: receipt.id,
+      brokerSnapshot, principalConfirmation });
+    await (dependencies.notifier ?? notifier(env, ownerId)).send({ type: 'OPENED', side: 'SHORT', symbol: 'SPY', quantity: 1,
+      fillId: unit.openingFillId, manifestHash: unit.manifestHash,
+      priceUsdPerShare: unit.openingPriceUsdPerShare, feesCents: unit.openingFeeCents,
+      netCents: unit.netCashMovementCents, brokerOrderId: identity.brokerOrderId,
+      tvBodyBindingSha256: identity.tvBodyBindingSha256, evidenceOrigin });
+    return { status: 200, body: { state: recovered.stage,
+      disposition: 'BROKER_LEDGER_RECONSTRUCTION', positionSide: recovered.positionSide,
+      receiptId: receipt.id, manifestHash: unit.manifestHash,
+      qualifiedStage0Fill: false } };
+  } catch (error) {
+    return { status: 422, body: { state: 'POSITION_DRIFT',
+      faultCode: String(error?.message ?? error).split(':')[0],
+      coordinatorPositionSide: state.positionSide,
+      brokerPositionSide: brokerSnapshot.positionSide } };
+  }
+}
+
+export async function armExistingLane1FromDashboard({ env, ownerId,
+  principalConfirmation, now = () => Date.now(), dependencies = {} }) {
+  const client = dependencies.client ?? new SchwabD1Client(env);
+  let brokerSnapshot;
+  try {
+    brokerSnapshot = await client.lane1V21SendSnapshot(ownerId, {
+      accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null,
+    });
+  } catch (error) {
+    return { status: 503, body: { armed: false, state: 'UNKNOWN',
+      faultCode: 'BROKER_UNREACHABLE', detail: String(error?.message ?? error) } };
+  }
+  const armedAtMs = now();
+  try {
+    const state = await (dependencies.coordinator ?? coordinatorV2Adapter(env, ownerId)).principalArmExisting({
+      reason: 'PRINCIPAL_DASHBOARD_ARM_EXISTING', principalConfirmation,
+      armedAt: new Date(armedAtMs).toISOString(),
+      expiresAt: new Date(armedAtMs + 86_400_000).toISOString(), brokerSnapshot,
+    });
+    return { status: 200, body: { armed: state.armed === true, state: state.stage,
+      positionSide: state.positionSide, instructionAllowed: 'BUY_TO_COVER',
       expiresAt: state.expiresAt } };
   } catch (error) {
     return { status: 422, body: { armed: false,

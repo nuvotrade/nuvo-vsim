@@ -58,9 +58,14 @@ test('phone portfolio tables become labeled cards instead of clipped or horizont
   assert.match(script, /cell\.dataset\.label = labels\[index\]/u);
 });
 
-test('BOT card remains a projection over existing sources with no new broker endpoint', () => {
+test('BOT card uses the shared broker-first projection and a genuine debounced refresh', () => {
   const script = liveDashboardScript();
   assert.doesNotMatch(script, /mobile[^\n]{0,120}\/orders/iu);
+  assert.match(script, /laneRefresh: \(\) => api\('\/api\/lane-1-spy\/ledger\?limit=250&refresh=1'\)/u);
+  assert.match(script, /summary\.brokerReconciliation/u);
+  assert.match(script, /positionRead\.broker\?\.acquiredAt/u);
+  assert.match(script, /positionRead\.brokerRead\?\.ok === true/u);
+  assert.match(script, /POSITION_DRIFT · coordinator/u);
   assert.match(script, /qa\('\[data-vsim="lane-summary-matrix-body"\]'\)\.forEach/u);
   assert.match(script, /const systemCards = qa\('\.system-brief'\)/u);
   assert.match(script, /\['D1','SCHWAB','MARKET','TV','DISCORD'\]/u);

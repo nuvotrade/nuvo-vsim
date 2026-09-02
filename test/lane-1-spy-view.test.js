@@ -28,6 +28,16 @@ test('pane C shows the durable LANE_1_SPY diary unit and never calls it a fixtur
   assert.equal(model.paneC.buyFillId, 'FILL-BUY-1');
 });
 
+test('Engine spine consumes the shared projection and never defaults a faulted coordinator to FLAT', () => {
+  const model = buildE3SpineTab({ laneUnit: { armed: false, stage: 'FAULT', positionSide: 'FLAT' },
+    positionProjection: { status: 'UNVERIFIED', positionSide: 'UNKNOWN',
+      coordinator: { positionSide: 'FLAT', stage: 'FAULT', updatedAt: '2026-09-01T13:35:05.000Z' },
+      broker: null, brokerRead: { ok: false, error: 'BROKER_UNREACHABLE' } } });
+  assert.equal(model.paneC.positionSide, 'UNKNOWN');
+  assert.equal(model.paneC.positionProjection.status, 'UNVERIFIED');
+  assert.notEqual(model.paneC.positionSide, 'FLAT');
+});
+
 test('pane C derives dollars from canonical integer cents and prefers them over legacy dollars', () => {
   const model = buildE3SpineTab({ laneUnit: {
     stage: 'DISARMED',

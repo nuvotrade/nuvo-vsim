@@ -7,6 +7,7 @@ const TRANSACTION_TYPES = 'TRADE,RECEIVE_AND_DELIVER,DIVIDEND_OR_INTEREST,ACH_RE
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 import { normalizedBrokerEventKey } from './guardian.js';
+import { captureLane1FillBytes, captureLane1FillResponse } from './lane-1-fill-evidence.js';
 import { resolveSchwabFillEvidence } from '../src/economic/schwab-fill-identity.js';
 import {
   assertLane1DispatchCoordinator, assertLane1InstructionState, assertLane1SendSnapshot,
@@ -739,7 +740,8 @@ export class SchwabD1Client {
 
   async lane1FillFromStoredBrokerEvents(ownerId, {
     brokerOrderId, executionActivityId, transactionActivityId,
-    clientOrderId, side, expectedPrice, expectedOccurredAt,
+    clientOrderId, side, expectedPrice, expectedOccurredAt, accountHash,
+    capture = true,
   }) {
     const rows = await this.env.DB.prepare(`SELECT event_type,activity_id,transaction_id,
       symbol,side,quantity,price,occurred_at,raw_json,last_seen_at FROM broker_events
@@ -758,11 +760,24 @@ export class SchwabD1Client {
       || iso(executionRow.occurred_at) !== iso(expectedOccurredAt)) {
       throw new Error('LANE_1_STORED_FILL_MISMATCH');
     }
+    const orderBytes = new TextEncoder().encode(String(orderRow.raw_json));
+    const transactionBytes = new TextEncoder().encode(String(transactionRow.raw_json));
+    const context = (endpoint) => ({ ownerId, source: 'BROKER_LEDGER_RECONSTRUCTION',
+      endpoint, brokerOrderId, clientOrderId, instruction: side,
+      workerVersion: this.env.CF_VERSION_METADATA?.id ?? 'local' });
+    const orderCapture = capture
+      ? await captureLane1FillBytes({ bucket: this.env.EVIDENCE,
+        bytes: orderBytes, context: context('D1/broker_events/ORDER_STATE') })
+      : { raw: new TextDecoder().decode(orderBytes), evidence: null };
+    const transactionCapture = capture
+      ? await captureLane1FillBytes({ bucket: this.env.EVIDENCE,
+        bytes: transactionBytes, context: context('D1/broker_events/TRADE') })
+      : { raw: new TextDecoder().decode(transactionBytes), evidence: null };
     let order;
     let transaction;
     try {
-      order = JSON.parse(orderRow.raw_json);
-      transaction = JSON.parse(transactionRow.raw_json);
+      order = JSON.parse(orderCapture.raw);
+      transaction = JSON.parse(transactionCapture.raw);
     } catch { throw new Error('LANE_1_STORED_FILL_MALFORMED_JSON'); }
     order.transactionActivityCollection = [transaction];
     const acquiredAt = iso([orderRow.last_seen_at, executionRow.last_seen_at,
@@ -775,7 +790,38 @@ export class SchwabD1Client {
     if (fill.fillId !== String(executionActivityId)) {
       throw new Error('LANE_1_STORED_FILL_ID_MISMATCH');
     }
-    return fill;
+    return { ...fill, executionActivityId: String(executionActivityId),
+      transactionActivityId: String(transactionActivityId), accountHash: String(accountHash),
+      evidenceOrigin: 'BROKER_LEDGER_RECONSTRUCTION',
+      captureEvidence: capture
+        ? { order: orderCapture.evidence, transaction: transactionCapture.evidence } : null };
+  }
+
+  async lane1V2RecoverableStoredFill(ownerId, {
+    brokerOrderId, clientOrderId, side, accountHash, capture = true,
+  }) {
+    if (!brokerOrderId || !clientOrderId || !['BUY', 'SELL_SHORT'].includes(side)
+      || !accountHash) throw new Error('LANE_1_RECOVERY_CONTEXT_MISSING');
+    const rows = await this.env.DB.prepare(`SELECT event_type,activity_id,transaction_id,
+      symbol,side,quantity,price,occurred_at FROM broker_events
+      WHERE owner_id=? AND broker_order_id=? AND event_type IN ('ORDER_STATE','EXECUTION','TRADE')
+      ORDER BY occurred_at,event_type`).bind(ownerId, String(brokerOrderId)).all();
+    const events = rows?.results ?? [];
+    const executions = events.filter((row) => row.event_type === 'EXECUTION'
+      && row.symbol === 'SPY' && row.side === side && Number(row.quantity) === 1
+      && row.activity_id && Number(row.price) > 0 && Number.isFinite(Date.parse(row.occurred_at)));
+    const transactions = events.filter((row) => row.event_type === 'TRADE'
+      && String(row.transaction_id ?? '') && String(row.symbol ?? '') === 'SPY');
+    if (executions.length !== 1) throw new Error('LANE_1_RECOVERY_EXECUTION_IDENTITY_AMBIGUOUS');
+    const transactionIds = [...new Set(transactions.map((row) => String(row.transaction_id)))];
+    if (transactionIds.length !== 1) throw new Error('LANE_1_RECOVERY_TRANSACTION_IDENTITY_AMBIGUOUS');
+    const execution = executions[0];
+    return this.lane1FillFromStoredBrokerEvents(ownerId, {
+      brokerOrderId, executionActivityId: String(execution.activity_id),
+      transactionActivityId: transactionIds[0], clientOrderId, side,
+      expectedPrice: Number(execution.price), expectedOccurredAt: execution.occurred_at,
+      accountHash, capture,
+    });
   }
 
   async placeLane1EquityOrder(ownerId, order, { accountHash = null } = {}) {
@@ -1058,10 +1104,15 @@ export class SchwabD1Client {
       body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(10_000),
     });
+    const acceptanceCapture = await captureLane1FillResponse({ bucket: this.env.EVIDENCE,
+      response, context: { ownerId, endpoint: '/orders', source: 'SCHWAB_ORDER_ACCEPTANCE_RESPONSE',
+        clientOrderId, instruction, attempt: 0,
+        workerVersion: this.env.CF_VERSION_METADATA?.id ?? 'local' } });
     if (!response.ok) throw new Error(`SCHWAB_LANE_MARKET_ORDER_${instruction}_${response.status}`);
     return { brokerOrderId: schwabOrderIdFromLocation(response.headers.get('location')),
       accountHash: account.accountHash, acceptedAt: new Date().toISOString(),
-      requestSha256: await digest(JSON.stringify(requestBody)), instruction };
+      requestSha256: await digest(JSON.stringify(requestBody)), instruction,
+      orderAcceptanceEvidence: acceptanceCapture.evidence };
   }
 
   async readLane1V2BracketStop(ownerId, {
@@ -1245,31 +1296,99 @@ export class SchwabD1Client {
   }) {
     const account = await this._laneAccountHash(ownerId, accountHash);
     let lastStatus = null;
+    let pendingFee = null;
+    let lastOrderEvidence = null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const response = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/orders/${encodeURIComponent(brokerOrderId)}`, {
         headers: { authorization: `Bearer ${account.token}`, accept: 'application/json' },
         signal: AbortSignal.timeout(8_000),
       });
-      const raw = await boundedText(response);
+      const orderCapture = await captureLane1FillResponse({ bucket: this.env.EVIDENCE,
+        response, context: { ownerId, endpoint: '/orders/{orderId}',
+          source: 'SCHWAB_ORDER_RESPONSE', brokerOrderId, clientOrderId,
+          instruction: side, attempt, workerVersion: this.env.CF_VERSION_METADATA?.id ?? 'local' } });
+      lastOrderEvidence = orderCapture.evidence;
+      const raw = orderCapture.raw;
       if (!response.ok) throw new Error(`SCHWAB_LANE_ORDER_READ_${response.status}`);
       let order;
       try { order = JSON.parse(raw); } catch { throw new Error('SCHWAB_LANE_ORDER_MALFORMED_JSON'); }
       lastStatus = String(order?.status ?? 'UNKNOWN').toUpperCase();
       const acquiredAt = new Date().toISOString();
-      const rawBrokerEvidenceSha256 = await digest(raw);
+      const executionLegs = (order?.orderActivityCollection ?? [])
+        .filter((activity) => String(activity?.activityType ?? '').toUpperCase() === 'EXECUTION')
+        .flatMap((activity) => activity.executionLegs ?? []);
+      let matchingTransactions = [];
+      let transactionCapture = null;
+      if (executionLegs.length > 0) {
+        const occurredAt = iso(executionLegs[0]?.time, acquiredAt);
+        const startDate = new Date(Date.parse(occurredAt) - 60 * 60_000).toISOString();
+        const transactionResponse = await fetch(`${TRADER_URL}/accounts/${encodeURIComponent(account.accountHash)}/transactions?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(acquiredAt)}&types=TRADE`, {
+          headers: { authorization: `Bearer ${account.token}`, accept: 'application/json' },
+          signal: AbortSignal.timeout(8_000),
+        });
+        transactionCapture = await captureLane1FillResponse({ bucket: this.env.EVIDENCE,
+          response: transactionResponse, context: { ownerId, endpoint: '/transactions',
+            source: 'SCHWAB_TRANSACTION_RESPONSE', brokerOrderId, clientOrderId,
+            instruction: side, attempt, workerVersion: this.env.CF_VERSION_METADATA?.id ?? 'local' } });
+        if (!transactionResponse.ok) {
+          throw new Error(`SCHWAB_LANE_TRANSACTION_READ_${transactionResponse.status}`);
+        }
+        let transactions;
+        try { transactions = JSON.parse(transactionCapture.raw); }
+        catch { throw new Error('SCHWAB_LANE_TRANSACTION_MALFORMED_JSON'); }
+        matchingTransactions = (transactions ?? []).filter((row) =>
+          String(row?.orderId ?? '') === String(brokerOrderId));
+        const brokerEvents = [
+          ...flattenOrderEvents(order, account.accountMask, acquiredAt),
+          ...matchingTransactions.flatMap((row) => normalizeTransactions(row, account.accountMask, acquiredAt)),
+        ];
+        await this._persistBrokerEvents(ownerId, brokerEvents, acquiredAt);
+      }
+      const composite = { ...order, transactionActivityCollection: matchingTransactions };
+      const rawBrokerEvidenceSha256 = await digest(JSON.stringify({ order,
+        transactions: matchingTransactions, captures: [orderCapture.evidence.originalSha256,
+          transactionCapture?.evidence.originalSha256 ?? null] }));
       try {
-        return extractLane1SchwabFill(order, {
+        const fill = extractLane1SchwabFill(composite, {
           brokerOrderId, clientOrderId, side, acquiredAt, rawBrokerEvidenceSha256,
         });
+        if (matchingTransactions.length !== 1) throw new Error('LANE_1_TRANSACTION_IDENTITY_AMBIGUOUS');
+        return { ...fill,
+          executionActivityId: fill.fillId,
+          transactionActivityId: String(matchingTransactions[0]?.activityId
+            ?? matchingTransactions[0]?.transactionId ?? ''),
+          accountHash: account.accountHash,
+          evidenceOrigin: 'SCHWAB_WIRE_CAPTURE',
+          captureEvidence: { order: orderCapture.evidence, transaction: transactionCapture.evidence },
+        };
       } catch (error) {
-        if (error.message !== 'LANE_1_FILL_PENDING') throw error;
+        if (error.message === 'MISSING_FEE') {
+          pendingFee = { brokerOrderId: String(brokerOrderId), clientOrderId: String(clientOrderId),
+            side, accountHash: account.accountHash, startedAt: acquiredAt,
+            deadlineAt: new Date(Date.parse(acquiredAt) + 120_000).toISOString(),
+            attempt, evidenceOrigin: 'SCHWAB_WIRE_CAPTURE',
+            captureEvidence: { order: orderCapture.evidence,
+              transaction: transactionCapture?.evidence ?? null } };
+        } else if (error.message !== 'LANE_1_FILL_PENDING') throw error;
       }
       if (['CANCELED', 'REJECTED', 'EXPIRED', 'REPLACED'].includes(lastStatus)) {
         throw new Error(`SCHWAB_LANE_ORDER_TERMINAL_${lastStatus}`);
       }
       if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
-    throw new Error(`SCHWAB_LANE_FILL_TIMEOUT:${lastStatus ?? 'UNKNOWN'}`);
+    if (pendingFee) {
+      const error = new Error('FILL_PENDING_FEE');
+      error.pendingFill = pendingFee;
+      throw error;
+    }
+    const acquiredAt = new Date().toISOString();
+    const error = new Error('FILL_PENDING_EXECUTION');
+    error.pendingFill = { brokerOrderId: String(brokerOrderId),
+      clientOrderId: String(clientOrderId), side, accountHash: account.accountHash,
+      startedAt: acquiredAt, deadlineAt: new Date(Date.parse(acquiredAt) + 120_000).toISOString(),
+      attempt: attempts - 1, evidenceOrigin: 'SCHWAB_WIRE_CAPTURE',
+      captureEvidence: { order: lastOrderEvidence, transaction: null }, lastStatus };
+    throw error;
   }
 
   async _marketRead(path, token) {

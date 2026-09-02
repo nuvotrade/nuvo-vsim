@@ -4,6 +4,7 @@ import { emitResolvedUnitBundleRuntime } from '../economic/emit-resolved-unit-bu
 import { moneyCents } from '../economic/money-cents.js';
 import { assertLane1InstructionState, assertLane1PositionAgreement,
   assertLane1SendSnapshot } from './lane-1-position-guards.js';
+import { assertLane1FillEvidence, lane1FillIdentity } from './lane-1-fill-contract.js';
 
 export const LANE_1_SPY_V2 = 'LANE_1_SPY_V2_1_MARKET_ONLY';
 export const LANE_1_SPY_MARKET_V2_1 = 'LANE_1_SPY_MARKET_ONLY_V2_1';
@@ -199,8 +200,8 @@ export async function materializeLane1V2Unit({ events, fill, stop, bundleStore }
 }
 
 export function createLane1SpyV2Controller({ config, coordinator, broker, bundleStore, notifier,
-  marketSession, now = () => Date.now(), uuid = () => crypto.randomUUID() }) {
-  if (!coordinator || !broker || !bundleStore || !notifier || !marketSession) {
+  receiptStore, marketSession, now = () => Date.now(), uuid = () => crypto.randomUUID() }) {
+  if (!coordinator || !broker || !bundleStore || !notifier || !receiptStore || !marketSession) {
     throw new Error('LANE_1_DEPENDENCIES_REQUIRED');
   }
   async function notify(message, { required = false } = {}) {
@@ -233,6 +234,38 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
       at: new Date(now()).toISOString() });
     await notify({ type: 'FAULT', faultCode: code, brokerOrderId: accepted?.brokerOrderId ?? null });
     return response(200, { state: state.stage, faultCode: code, sent: Boolean(accepted) });
+  }
+  async function recordPendingFill(error, { signal, seal, accepted }) {
+    const pending = error?.pendingFill;
+    if (!pending || !accepted?.brokerOrderId) throw error;
+    const state = await coordinator.recordPendingFill({
+      ...pending, signal, seal, accepted,
+      tvBodyBindingSha256: seal.tvBodyBindingSha256,
+      ownerId: config.ownerId,
+      pendingReason: error.message === 'FILL_PENDING_FEE' ? 'MISSING_FEE' : 'EXECUTION',
+    });
+    return response(200, { state: state.stage,
+      disposition: error.message === 'FILL_PENDING_FEE'
+        ? 'fill-pending-fee' : 'fill-pending-execution', sent: true,
+      faultCode: null, brokerOrderId: accepted.brokerOrderId,
+      tvBodyBindingSha256: seal.tvBodyBindingSha256,
+      deadlineAt: state.pendingFill?.deadlineAt ?? pending.deadlineAt });
+  }
+  async function persistCompletedFill({ signal, seal, accepted, fill, priorState }) {
+    fill.captureEvidence = { acceptance: accepted.orderAcceptanceEvidence,
+      ...fill.captureEvidence };
+    const evidenceOrigin = fill.evidenceOrigin ?? 'SCHWAB_WIRE_CAPTURE';
+    assertLane1FillEvidence(fill.captureEvidence, evidenceOrigin);
+    const identity = lane1FillIdentity({ fill, tvBodyBindingSha256: seal.tvBodyBindingSha256 });
+    const events = appendLane1V2BrokerEvents(priorState, seal, accepted, fill);
+    const unit = await materializeLane1V2Unit({ events, fill, stop: null, bundleStore });
+    const receipt = await receiptStore.write({ type: signal === 'EXIT' ? 'EXIT_FILLED' : 'OPEN_FILLED',
+      signal, identity, evidenceOrigin, captureEvidence: fill.captureEvidence,
+      manifestHash: unit.manifestHash, resolvedUnitId: unit.resolvedUnitId,
+      realizedPnlCents: signal === 'EXIT' ? unit.realizedPnlCents : null,
+      recordedAt: fill.acquiredAt });
+    if (!receipt?.id) throw new Error('LANE_1_FILL_RECEIPT_WRITE_FAILED');
+    return { identity, evidenceOrigin, unit, receipt };
   }
   return Object.freeze({
     async signal(body) {
@@ -287,12 +320,21 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
             clientOrderId: seal.clientOrderId, durableArm, expectedSnapshot });
           state = await coordinator.recordAccepted({ signal: normalized.signal,
             brokerOrderId: accepted.brokerOrderId, acceptedAt: accepted.acceptedAt });
+          state = await coordinator.recordPendingFill({ signal: normalized.signal, seal, accepted,
+            ownerId: config.ownerId,
+            brokerOrderId: accepted.brokerOrderId, clientOrderId: seal.clientOrderId,
+            side: seal.brokerInstruction, startedAt: accepted.acceptedAt,
+            deadlineAt: new Date(Date.parse(accepted.acceptedAt) + 120_000).toISOString(),
+            pendingReason: 'EXECUTION', tvBodyBindingSha256 });
           const fill = await broker.waitForFill({ side: seal.brokerInstruction,
             brokerOrderId: accepted.brokerOrderId, clientOrderId: seal.clientOrderId,
             durableArm });
-          const events = appendLane1V2BrokerEvents(state, seal, accepted, fill);
-          const unit = await materializeLane1V2Unit({ events, fill, stop: null, bundleStore });
-          state = await coordinator.recordOpen({ signal: normalized.signal, unit, stop: null });
+          const completed = await persistCompletedFill({ signal: normalized.signal, seal,
+            accepted, fill, priorState: state });
+          const { unit } = completed;
+          state = await coordinator.recordOpen({ signal: normalized.signal, unit, stop: null,
+            identity: completed.identity, evidenceOrigin: completed.evidenceOrigin,
+            captureEvidence: fill.captureEvidence, receiptId: completed.receipt.id });
           await notify({ type: 'OPENED', side: normalized.signal, symbol: 'SPY', quantity: 1,
             fillId: unit.openingFillId, manifestHash: unit.manifestHash,
             priceUsdPerShare: unit.openingPriceUsdPerShare, feesCents: unit.openingFeeCents,
@@ -307,12 +349,21 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
           clientOrderId: seal.clientOrderId, durableArm, expectedSnapshot });
         state = await coordinator.recordAccepted({ signal: 'EXIT',
           brokerOrderId: accepted.brokerOrderId, acceptedAt: accepted.acceptedAt });
+        state = await coordinator.recordPendingFill({ signal: 'EXIT', seal, accepted,
+          ownerId: config.ownerId,
+          brokerOrderId: accepted.brokerOrderId, clientOrderId: seal.clientOrderId,
+          side: seal.brokerInstruction, startedAt: accepted.acceptedAt,
+          deadlineAt: new Date(Date.parse(accepted.acceptedAt) + 120_000).toISOString(),
+          pendingReason: 'EXECUTION', tvBodyBindingSha256 });
         const fill = await broker.waitForFill({ side: seal.brokerInstruction,
           brokerOrderId: accepted.brokerOrderId, clientOrderId: seal.clientOrderId,
           durableArm });
-        const events = appendLane1V2BrokerEvents(state, seal, accepted, fill);
-        const unit = await materializeLane1V2Unit({ events, fill, stop: null, bundleStore });
-        state = await coordinator.recordExit({ unit, cancellation: null });
+        const completed = await persistCompletedFill({ signal: 'EXIT', seal,
+          accepted, fill, priorState: state });
+        const { unit } = completed;
+        state = await coordinator.recordExit({ unit, cancellation: null,
+          identity: completed.identity, evidenceOrigin: completed.evidenceOrigin,
+          captureEvidence: fill.captureEvidence, receiptId: completed.receipt.id });
         await notify({ type: 'EXITED', side: 'FLAT', fromSide: positionSide, symbol: 'SPY',
           quantity: 1, fillId: unit.closingFillId, manifestHash: unit.manifestHash,
           priceUsdPerShare: unit.closingPriceUsdPerShare, feesCents: unit.totalFeesCents,
@@ -322,7 +373,13 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
           positionSide: 'FLAT', brokerOrderId: accepted.brokerOrderId,
           tvBodyBindingSha256, realizedPnlCents: unit.realizedPnlCents,
           manifestHash: unit.manifestHash });
-      } catch (error) { return recordFault(error, accepted); }
+      } catch (error) {
+        if (['FILL_PENDING_EXECUTION', 'FILL_PENDING_FEE'].includes(error?.message)) {
+          try { return await recordPendingFill(error, { signal: normalized.signal, seal, accepted }); }
+          catch (pendingError) { return recordFault(pendingError, accepted); }
+        }
+        return recordFault(error, accepted);
+      }
     },
     async disarm() {
       const state = await coordinator.disarm({ reason: 'PRINCIPAL_COMMAND',
@@ -331,17 +388,15 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
       return response(200, { state: state.stage });
     },
     async reconcile() {
-      const state = await coordinator.status();
-      if (state?.positionSide === 'FLAT') return null;
       try {
-        if (!['LONG', 'SHORT'].includes(state?.positionSide)) {
+        const custody = await broker.position();
+        const state = await coordinator.status();
+        if (!['FLAT', 'LONG', 'SHORT'].includes(state?.positionSide)) {
           throw new Error('LANE_1_POSITION_STATE_DRIFT:COORDINATOR_POSITION_UNKNOWN');
         }
-        const custody = await broker.position();
         assertLane1PositionAgreement(custody?.positionSide, custody);
         if (custody.positionSide === state.positionSide) return null;
-        if (custody.positionSide !== 'FLAT') throw new Error('LANE_1_POSITION_STATE_DRIFT');
-        throw new Error('LANE_1_EXTERNAL_FLATTEN_IDENTITY_REQUIRED');
+        throw new Error(`LANE_1_POSITION_STATE_DRIFT:COORDINATOR_${state.positionSide}_BROKER_${custody.positionSide}`);
       } catch (error) { return recordFault(error); }
     },
     async expire() { return expire(await coordinator.status(), now()); },

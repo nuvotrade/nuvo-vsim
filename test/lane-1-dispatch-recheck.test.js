@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { SchwabD1Client } from '../cloudflare/schwab-client.js';
 import { createLane1Runtime } from '../cloudflare/lane-1-runtime.js';
 import { syntheticPositionPacket, syntheticClaim, syntheticOrder } from './fixtures/lane-1-synthetic-state.js';
+import { previewEvidenceBucket } from './helpers/preview-evidence-bucket.js';
 
 // All HTTP is intercepted. Even positive cases produce only synthetic receipts.
 async function harness(instruction, exercise) {
@@ -35,7 +36,8 @@ async function harness(instruction, exercise) {
     throw new Error('UNEXPECTED_TEST_PATH');
   };
   try {
-    const client = new SchwabD1Client({ NUVO_LANE_1_SPY_ARMED: 'OFF' });
+    const client = new SchwabD1Client({ NUVO_LANE_1_SPY_ARMED: 'OFF',
+      EVIDENCE: previewEvidenceBucket() });
     client.configured = () => true;
     client._laneAccountHash = async () => ({ accountHash: scenario.accountHash, token: 'SYNTHETIC' });
     const expectedSnapshot = await client.lane1V21SendSnapshot('SYNTHETIC-OWNER');
@@ -140,6 +142,10 @@ test('production runtime wiring carries snapshot and claim identity through to t
           return { claimed: true, state: structuredClone(state) };
         },
         laneV2RecordAccepted: async () => structuredClone(state),
+        laneV2RecordPendingFill: async (pendingFill) => {
+          state = { ...state, stage: 'FILL_PENDING_EXECUTION', pendingFill };
+          return structuredClone(state);
+        },
         laneV2RecordFault: async (detail) => {
           state = { ...state, armed: false, stage: 'FAULT', fault: detail }; return state;
         },
@@ -148,7 +154,8 @@ test('production runtime wiring carries snapshot and claim identity through to t
         LANE_1_TV_WEBHOOK_SECRET: 'SYNTHETIC-TEST-ONLY',
         NUVO_LANE_1_DISCORD_SERVER: 'NUVO VSIM', NUVO_LANE_1_DISCORD_CHANNEL: 'test',
         LANE_1_DISCORD_WEBHOOK_URL: 'https://discord.com/api/webhooks/SYNTHETIC/NEVER-SENT',
-        ACCOUNT_COORDINATOR: { getByName: () => stub }, EVIDENCE: {} }, 'SYNTHETIC-OWNER');
+        ACCOUNT_COORDINATOR: { getByName: () => stub },
+        EVIDENCE: previewEvidenceBucket() }, 'SYNTHETIC-OWNER');
       const result = await runtime.signal({ ticker: 'SPY', side: 'BUY', qty: 1, secret: 'SYNTHETIC-TEST-ONLY' });
       assert.equal(result.body.faultCode, 'SYNTHETIC_STOP_AFTER_FAKE_POST');
       assert.equal(scenario.mutationCount, 1);

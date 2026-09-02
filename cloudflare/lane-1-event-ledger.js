@@ -3,6 +3,7 @@ const SOURCE_EVENT_TYPES = Object.freeze([
   'LANE_1_TV_SIGNAL_REFUSED',
   'LANE_1_ORDER_PREVIEW',
   'LANE_1_ORDER_PREVIEW_REFUSED',
+  'LANE_1_FILL_RECEIPT',
 ]);
 
 const LANE_1_INSTRUCTIONS = Object.freeze(['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER']);
@@ -39,36 +40,40 @@ function newYorkDate(value) {
   }).format(date);
 }
 
-function exactFillInstructions(events, coordinatorState) {
-  const historyFillIds = new Set(events.filter((event) => event.event === 'FILL' && event.fillId)
-    .map((event) => event.fillId));
+function exactFillInstructions(events) {
   const result = new Map();
-  for (const event of coordinatorState?.latestUnit?.events ?? []) {
-    if (event?.eventType !== 'EQUITY_FILL' || event.symbol !== 'SPY'
-      || event.quantityShares !== 1 || !LANE_1_INSTRUCTIONS.includes(event.side)
-      || !historyFillIds.has(event.fillId)) continue;
-    result.set(event.side, { status: 'FILLED', fillId: event.fillId,
-      source: 'ACCOUNT_COORDINATOR_HISTORY + LATEST_UNIT' });
+  for (const event of events) {
+    if (event.event !== 'FILL' || event.qualifiedStage0Fill !== true
+      || !LANE_1_INSTRUCTIONS.includes(event.instruction) || !event.fillId) continue;
+    result.set(event.instruction, { status: 'FILLED', fillId: event.fillId,
+      source: event.sourceEventType });
   }
   return result;
 }
 
-export function buildLane1BotSummary(events, coordinatorState, { now = Date.now() } = {}) {
+export function buildLane1BotSummary(events, coordinatorState, {
+  now = Date.now(), positionProjection = null,
+} = {}) {
   const historyAvailable = Array.isArray(events);
   const stateAvailable = coordinatorState && typeof coordinatorState === 'object';
   const rows = historyAvailable ? events : [];
   const today = newYorkDate(now);
-  const fillEvents = rows.filter((event) => event.event === 'FILL');
+  const fillEvents = rows.filter((event) => event.event === 'FILL'
+    && event.qualifiedStage0Fill === true);
   const todayFills = fillEvents.filter((event) => newYorkDate(event.timestamp) === today);
-  const exits = rows.filter((event) => event.sourceEventType === 'EXIT_FILLED');
+  const exits = rows.filter((event) => event.sourceEventType === 'LANE_1_FILL_RECEIPT'
+    && event.fillType === 'EXIT_FILLED' && event.qualifiedStage0Fill === true);
   const todayExits = exits.filter((event) => newYorkDate(event.timestamp) === today);
-  const exactFills = exactFillInstructions(rows, coordinatorState);
+  const exactFills = exactFillInstructions(rows);
   const matrix = {};
   for (const instruction of LANE_1_INSTRUCTIONS) {
     const preview = [...rows].reverse().find((event) => event.instruction === instruction
       && ['LANE_1_ORDER_PREVIEW', 'LANE_1_ORDER_PREVIEW_REFUSED'].includes(event.sourceEventType));
     const attestation = preview ? PREVIEW_ATTESTATIONS[preview.recordId] : null;
     const fill = exactFills.get(instruction);
+    const recovered = [...rows].reverse().find((event) => event.event === 'FILL'
+      && event.instruction === instruction
+      && event.evidenceOrigin === 'BROKER_LEDGER_RECONSTRUCTION');
     matrix[instruction] = {
       alert: ALERT_CONFIRMATIONS[instruction],
       preview: !preview ? { status: 'NOT_MEASURED', reason: 'NO_PREVIEW_RECEIPT' }
@@ -77,22 +82,37 @@ export function buildLane1BotSummary(events, coordinatorState, { now = Date.now(
           : { status: `COMPLETE · ${attestation?.outcome ?? 'REFUSED'}`,
             reason: preview.reasonCode, receiptId: preview.recordId,
             source: attestation?.source ?? 'D1_OPERATIONAL_AUDIT' },
-      fill: fill ?? (fillEvents.length === 0
+      fill: fill ?? (recovered ? { status: 'RECOVERED · NOT_QUALIFIED',
+        fillId: recovered.fillId, source: 'BROKER_LEDGER_RECONSTRUCTION' }
+        : fillEvents.length === 0
         ? { status: '0 · NEVER_ARMED', source: 'ACCOUNT_COORDINATOR_HISTORY' }
         : { status: 'NOT_MEASURED', reason: 'EXACT_INSTRUCTION_NOT_RECORDED_IN_HISTORY' }),
     };
   }
 
-  const side = stateAvailable ? coordinatorState.positionSide : null;
+  const projectionStatus = positionProjection?.status ?? 'UNVERIFIED';
+  const side = projectionStatus === 'AGREE' ? positionProjection.positionSide : null;
   const unit = coordinatorState?.latestUnit ?? null;
-  const position = !stateAvailable ? { value: 'NOT_MEASURED', reason: 'COORDINATOR_STATE_UNAVAILABLE' }
-    : side === 'FLAT' ? { value: 'FLAT', source: 'ACCOUNT_COORDINATOR' }
+  const coordinatorSide = positionProjection?.coordinator?.positionSide
+    ?? coordinatorState?.positionSide ?? 'UNKNOWN';
+  const brokerSide = positionProjection?.broker?.positionSide ?? 'UNKNOWN';
+  const position = projectionStatus === 'POSITION_DRIFT'
+    ? { value: 'POSITION_DRIFT', coordinatorPositionSide: coordinatorSide,
+      brokerPositionSide: brokerSide, coordinatorUpdatedAt: positionProjection.coordinator?.updatedAt,
+      brokerAcquiredAt: positionProjection.broker?.acquiredAt, source: 'BROKER_FIRST_PROJECTION' }
+    : projectionStatus === 'UNVERIFIED'
+      ? { value: positionProjection?.positionSide === 'UNKNOWN' ? 'NOT_MEASURED'
+        : positionProjection?.positionSide ?? 'NOT_MEASURED',
+        verified: false, reason: positionProjection?.brokerRead?.error
+          ?? 'BROKER_SNAPSHOT_UNAVAILABLE', source: 'ACCOUNT_COORDINATOR_UNVERIFIED' }
+      : !stateAvailable ? { value: 'NOT_MEASURED', reason: 'COORDINATOR_STATE_UNAVAILABLE' }
+        : side === 'FLAT' ? { value: 'FLAT', source: 'BROKER_FIRST_PROJECTION' }
       : ['LONG', 'SHORT'].includes(side) && unit?.symbol === 'SPY' && unit?.quantity === 1
         && unit.positionSide === side
-        ? { value: `${side} 1 SPY`, source: 'ACCOUNT_COORDINATOR_LATEST_UNIT' }
+        ? { value: `${side} 1 SPY`, source: 'BROKER_FIRST_PROJECTION + ACCOUNT_COORDINATOR_LATEST_UNIT' }
         : { value: 'NOT_MEASURED', reason: 'OPEN_POSITION_FILL_IDENTITY_INCOMPLETE' };
 
-  const openFill = side === 'FLAT' ? null : [...rows].reverse().find((event) =>
+  const openFill = side === 'FLAT' || side === null ? null : [...rows].reverse().find((event) =>
     event.sourceEventType === 'OPEN_FILLED' && event.signal === side
       && (!unit?.openingFillId || event.fillId === unit.openingFillId));
   const proposal = unit?.events?.find((event) => event?.eventType === 'PROPOSAL_SEALED'
@@ -146,22 +166,20 @@ export function buildLane1BotSummary(events, coordinatorState, { now = Date.now(
         source: 'ACCOUNT_COORDINATOR' }
       : { value: 'NOT_MEASURED', reason: 'COORDINATOR_STATE_UNAVAILABLE' },
     position,
-    brokerReconciliation: {
-      value: 'NOT_MEASURED', reason: 'NO_LIVE_BROKER_POSITION_SOURCE_IN_THIS_PACKET',
-      positionDrift: 'DEFINED_BUT_UNREACHABLE_UNTIL_REFRESH_PACKET',
-    },
-    entered: side === 'FLAT'
+    brokerReconciliation: positionProjection ?? { status: 'UNVERIFIED',
+      brokerRead: { ok: false, error: 'BROKER_SNAPSHOT_UNAVAILABLE' } },
+    entered: side === 'FLAT' || side === null
       ? { value: 'NOT_MEASURED', reason: 'NO_OPEN_BOT_POSITION' }
       : openFill ? { value: openFill.timestamp, source: 'ACCOUNT_COORDINATOR_HISTORY' }
         : { value: 'NOT_MEASURED', reason: 'OPEN_FILL_TIMESTAMP_NOT_RECORDED' },
-    fromAlert: side === 'FLAT'
+    fromAlert: side === 'FLAT' || side === null
       ? { value: 'NOT_MEASURED', reason: 'NO_OPEN_BOT_POSITION' }
       : sourceSignal ? { value: sourceSignal.timestamp, instruction: sourceSignal.instruction,
         ingressId: sourceSignal.recordId, source: 'D1_OPERATIONAL_AUDIT' }
         : { value: 'NOT_MEASURED', reason: 'OPEN_FILL_TO_INGRESS_BINDING_NOT_AVAILABLE' },
     pnl: {
       realizedToday: realizedComplete
-        ? { valueCents: realizedCents, source: 'ACCOUNT_COORDINATOR_EXIT_FILLED' }
+        ? { valueCents: realizedCents, source: 'LANE_1_FILL_RECEIPT' }
         : { status: 'NOT_MEASURED', reason: exits.length === 0
           ? 'NO_CLOSED_BOT_ROUND_TRIPS' : todayExits.length === 0
             ? 'NO_CLOSED_BOT_ROUND_TRIPS_TODAY' : 'REALIZED_PNL_FIELD_MISSING' },
@@ -171,10 +189,12 @@ export function buildLane1BotSummary(events, coordinatorState, { now = Date.now(
     openPosition,
     fills: { today: todayFills.length, total: fillEvents.length,
       provenInstructions: exactFills.size, targetInstructions: LANE_1_INSTRUCTIONS.length,
-      source: 'ACCOUNT_COORDINATOR_HISTORY' },
+      source: 'LANE_1_FILL_RECEIPT' },
     matrix,
-    blocking: !stateAvailable ? 'COORDINATOR_STATE_UNAVAILABLE'
-      : faultCode ?? (coordinatorState.armed === true ? 'none' : 'ARM_OFF · INTENDED'),
+    blocking: projectionStatus === 'POSITION_DRIFT' ? 'POSITION_DRIFT'
+      : projectionStatus === 'UNVERIFIED' ? 'BROKER_POSITION_UNVERIFIED'
+        : !stateAvailable ? 'COORDINATOR_STATE_UNAVAILABLE'
+          : faultCode ?? (coordinatorState.armed === true ? 'none' : 'ARM_OFF · INTENDED'),
     lastSignal: lastSignal ? {
       timestamp: lastSignal.timestamp,
       instruction: lastSignal.instruction ?? lastSignal.rawSide ?? null,
@@ -208,17 +228,26 @@ function projectCoordinatorHistoryRow(row) {
     reasonCode: null,
     signal: ownScalar(detail, 'signal'),
     fillId: ownScalar(detail, 'fillId'),
+    brokerOrderId: ownScalar(detail, 'brokerOrderId'),
     realizedPnlCents: ownScalar(detail, 'realizedPnlCents'),
   };
   if (row?.event_type === 'ORDER_ACCEPTED') {
-    return { ...base, event: 'ORDER', outcome: 'ACCEPTED' };
+    return { ...base, event: 'ORDER', instruction: ownScalar(detail, 'instruction'),
+      quantity: ownScalar(detail, 'quantity'), outcome: 'ACCEPTED' };
   }
   if (row?.event_type === 'OPEN_FILLED' || row?.event_type === 'EXIT_FILLED') {
-    return { ...base, event: 'FILL', outcome: 'FILLED' };
+    return { ...base, event: 'FILL', instruction: ownScalar(detail, 'instruction'),
+      quantity: ownScalar(detail, 'quantity'), outcome: 'FILLED',
+      evidenceOrigin: ownScalar(detail, 'evidenceOrigin'),
+      qualifiedStage0Fill: ownScalar(detail, 'qualifiedStage0Fill') === true };
   }
   if (row?.event_type === 'FAULT') {
-    return { ...base, event: 'REFUSED', outcome: 'REFUSED',
+    return { ...base, event: 'FAULT', outcome: 'FAULT · AUTO_DISARMED',
       reasonCode: ownScalar(detail, 'faultCode') ?? 'LANE_1_REFUSAL_REASON_MISSING' };
+  }
+  if (row?.event_type === 'AUTO_DISARMED') {
+    return { ...base, event: 'DISARMED', outcome: 'AUTO_DISARMED',
+      reasonCode: ownScalar(detail, 'reason') ?? 'LANE_1_REFUSAL_REASON_MISSING' };
   }
   return null;
 }
@@ -264,10 +293,42 @@ export function projectLane1LedgerRow(row) {
       outcome: 'REFUSED', reasonCode: ownScalar(detail, 'faultCode')
         ?? 'LANE_1_REFUSAL_REASON_MISSING' };
   }
+  if (row?.event_type === 'LANE_1_FILL_RECEIPT') {
+    const identity = detail.identity && typeof detail.identity === 'object' ? detail.identity : {};
+    return { ...base, event: 'FILL', rawSide: null,
+      instruction: ownScalar(identity, 'instruction'), quantity: ownScalar(identity, 'quantityShares'),
+      fillId: ownScalar(identity, 'executionActivityId'),
+      brokerOrderId: ownScalar(identity, 'brokerOrderId'), fillType: ownScalar(detail, 'type'),
+      outcome: detail.evidenceOrigin === 'BROKER_LEDGER_RECONSTRUCTION'
+        ? 'RECOVERED · BROKER_LEDGER_RECONSTRUCTION' : 'CAPTURED · RECEIPT_WRITTEN',
+      reasonCode: null, evidenceOrigin: ownScalar(detail, 'evidenceOrigin'),
+      realizedPnlCents: ownScalar(detail, 'realizedPnlCents'),
+      qualifiedStage0Fill: detail.qualifiedStage0Fill === true };
+  }
   return null;
 }
 
-export async function lane1EventLedger(env, ownerId, { limit = 250 } = {}) {
+function projectBrokerLedgerRow(row) {
+  const eventType = String(row?.event_type ?? '').toUpperCase();
+  const recordId = typeof row?.event_key === 'string' ? `broker-${row.event_key}` : null;
+  const isExecution = eventType === 'EXECUTION';
+  const isOrder = eventType === 'ORDER_STATE';
+  if (!isExecution && !isOrder) return null;
+  return { timestamp: row.occurred_at ?? row.first_seen_at ?? null,
+    sourceEventType: isExecution ? 'BROKER_EXECUTION_ORPHAN' : 'BROKER_ORDER_OBSERVED',
+    recordId, recordHref: recordId ? `#lane1-event-${recordId}` : null,
+    sourceIngressId: null, rawSide: row.side ?? null, instruction: row.side ?? null,
+    quantity: row.quantity ?? null, reasonCode: isExecution
+      ? 'NO_LANE_1_FILL_RECEIPT_OR_COORDINATOR_RECORD' : null,
+    signal: null, fillId: isExecution ? row.activity_id ?? null : null,
+    brokerOrderId: row.broker_order_id ?? null, realizedPnlCents: null,
+    event: isExecution ? 'FILL' : 'ORDER',
+    outcome: isExecution ? 'BROKER_ONLY · ORPHAN' : `BROKER · ${row.state ?? 'OBSERVED'}`,
+    evidenceOrigin: 'BROKER_LEDGER', qualifiedStage0Fill: false };
+}
+
+export async function lane1EventLedger(env, ownerId, { limit = 250,
+  refreshPosition = false } = {}) {
   if (!env.DB?.prepare || !ownerId) throw new Error('LANE_1_LEDGER_STORAGE_UNAVAILABLE');
   const boundedLimit = Math.min(250, Math.max(1, Number.isSafeInteger(Number(limit))
     ? Number(limit) : 250));
@@ -284,19 +345,42 @@ export async function lane1EventLedger(env, ownerId, { limit = 250 } = {}) {
   const stateRead = historyStub?.laneV2Status
     ? historyStub.laneV2Status()
     : Promise.reject(new Error('LANE_1_COORDINATOR_STATE_UNAVAILABLE'));
-  const [d1Result, coordinatorResult, stateResult] = await Promise.allSettled([
-    d1Read, coordinatorRead, stateRead,
+  const brokerRead = env.DB.prepare(`SELECT event_key,event_type,broker_order_id,transaction_id,
+    activity_id,symbol,side,quantity,price,state,occurred_at,first_seen_at FROM broker_events
+    WHERE owner_id=? AND symbol='SPY' AND event_type IN ('ORDER_STATE','EXECUTION')
+    ORDER BY occurred_at DESC,first_seen_at DESC LIMIT ?`).bind(ownerId, boundedLimit).all();
+  const projectionRead = historyStub?.laneV2PositionProjection
+    ? historyStub.laneV2PositionProjection({ ownerId, refresh: refreshPosition, maxAgeMs: 60_000 })
+    : Promise.reject(new Error('LANE_1_POSITION_PROJECTION_UNAVAILABLE'));
+  const [d1Result, coordinatorResult, stateResult, brokerResult, projectionResult]
+    = await Promise.allSettled([
+      d1Read, coordinatorRead, stateRead, brokerRead, projectionRead,
   ]);
   const d1Events = d1Result.status === 'fulfilled'
     ? (d1Result.value?.results ?? []).map(projectLane1LedgerRow).filter(Boolean) : [];
+  const receiptFillIds = new Set(d1Events.filter((event) => event.sourceEventType
+    === 'LANE_1_FILL_RECEIPT' && event.fillId).map((event) => String(event.fillId)));
   const coordinatorEvents = coordinatorResult.status === 'fulfilled'
     ? (coordinatorResult.value?.events ?? []).map(projectCoordinatorHistoryRow).filter(Boolean) : [];
-  const events = [...d1Events, ...coordinatorEvents].sort((left, right) =>
+  const coordinatorBrokerOrderIds = new Set(coordinatorEvents.filter((event) => event.event === 'ORDER')
+    .map((event) => String(event.brokerOrderId ?? '')).filter(Boolean));
+  const brokerEvents = brokerResult.status === 'fulfilled'
+    ? (brokerResult.value?.results ?? []).map(projectBrokerLedgerRow).filter(Boolean)
+      .filter((event) => event.event === 'FILL'
+        ? !receiptFillIds.has(String(event.fillId ?? ''))
+        : !coordinatorBrokerOrderIds.has(String(event.brokerOrderId ?? '')))
+    : [];
+  const events = [...d1Events,
+    ...coordinatorEvents.filter((event) => event.event !== 'FILL'
+      || !receiptFillIds.has(String(event.fillId ?? ''))), ...brokerEvents].sort((left, right) =>
     String(left.timestamp ?? '').localeCompare(String(right.timestamp ?? ''))
       || String(left.recordId ?? '').localeCompare(String(right.recordId ?? '')))
     .slice(-boundedLimit);
   const counts = { SIGNAL: 0, REFUSED: 0, PREVIEW: 0, ORDER: 0, FILL: 0 };
-  for (const event of events) counts[event.event] += 1;
+  for (const event of events) {
+    if (Object.hasOwn(counts, event.event)) counts[event.event] += 1;
+    else if (['FAULT', 'DISARMED'].includes(event.event)) counts.REFUSED += 1;
+  }
   if (d1Result.status === 'rejected') {
     counts.SIGNAL = null; counts.PREVIEW = null; counts.REFUSED = null;
   }
@@ -307,6 +391,8 @@ export async function lane1EventLedger(env, ownerId, { limit = 250 } = {}) {
     operationalAudit: d1Result.status === 'fulfilled' ? 'LIVE' : 'FAULT',
     coordinatorHistory: coordinatorResult.status === 'fulfilled' ? 'LIVE' : 'FAULT',
     coordinatorState: stateResult.status === 'fulfilled' ? 'LIVE' : 'FAULT',
+    brokerLedger: brokerResult.status === 'fulfilled' ? 'LIVE' : 'FAULT',
+    positionProjection: projectionResult.status === 'fulfilled' ? 'LIVE' : 'FAULT',
   };
   const sourceErrors = [
     d1Result.status === 'rejected' ? String(d1Result.reason?.message ?? d1Result.reason) : null,
@@ -314,7 +400,13 @@ export async function lane1EventLedger(env, ownerId, { limit = 250 } = {}) {
       ? String(coordinatorResult.reason?.message ?? coordinatorResult.reason) : null,
     stateResult.status === 'rejected'
       ? String(stateResult.reason?.message ?? stateResult.reason) : null,
+    brokerResult.status === 'rejected'
+      ? String(brokerResult.reason?.message ?? brokerResult.reason) : null,
+    projectionResult.status === 'rejected'
+      ? String(projectionResult.reason?.message ?? projectionResult.reason) : null,
   ].filter(Boolean);
+  const measuredExits = events.filter((event) => event.fillType === 'EXIT_FILLED'
+    && Number.isSafeInteger(event.realizedPnlCents));
   return {
     phase: 1,
     appendOnly: true,
@@ -325,18 +417,32 @@ export async function lane1EventLedger(env, ownerId, { limit = 250 } = {}) {
     sourceStatus,
     sourceErrors,
     sources: { operationalAudit: [...SOURCE_EVENT_TYPES],
-      coordinatorHistory: ['ORDER_ACCEPTED', 'OPEN_FILLED', 'EXIT_FILLED', 'FAULT'] },
+      coordinatorHistory: ['ORDER_ACCEPTED', 'OPEN_FILLED', 'EXIT_FILLED', 'FAULT',
+        'AUTO_DISARMED'],
+      brokerLedger: ['ORDER_STATE', 'EXECUTION'] },
     zeroReasons: { ORDER: counts.ORDER === 0 ? 'NEVER_ARMED' : null,
-      FILL: counts.FILL === 0 ? 'NEVER_ARMED' : null },
-    pnl: {
+      FILL: counts.FILL === 0 ? (counts.ORDER === 0 ? 'NEVER_ARMED'
+        : 'NO_BROKER_FILL_OBSERVED') : null },
+    pnl: measuredExits.length ? {
+      status: 'MEASURED',
+      realizedPnlCents: measuredExits.reduce((sum, event) => sum + event.realizedPnlCents, 0),
+      reason: 'Resolved Lane 1 exit receipts only.',
+    } : {
       status: 'NOT_MEASURED',
-      reason: 'No captured Lane 1 fill payloads exist. Phase 1 does not infer pairing or substitute account P&L.',
+      reason: 'No complete Lane 1 exit receipt exists. Account P&L is never substituted.',
     },
-    phase2: {
-      status: 'BLOCKED_NO_FILL_PAYLOADS',
-      reason: 'Round-trip pairing starts only after four complete broker fill payloads are captured.',
+    phase2: measuredExits.length ? {
+      status: 'ROUND_TRIP_RECORDED',
+      reason: 'Realized P&L comes from a captured, materialized Lane 1 round trip.',
+    } : {
+      status: 'BLOCKED_NO_COMPLETE_EXIT',
+      reason: 'Round-trip P&L requires a complete captured exit payload.',
     },
+    positionProjection: projectionResult.status === 'fulfilled' ? projectionResult.value : null,
     summary: buildLane1BotSummary(events,
-      stateResult.status === 'fulfilled' ? stateResult.value : null),
+      stateResult.status === 'fulfilled' ? stateResult.value : null, {
+        positionProjection: projectionResult.status === 'fulfilled'
+          ? projectionResult.value : null,
+      }),
   };
 }

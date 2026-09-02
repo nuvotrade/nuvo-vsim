@@ -51,12 +51,16 @@ function equityMark(positions, symbol) {
 
 /** Read-only E3 tab model. It never promotes custody marks into an economic unit. */
 export function buildE3SpineTab({ cycleSnapshot = null, laneUnit = null,
-  lanePreviewSource = null } = {}) {
+  lanePreviewSource = null, positionProjection = null } = {}) {
   const account = cycleSnapshot?.account ?? {};
   const positions = Array.isArray(cycleSnapshot?.positions) ? cycleSnapshot.positions : [];
   const latest = laneUnit?.latestUnit ?? laneUnit ?? {};
   const realizedPnlCents = Number.isSafeInteger(latest.realizedPnlCents)
     ? latest.realizedPnlCents : null;
+  const projectionStatus = positionProjection?.status ?? 'UNVERIFIED';
+  const projectedSide = projectionStatus === 'AGREE'
+    ? positionProjection.positionSide : projectionStatus === 'UNVERIFIED'
+      ? positionProjection?.positionSide ?? 'UNKNOWN' : 'UNKNOWN';
   return {
     readOnly: true,
     paneA: FIXTURE_PANE,
@@ -93,7 +97,9 @@ export function buildE3SpineTab({ cycleSnapshot = null, laneUnit = null,
       sellFillId: laneUnit?.latestUnit?.sellFillId ?? laneUnit?.sellFillId ?? null,
       openingFillId: latest.openingFillId ?? null,
       closingFillId: latest.closingFillId ?? null,
-      positionSide: laneUnit?.positionSide ?? latest.positionSide ?? 'FLAT',
+      positionSide: projectedSide,
+      positionProjection: positionProjection ?? { status: 'UNVERIFIED',
+        brokerRead: { ok: false, error: 'BROKER_SNAPSHOT_UNAVAILABLE' } },
       protectiveStop: laneUnit?.stop ?? latest.stop ?? null,
       manifestHash: laneUnit?.latestUnit?.manifestHash ?? laneUnit?.manifestHash ?? null,
       realizedPnlUsd: realizedPnlCents === null

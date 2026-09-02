@@ -9,18 +9,28 @@ function row(eventType, detail, createdAt, id = crypto.randomUUID()) {
   return { id, event_type: eventType, detail_json: JSON.stringify(detail), created_at: createdAt };
 }
 
+function projectionFor(state) {
+  return { status: 'AGREE', positionSide: state.positionSide,
+    coordinator: { positionSide: state.positionSide, stage: state.stage,
+      armed: state.armed, updatedAt: state.updatedAt ?? '2026-08-31T22:00:00.000Z' },
+    broker: { positionSide: state.positionSide, acquiredAt: '2026-08-31T22:00:01.000Z' },
+    brokerRead: { ok: true, attemptedAt: '2026-08-31T22:00:01.000Z' } };
+}
+
 function environment(d1Rows, coordinatorRows = [], coordinatorState = {
   armed: false, stage: 'DISARMED', positionSide: 'FLAT', latestUnit: null, fault: null,
-}) {
+}, brokerRows = [], positionProjection = projectionFor(coordinatorState)) {
   let writes = 0;
   const DB = { prepare(sql) {
     assert.match(sql, /^SELECT /u);
-    return { bind() { return { async all() { return { results: d1Rows }; },
+    return { bind() { return { async all() { return { results: sql.includes('FROM broker_events')
+      ? brokerRows : d1Rows }; },
       async run() { writes += 1; throw new Error('WRITE_NOT_ALLOWED'); } }; } };
   } };
   const coordinator = { async laneV2History() {
     return { appendOnly: true, readOnly: true, events: coordinatorRows };
-  }, async laneV2Status() { return structuredClone(coordinatorState); } };
+  }, async laneV2Status() { return structuredClone(coordinatorState); },
+  async laneV2PositionProjection() { return structuredClone(positionProjection); } };
   return { env: { DB, ACCOUNT_COORDINATOR: { getByName: () => coordinator } },
     writes: () => writes };
 }
@@ -61,7 +71,7 @@ test('Lane 1 ledger merges live audit and existing coordinator history chronolog
   assert.equal(ledger.events[2].instruction, null,
     'coordinator history does not invent a broker instruction it did not store');
   assert.equal(ledger.pnl.status, 'NOT_MEASURED');
-  assert.equal(ledger.phase2.status, 'BLOCKED_NO_FILL_PAYLOADS');
+  assert.equal(ledger.phase2.status, 'BLOCKED_NO_COMPLETE_EXIT');
   assert.equal(ledger.availability, 'COMPLETE');
   assert.equal(harness.writes(), 0);
 });
@@ -137,9 +147,7 @@ test('Lane 1 summary distinguishes clear previews from audited no-position refus
   assert.equal(ledger.summary.position.value, 'FLAT');
   assert.deepEqual(ledger.summary.instrument, { broker: 'Schwab', ticker: 'SPY',
     quantityShares: 1, source: 'ACCEPTED_LANE_1_INGRESS' });
-  assert.equal(ledger.summary.brokerReconciliation.value, 'NOT_MEASURED');
-  assert.equal(ledger.summary.brokerReconciliation.positionDrift,
-    'DEFINED_BUT_UNREACHABLE_UNTIL_REFRESH_PACKET');
+  assert.equal(ledger.summary.brokerReconciliation.status, 'AGREE');
   assert.equal(ledger.summary.matrix.BUY.preview.status, 'COMPLETE · CLEAR');
   assert.equal(ledger.summary.matrix.SELL.preview.status, 'COMPLETE · REFUSED_NO_POSITION');
   assert.equal(ledger.summary.matrix.SELL.preview.source, 'PRINCIPAL_CONFIRMED_DECRYPT_REPORT');
@@ -160,11 +168,13 @@ test('Lane 1 summary distinguishes clear previews from audited no-position refus
   });
 });
 
-test('Lane 1 summary counts only coordinator fills and uses EXIT_FILLED realized cents', () => {
+test('Lane 1 summary counts only explicit fill receipts and uses captured exit realized cents', () => {
   const events = [
-    { event: 'FILL', sourceEventType: 'OPEN_FILLED', signal: 'LONG', fillId: 'FILL-1',
+    { event: 'FILL', sourceEventType: 'LANE_1_FILL_RECEIPT', fillType: 'OPEN_FILLED',
+      instruction: 'BUY', qualifiedStage0Fill: true, fillId: 'FILL-1',
       timestamp: '2026-08-31T14:31:00.000Z' },
-    { event: 'FILL', sourceEventType: 'EXIT_FILLED', signal: null, fillId: 'FILL-2',
+    { event: 'FILL', sourceEventType: 'LANE_1_FILL_RECEIPT', fillType: 'EXIT_FILLED',
+      instruction: 'SELL', qualifiedStage0Fill: true, fillId: 'FILL-2',
       realizedPnlCents: 250, timestamp: '2026-08-31T14:36:00.000Z' },
   ];
   const state = { armed: true, stage: 'FLAT', positionSide: 'FLAT', fault: null,
@@ -176,11 +186,12 @@ test('Lane 1 summary counts only coordinator fills and uses EXIT_FILLED realized
     ] } };
   const summary = buildLane1BotSummary(events, state, {
     now: Date.parse('2026-08-31T15:00:00.000Z'),
+    positionProjection: projectionFor(state),
   });
   assert.deepEqual(summary.fills, { today: 2, total: 2,
-    provenInstructions: 2, targetInstructions: 4, source: 'ACCOUNT_COORDINATOR_HISTORY' });
+    provenInstructions: 2, targetInstructions: 4, source: 'LANE_1_FILL_RECEIPT' });
   assert.deepEqual(summary.pnl.realizedToday,
-    { valueCents: 250, source: 'ACCOUNT_COORDINATOR_EXIT_FILLED' });
+    { valueCents: 250, source: 'LANE_1_FILL_RECEIPT' });
   assert.equal(summary.matrix.BUY.fill.status, 'FILLED');
   assert.equal(summary.matrix.SELL.fill.status, 'FILLED');
   assert.equal(summary.matrix.SELL_SHORT.fill.status, 'NOT_MEASURED');
@@ -195,14 +206,88 @@ test('open BOT position exposes only complete coordinator fill economics', () =>
         { eventType: 'EQUITY_FILL', fillId: 'FILL-1', symbol: 'SPY', side: 'BUY',
           quantityShares: 1 },
       ] } };
-  const summary = buildLane1BotSummary([], state);
+  const summary = buildLane1BotSummary([], state, { positionProjection: projectionFor(state) });
   assert.deepEqual(summary.instrument, { broker: 'Schwab', ticker: 'SPY', quantityShares: 1,
     source: 'ACCOUNT_COORDINATOR_LATEST_UNIT' });
   assert.deepEqual(summary.openPosition, { side: 'LONG', ticker: 'SPY', quantityShares: 1,
     openingPriceUsdPerShare: 766.25, openingFeeCents: 2, openingFillId: 'FILL-1',
     source: 'ACCOUNT_COORDINATOR_LATEST_UNIT' });
 
-  const incomplete = buildLane1BotSummary([], { ...state,
-    latestUnit: { ...state.latestUnit, openingFeeCents: null } });
+  const incompleteState = { ...state,
+    latestUnit: { ...state.latestUnit, openingFeeCents: null } };
+  const incomplete = buildLane1BotSummary([], incompleteState, {
+    positionProjection: projectionFor(incompleteState),
+  });
   assert.equal(incomplete.openPosition, null);
+});
+
+test('fault, auto-disarm, and broker-only fill are visible instead of disappearing', async () => {
+  const coordinatorRows = [
+    { sequence: 1, event_type: 'FAULT', detail_json: JSON.stringify({
+      faultCode: 'MISSING_FEE', brokerOrderId: '1007778879812' }),
+    created_at: '2026-09-01T13:35:05.000Z' },
+    { sequence: 2, event_type: 'AUTO_DISARMED', detail_json: JSON.stringify({
+      reason: 'MISSING_FEE', brokerOrderId: '1007778879812' }),
+    created_at: '2026-09-01T13:35:05.001Z' },
+  ];
+  const brokerRows = [{ event_key: 'execution-129577264234', event_type: 'EXECUTION',
+    broker_order_id: '1007778879812', activity_id: '129577264234', symbol: 'SPY',
+    side: 'SELL_SHORT', quantity: 1, price: 761.98, state: 'FILLED',
+    occurred_at: '2026-09-01T13:35:04.000Z', first_seen_at: '2026-09-01T13:35:05.000Z' }];
+  const state = { armed: false, stage: 'FAULT', positionSide: 'FLAT', latestUnit: null,
+    fault: { faultCode: 'MISSING_FEE' }, updatedAt: '2026-09-01T13:35:05.001Z' };
+  const drift = { status: 'POSITION_DRIFT', positionSide: 'UNKNOWN',
+    coordinator: { positionSide: 'FLAT', stage: 'FAULT', armed: false,
+      updatedAt: '2026-09-01T13:35:05.001Z' },
+    broker: { positionSide: 'SHORT', acquiredAt: '2026-09-01T13:36:00.000Z' },
+    brokerRead: { ok: true, attemptedAt: '2026-09-01T13:36:00.000Z' } };
+  const ledger = await lane1EventLedger(environment([], coordinatorRows, state,
+    brokerRows, drift).env, 'owner-1');
+  assert.equal(ledger.summary.position.value, 'POSITION_DRIFT');
+  assert.equal(ledger.summary.position.coordinatorPositionSide, 'FLAT');
+  assert.equal(ledger.summary.position.brokerPositionSide, 'SHORT');
+  assert.equal(ledger.summary.blocking, 'POSITION_DRIFT');
+  assert.equal(ledger.events.some((event) => event.event === 'FAULT'
+    && event.reasonCode === 'MISSING_FEE'), true);
+  assert.equal(ledger.events.some((event) => event.event === 'DISARMED'
+    && event.outcome === 'AUTO_DISARMED'), true);
+  const orphan = ledger.events.find((event) => event.outcome === 'BROKER_ONLY · ORPHAN');
+  assert.equal(orphan.fillId, '129577264234');
+  assert.equal(orphan.instruction, 'SELL_SHORT');
+  assert.equal(orphan.reasonCode, 'NO_LANE_1_FILL_RECEIPT_OR_COORDINATOR_RECORD');
+  assert.equal(orphan.qualifiedStage0Fill, false);
+});
+
+test('reconstructed entry is labeled and visible but never credited as a qualified fill', async () => {
+  const audit = [row('LANE_1_FILL_RECEIPT', { type: 'OPEN_FILLED',
+    identity: { instruction: 'SELL_SHORT', quantityShares: 1,
+      executionActivityId: '129577264234', brokerOrderId: '1007778879812' },
+    evidenceOrigin: 'BROKER_LEDGER_RECONSTRUCTION', qualifiedStage0Fill: false,
+  }, '2026-09-01T13:40:00.000Z', 'receipt-recovered')];
+  const state = { armed: false, stage: 'OPEN_SHORT', positionSide: 'SHORT', fault: null,
+    updatedAt: '2026-09-01T13:40:00.000Z', latestUnit: { state: 'OPEN_SHARES', symbol: 'SPY',
+      quantity: 1, positionSide: 'SHORT', openingFillId: '129577264234',
+      openingPriceUsdPerShare: 761.98, openingFeeCents: -2,
+      events: [{ eventType: 'EQUITY_FILL', fillId: '129577264234', symbol: 'SPY',
+        side: 'SELL_SHORT', quantityShares: 1 }] } };
+  const ledger = await lane1EventLedger(environment(audit, [], state).env, 'owner-1');
+  assert.equal(ledger.summary.matrix.SELL_SHORT.fill.status, 'RECOVERED · NOT_QUALIFIED');
+  assert.equal(ledger.summary.fills.total, 0);
+  assert.equal(ledger.summary.fills.provenInstructions, 0);
+  assert.equal(ledger.events[0].outcome, 'RECOVERED · BROKER_LEDGER_RECONSTRUCTION');
+  assert.equal(ledger.events[0].qualifiedStage0Fill, false);
+});
+
+test('FAULT with unreadable broker never renders coordinator FLAT as the bot position', () => {
+  const state = { armed: false, stage: 'FAULT', positionSide: 'FLAT', latestUnit: null,
+    fault: { faultCode: 'BROKER_UNREACHABLE' }, updatedAt: '2026-09-01T13:40:00.000Z' };
+  const summary = buildLane1BotSummary([], state, { positionProjection: {
+    status: 'UNVERIFIED', positionSide: 'UNKNOWN',
+    coordinator: { positionSide: 'FLAT', stage: 'FAULT', armed: false,
+      updatedAt: state.updatedAt }, broker: null,
+    brokerRead: { ok: false, error: 'BROKER_UNREACHABLE' },
+  } });
+  assert.equal(summary.position.value, 'NOT_MEASURED');
+  assert.notEqual(summary.position.value, 'FLAT');
+  assert.equal(summary.blocking, 'BROKER_POSITION_UNVERIFIED');
 });

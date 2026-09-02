@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { syntheticClaim, syntheticPositionPacket } from './fixtures/lane-1-synthetic-state.js';
 import { liveDerivedPreviewOrder } from './helpers/schwab-preview-order.js';
+import { previewEvidenceBucket } from './helpers/preview-evidence-bucket.js';
 import {
   buildLane1SchwabBracket, buildLane1SchwabExit, buildLane1SchwabMarketOrder, buildLane1SchwabOrder,
   extractLane1BracketStop, extractLane1SchwabFill, fetchLane1PreviewOnly, SchwabD1Client,
@@ -145,7 +146,8 @@ test('durable dashboard ARM authorizes only the V2.1 lane market send while env 
       return new Response(null, { status: 201,
         headers: { location: 'https://api.schwabapi.com/trader/v1/accounts/hash/orders/ORDER-1' } });
     };
-    const client = new SchwabD1Client({ NUVO_LANE_1_SPY_ARMED: 'OFF' });
+    const evidence = previewEvidenceBucket();
+    const client = new SchwabD1Client({ NUVO_LANE_1_SPY_ARMED: 'OFF', EVIDENCE: evidence });
     client.configured = () => true;
     client._laneAccountHash = async () => ({ accountHash: 'ACCOUNT-HASH', token: 'token' });
 
@@ -158,6 +160,9 @@ test('durable dashboard ARM authorizes only the V2.1 lane market send while env 
     const accepted = await client.placeLane1V21Market('OWNER', { instruction: 'BUY', clientOrderId: 'CLIENT-1' },
       { durableArm: true, expectedSnapshot, readCoordinator: async () => syntheticClaim() });
     assert.equal(accepted.brokerOrderId, 'ORDER-1');
+    assert.equal(accepted.orderAcceptanceEvidence.complete, true);
+    assert.equal(accepted.orderAcceptanceEvidence.source, 'SCHWAB_ORDER_ACCEPTANCE_RESPONSE');
+    assert.equal(evidence.objects.size, 2);
     assert.equal(requests.length, 1);
     assert.ok(requests[0].url.endsWith('/accounts/ACCOUNT-HASH/orders'));
     assert.deepEqual(requests[0].body, buildLane1SchwabMarketOrder({ instruction: 'BUY' }));
@@ -165,6 +170,29 @@ test('durable dashboard ARM authorizes only the V2.1 lane market send while env 
     await assert.rejects(() => client.placeLane1EquityOrder('OWNER',
       { symbol: 'SPY', side: 'BUY', quantity: 1 }, { durableArm: true }), /LANE_1_DISARMED/u);
     assert.equal(requests.length, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('failed Schwab order response is captured before transport classification', async () => {
+  const originalFetch = globalThis.fetch;
+  const evidence = previewEvidenceBucket();
+  try {
+    globalThis.fetch = async () => new Response('{"error":"BROKER_REFUSED"}', { status: 500 });
+    const client = new SchwabD1Client({ NUVO_LANE_1_SPY_ARMED: 'OFF', EVIDENCE: evidence });
+    client.configured = () => true;
+    client._laneAccountHash = async () => ({ accountHash: 'ACCOUNT-HASH', token: 'token' });
+    client._read = async (path) => path.includes('?fields=positions') ? syntheticPositionPacket() : [];
+    const expectedSnapshot = await client.lane1V21SendSnapshot('OWNER');
+    await assert.rejects(() => client.placeLane1V21Market('OWNER', {
+      instruction: 'BUY', clientOrderId: 'CLIENT-FAILED',
+    }, { durableArm: true, expectedSnapshot,
+      readCoordinator: async () => syntheticClaim('BUY', 'CLIENT-FAILED') }),
+    /SCHWAB_LANE_MARKET_ORDER_BUY_500/u);
+    assert.equal(evidence.objects.size, 2);
+    const manifest = [...evidence.objects.values()].find((row) =>
+      new TextDecoder().decode(row.bytes).includes('LANE_1_FILL_RAW_RESPONSE_V1'));
+    assert.ok(manifest);
+    assert.match(new TextDecoder().decode(manifest.bytes), /"httpStatus":500/u);
   } finally { globalThis.fetch = originalFetch; }
 });
 

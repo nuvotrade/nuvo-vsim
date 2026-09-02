@@ -41,9 +41,11 @@ import {
 } from '../src/dashboard/e3-spine-tab.js';
 import {
   disarmLane1FromDashboard, expireLane1,
-  armLane1FromDashboard, handleLane1PreviewRequest, handleLane1TvWebhook,
+  armExistingLane1FromDashboard, armLane1FromDashboard,
+  handleLane1PreviewRequest, handleLane1TvWebhook,
   handlePrincipalFlatten, lane1ControlStateFromDashboard, lane1Status,
-  latestLane1ReplayIngress, validateLane1V21Market,
+  latestLane1ReplayIngress, readBoundedJson, reconcileLane1OpenFromBrokerLedger,
+  validateLane1V21Market,
 } from './lane-1-runtime.js';
 import { lane1EventLedger } from './lane-1-event-ledger.js';
 import { buildSystemHealth, proofsForWorker } from './system-health.js';
@@ -2050,7 +2052,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
         <p class="panel-note" data-e3="live-asof">No stored custody snapshot.</p>
       </article>
       <article class="panel" data-e3-pane="lane"><div class="panel-head"><div><p class="kicker">Durable economic diary</p><h3 data-e3="lane-label">LANE_1_SPY unit</h3></div><span class="readonly-tag lane-arm-state" data-e3="lane-state" data-state="disarmed" role="status" aria-live="polite">DISARMED</span></div>
-        <dl class="e3-spine-facts"><div><dt>Symbol / quantity</dt><dd data-e3="lane-position">SPY · 1</dd></div><div><dt>Buy fill</dt><dd data-e3="lane-buy-fill">—</dd></div><div><dt>Sell fill</dt><dd data-e3="lane-sell-fill">—</dd></div><div><dt>Realized P&amp;L</dt><dd data-e3="lane-pnl">—</dd></div><div><dt>Manifest SHA-256</dt><dd data-e3="lane-hash">—</dd></div><div><dt>Diary updated</dt><dd data-e3="lane-updated">—</dd></div></dl>
+        <dl class="e3-spine-facts"><div><dt>Bot position</dt><dd data-e3="lane-position">UNVERIFIED · SPY · 1</dd></div><div><dt>Buy fill</dt><dd data-e3="lane-buy-fill">—</dd></div><div><dt>Sell fill</dt><dd data-e3="lane-sell-fill">—</dd></div><div><dt>Realized P&amp;L</dt><dd data-e3="lane-pnl">—</dd></div><div><dt>Manifest SHA-256</dt><dd data-e3="lane-hash">—</dd></div><div><dt>Diary updated</dt><dd data-e3="lane-updated">—</dd></div></dl>
         <button class="cc-directive" type="button" data-action="laneArm">ARM LANE_1_SPY</button>
         <button class="cc-directive" type="button" data-action="laneDisarm">DISARM LANE_1_SPY</button>
         <button class="cc-directive" type="button" data-action="lanePreview" disabled>VALIDATE ORDER</button>
@@ -2095,7 +2097,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     </article>`;
   const mobileSystemCard = `<article class="panel system-brief mobile-system-brief" aria-label="System status"></article>`;
   const botStatusCard = `<article class="panel bot-status-card" aria-labelledby="bot-status-title">
-    <div class="bot-status-head"><div><p class="kicker">LANE_1 · LIVE CONTROL</p><h2 id="bot-status-title" data-vsim="bot-broker-symbol">Schwab · —</h2></div><div class="bot-status-actions"><button class="cc-directive bot-quick-disarm" type="button" data-action="laneDisarm">DISARM</button><details class="bot-control-menu"><summary aria-label="BOT controls">•••</summary><div><button type="button" data-action="laneArm" data-vsim="bot-menu-arm">ARM</button><button type="button" data-action="laneDisarm" data-vsim="bot-menu-disarm">DISARM</button><button type="button" disabled title="Available after live-exit validation">FLATTEN</button><small>Available after live-exit validation</small></div></details></div></div>
+    <div class="bot-status-head"><div><p class="kicker">LANE_1 · LIVE CONTROL</p><h2 id="bot-status-title" data-vsim="bot-broker-symbol">Schwab · —</h2></div><div class="bot-status-actions"><button class="chip" type="button" data-action="laneRefresh" aria-label="Refresh Schwab bot position">↻</button><button class="cc-directive bot-quick-disarm" type="button" data-action="laneDisarm">DISARM</button><details class="bot-control-menu"><summary aria-label="BOT controls">•••</summary><div><button type="button" data-action="laneArm" data-vsim="bot-menu-arm">ARM</button><button type="button" data-action="laneDisarm" data-vsim="bot-menu-disarm">DISARM</button><button type="button" disabled title="Available after live-exit validation">FLATTEN</button><small>Available after live-exit validation</small></div></details></div></div>
     <div class="bot-position"><strong data-vsim="bot-position">—</strong><span data-vsim="bot-position-copy">position unavailable</span></div>
     <div class="bot-pnl-grid"><div><span>OPEN P/L</span><strong data-vsim="bot-open-pnl">—</strong></div><div><span>DAY P/L</span><strong data-vsim="bot-day-pnl">—</strong></div></div>
     <div class="bot-status-row"><strong data-vsim="bot-live-state" data-state="stale">STALE</strong><strong data-vsim="bot-arm-state" data-vsim-control-state data-state="disarmed" role="status" aria-live="polite">DISARMED</strong><strong data-vsim="bot-online-state" data-state="offline">OFFLINE</strong></div>
@@ -3571,8 +3573,12 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     if (summary.arm?.value === 'ON' || summary.arm?.value === 'OFF') {
       setLaneState(summary.arm.value === 'ON');
     }
-    textAll('[data-vsim="lane-summary-position"]', summary.position?.value === 'NOT_MEASURED'
-      ? '—' : (summary.position?.value || '—'));
+    const position = summary.position || {};
+    const compactPosition = position.value === 'POSITION_DRIFT'
+      ? 'POSITION_DRIFT · coordinator ' + (position.coordinatorPositionSide || 'UNKNOWN')
+        + ' · Schwab ' + (position.brokerPositionSide || 'UNKNOWN') + ' 1 SPY'
+      : position.value === 'NOT_MEASURED' ? '—' : (position.value || '—');
+    textAll('[data-vsim="lane-summary-position"]', compactPosition);
     textAll('[data-vsim="lane-summary-fills"]', number(summary.fills?.provenInstructions || 0)
       + ' of ' + number(summary.fills?.targetInstructions || 4));
     const realized = summary.pnl?.realizedToday || {};
@@ -3596,7 +3602,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
               : kind === 'preview' ? status.includes('CLEAR') ? 'clear'
                 : status.includes('REFUSED_NO_POSITION') ? 'no pos'
                   : status.includes('REFUSED') ? 'refused' : '—'
-                : status === 'FILLED' ? '1' : '—';
+                : status === 'FILLED' ? '1'
+                  : status.includes('RECOVERED') ? 'recovered' : '—';
             const className = compact === '✓' || compact === 'clear' || compact === '1'
               ? 'clear' : compact === 'no pos' || compact === 'refused' ? 'refused' : 'unmeasured';
             const cell = make('div', undefined, className); cell.dataset.evidence = kind;
@@ -3624,9 +3631,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     }
     const positionValue = summary.position?.value;
     const positionMeasured = positionValue && positionValue !== 'NOT_MEASURED';
-    text(q('[data-vsim="bot-position"]'), positionMeasured ? positionValue.split(' ')[0] : '—');
-    text(q('[data-vsim="bot-position-copy"]'), positionMeasured
-      ? positionValue === 'FLAT' ? 'no position' : positionValue : 'position unavailable');
+    text(q('[data-vsim="bot-position"]'), positionValue === 'POSITION_DRIFT' ? 'DRIFT'
+      : positionMeasured ? positionValue.split(' ')[0] : '—');
+    text(q('[data-vsim="bot-position-copy"]'), positionValue === 'POSITION_DRIFT'
+      ? 'coordinator ' + (position.coordinatorPositionSide || 'UNKNOWN') + ' @ '
+        + (position.coordinatorUpdatedAt ? when(position.coordinatorUpdatedAt) : 'time unknown')
+        + ' · Schwab ' + (position.brokerPositionSide || 'UNKNOWN') + ' 1 SPY @ '
+        + (position.brokerAcquiredAt ? when(position.brokerAcquiredAt) : 'time unknown')
+      : positionMeasured ? positionValue === 'FLAT' ? 'no position'
+        : position.verified === false ? positionValue + ' · unverified' : positionValue
+        : 'position unavailable');
     const botRealized = summary.pnl?.realizedToday || {};
     const dayPnl = Number.isSafeInteger(botRealized.valueCents) ? botRealized.valueCents / 100 : null;
     const mark = Number(status?.systemHealth?.tape?.[String(instrument.ticker || '').toLowerCase()]);
@@ -3643,17 +3657,18 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     };
     setPnl('[data-vsim="bot-open-pnl"]', botOpenPnl);
     setPnl('[data-vsim="bot-day-pnl"]', dayPnl);
-    const observedAt = Date.parse(status?.custody?.observedAt || '');
+    const positionRead = summary.brokerReconciliation || {};
+    const observedAt = Date.parse(positionRead.broker?.acquiredAt || '');
     const custodyAgeMs = Number.isFinite(observedAt) ? Math.max(0, Date.now() - observedAt) : null;
-    const schwabRow = (status?.systemHealth?.rows || []).find(row => row.label === 'SCHWAB');
     const custodyLive = custodyAgeMs !== null && custodyAgeMs <= 20 * 60 * 1000
-      && schwabRow?.color === 'GREEN';
+      && positionRead.brokerRead?.ok === true;
     const liveNode = q('[data-vsim="bot-live-state"]');
     text(liveNode, custodyLive ? 'LIVE' : 'STALE');
     if (liveNode) liveNode.dataset.state = custodyLive ? 'live' : 'stale';
     const ageMinutes = custodyAgeMs === null ? null : Math.floor(custodyAgeMs / 60_000);
-    text(q('[data-vsim="bot-live-age"]'), ageMinutes === null ? 'Custody age unavailable'
-      : 'Custody ' + (ageMinutes < 1 ? '<1m' : ageMinutes + 'm') + ' old · live threshold 20m');
+    text(q('[data-vsim="bot-live-age"]'), ageMinutes === null ? 'Schwab position read unavailable'
+      : 'Schwab position read ' + (ageMinutes < 1 ? '<1m' : ageMinutes + 'm')
+        + ' old · live threshold 20m');
     const connectors = new Map((status?.systemHealth?.rows || [])
       .filter(row => ['D1','SCHWAB','MARKET','TV','DISCORD'].includes(row.label))
       .map(row => [row.label, row.color]));
@@ -3782,7 +3797,17 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       : 'No stored custody snapshot.');
     setLaneState(lane.armed === true);
     text(q('[data-e3="lane-label"]'), lane.label || 'LANE_1_SPY');
-    text(q('[data-e3="lane-position"]'), (lane.symbol || 'SPY') + ' · ' + number(lane.quantity || 1));
+    const laneProjection = lane.positionProjection || {};
+    text(q('[data-e3="lane-position"]'), laneProjection.status === 'POSITION_DRIFT'
+      ? 'POSITION_DRIFT · coordinator ' + (laneProjection.coordinator?.positionSide || 'UNKNOWN')
+        + ' @ ' + (laneProjection.coordinator?.updatedAt
+          ? when(laneProjection.coordinator.updatedAt) : 'time unknown')
+        + ' · Schwab ' + (laneProjection.broker?.positionSide || 'UNKNOWN') + ' · SPY · 1 @ '
+        + (laneProjection.broker?.acquiredAt
+          ? when(laneProjection.broker.acquiredAt) : 'time unknown')
+      : (lane.positionSide || 'UNKNOWN') + (laneProjection.status === 'UNVERIFIED'
+        ? ' · UNVERIFIED' : '') + ' · ' + (lane.symbol || 'SPY') + ' · '
+        + number(lane.quantity || 1));
     text(q('[data-e3="lane-buy-fill"]'), lane.buyFillId || '—');
     text(q('[data-e3="lane-sell-fill"]'), lane.sellFillId || '—');
     text(q('[data-e3="lane-pnl"]'), moneyExact(lane.realizedPnlUsd));
@@ -3824,6 +3849,18 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     const versions = currentStatus.systemHealth && currentStatus.systemHealth.versions || {};
     text(q('footer span:nth-child(3)'), 'Dashboard ' + String(versions.dashboard || currentStatus.version || '').slice(0, 12)
       + ' · Market ' + String(versions.market || 'unknown').slice(0, 12));
+    // Render stored state first, then refresh live broker truth. The durable
+    // coordinator debounces these reads to one per 60 seconds.
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const liveLedger = await api('/api/lane-1-spy/ledger?limit=250&refresh=1');
+      renderLane1EventLedger(liveLedger, currentStatus);
+      if (E3_SPINE_ENABLED) renderE3Spine(await api('/api/e3-spine'));
+    } catch (error) {
+      const sourceNode = q('[data-vsim="bot-ledger-source-status"]');
+      text(sourceNode, 'BROKER REFRESH FAULT · ' + error.message + ' · stored state retained');
+      if (sourceNode) sourceNode.classList.add('source-fault');
+    }
   }
 
   async function operate(action, button) {
@@ -3850,6 +3887,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       laneArm: () => api('/api/lane-1-spy/arm', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
       }),
+      laneRefresh: () => api('/api/lane-1-spy/ledger?limit=250&refresh=1'),
       lanePreview: () => {
         const source = q('[data-action="lanePreview"]');
         const ingressId = source && source.dataset.ingressId || '';
@@ -3859,6 +3897,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         });
       },
     };
+    if (action === 'laneRefresh') {
+      if (button) button.disabled = true;
+      try {
+        const ledger = await operations.laneRefresh();
+        renderLane1EventLedger(ledger, currentStatus);
+        if (E3_SPINE_ENABLED) renderE3Spine(await api('/api/e3-spine'));
+      } catch (error) { showLaneError('REFRESH failed: ' + error.message); }
+      finally { if (button) button.disabled = false; }
+      return;
+    }
     const confirmations = {
       ledger: 'Backfill the append-only Schwab transaction ledger using read-only API history?',
       guardian: 'Refresh Schwab truth, ingest the broker ledger, and run the read-only Guardian review?',
@@ -4049,15 +4097,21 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
   if (url.pathname === '/api/e3-spine' && request.method === 'GET') {
     if (!e3SpineTabEnabled(env)) return json({ error: 'NOT_FOUND' }, 404);
-    const [cycleSnapshot, laneUnit, lanePreviewSource] = await Promise.all([
+    const positionStub = env.ACCOUNT_COORDINATOR?.getByName?.(owner.id);
+    const [cycleSnapshot, laneUnit, lanePreviewSource, positionProjection] = await Promise.all([
       loadLatestCustody(env, owner.id), lane1Status(env, owner.id),
       latestLane1ReplayIngress(env, owner.id),
+      positionStub?.laneV2PositionProjection
+        ? positionStub.laneV2PositionProjection({ ownerId: owner.id, refresh: false,
+          maxAgeMs: 60_000 }) : null,
     ]);
-    return json(buildE3SpineTab({ cycleSnapshot, laneUnit, lanePreviewSource }));
+    return json(buildE3SpineTab({ cycleSnapshot, laneUnit, lanePreviewSource,
+      positionProjection }));
   }
   if (url.pathname === '/api/lane-1-spy/ledger' && request.method === 'GET') {
     return json(await lane1EventLedger(env, owner.id, {
       limit: Number(url.searchParams.get('limit') ?? 250),
+      refreshPosition: url.searchParams.get('refresh') === '1',
     }));
   }
   if (url.pathname === '/api/lane-1-spy/disarm' && request.method === 'POST') {
@@ -4070,6 +4124,26 @@ async function route(request, env, ctx) {
   }
   if (url.pathname === '/api/lane-1-spy/arm' && request.method === 'POST') {
     const result = await armLane1FromDashboard({ env, ownerId: owner.id });
+    return json(result.body, result.status);
+  }
+  if (url.pathname === '/api/lane-1-spy/reconcile-open' && request.method === 'POST') {
+    const body = await readBoundedJson(request, 1_024).catch(() => ({}));
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(['confirm'])) {
+      return json({ state: 'REFUSED', faultCode: 'LANE_1_RECOVERY_REQUEST_INVALID' }, 400);
+    }
+    const result = await reconcileLane1OpenFromBrokerLedger({ env, ownerId: owner.id,
+      principalConfirmation: body?.confirm });
+    return json(result.body, result.status);
+  }
+  if (url.pathname === '/api/lane-1-spy/arm-existing' && request.method === 'POST') {
+    const body = await readBoundedJson(request, 1_024).catch(() => ({}));
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(['confirm'])) {
+      return json({ armed: false, faultCode: 'LANE_1_ARM_EXISTING_REQUEST_INVALID' }, 400);
+    }
+    const result = await armExistingLane1FromDashboard({ env, ownerId: owner.id,
+      principalConfirmation: body?.confirm });
     return json(result.body, result.status);
   }
   if (url.pathname === '/api/lane-1-spy/preview-ingress' && request.method === 'POST') {
