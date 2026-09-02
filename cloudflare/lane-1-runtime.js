@@ -639,21 +639,58 @@ export async function validateLane1V21Market({ env, ownerId }) {
   }
 }
 
-export async function armLane1FromDashboard({ env, ownerId, now = () => Date.now() }) {
+export async function armLane1FromDashboard({ env, ownerId, principalConfirmation,
+  now = () => Date.now(), dependencies = {} }) {
   const armedAtMs = now();
   const expiresAtMs = armedAtMs + 86_400_000;
   if (!Number.isFinite(armedAtMs)) {
     return { status: 422, body: { armed: false,
       faultCode: 'LANE_1_PRINCIPAL_ARM_TIME_INVALID' } };
   }
+  const coordinator = dependencies.coordinator ?? coordinatorV2Adapter(env, ownerId);
+  let liveState;
+  try { liveState = await coordinator.status(); }
+  catch (error) {
+    return { status: 503, body: { armed: false,
+      faultCode: String(error?.message ?? error).split(':')[0] } };
+  }
+  if (principalConfirmation !== 'ARM_LANE_1_CURRENT_STATE') {
+    return { status: 400, body: { armed: false,
+      faultCode: 'LANE_1_ARM_CONFIRMATION_REQUIRED' } };
+  }
+  if (liveState?.pendingFill || ['FILL_PENDING_EXECUTION', 'FILL_PENDING_FEE']
+    .includes(liveState?.stage)) {
+    return { status: 409, body: { armed: false, state: liveState?.stage,
+      faultCode: 'LANE_1_ARM_FILL_PENDING' } };
+  }
+  if (liveState?.fault || liveState?.stage === 'FAULT') {
+    return { status: 409, body: { armed: false, state: liveState?.stage,
+      faultCode: 'LANE_1_ARM_FAULT_PRESENT' } };
+  }
+  if (['OPEN_SHORT', 'OPEN_LONG'].includes(liveState?.stage)) {
+    const side = liveState.stage === 'OPEN_SHORT' ? 'SHORT' : 'LONG';
+    if (liveState.positionSide !== side) {
+      return { status: 409, body: { armed: false, state: liveState.stage,
+        faultCode: 'LANE_1_ARM_STATE_POSITION_MISMATCH' } };
+    }
+    return armExistingLane1FromDashboard({ env, ownerId,
+      principalConfirmation: `ARM_EXISTING_${side}_1_SPY`, now,
+      dependencies: { ...dependencies, coordinator } });
+  }
+  if (!['FLAT', 'DISARMED'].includes(liveState?.stage)
+    || liveState?.positionSide !== 'FLAT') {
+    return { status: 409, body: { armed: false, state: liveState?.stage ?? 'UNKNOWN',
+      faultCode: 'LANE_1_ARM_STAGE_REFUSED' } };
+  }
   try {
-    const state = await coordinatorV2Adapter(env, ownerId).principalArm({
+    const state = await coordinator.principalArm({
       reason: 'PRINCIPAL_DASHBOARD_ARM',
       armedAt: new Date(armedAtMs).toISOString(),
       expiresAt: new Date(expiresAtMs).toISOString(),
     });
     return { status: 200, body: { armed: state.armed === true,
       state: state.stage, reason: 'PRINCIPAL_DASHBOARD_ARM',
+      positionSide: state.positionSide, instructionAllowed: ['BUY', 'SELL_SHORT'],
       expiresAt: state.expiresAt } };
   } catch (error) {
     return { status: 422, body: { armed: false,
@@ -778,8 +815,11 @@ export async function armExistingLane1FromDashboard({ env, ownerId,
       armedAt: new Date(armedAtMs).toISOString(),
       expiresAt: new Date(armedAtMs + 86_400_000).toISOString(), brokerSnapshot,
     });
+    const instructionAllowed = state.positionSide === 'SHORT' ? 'BUY_TO_COVER'
+      : state.positionSide === 'LONG' ? 'SELL' : null;
+    if (!instructionAllowed) throw new Error('LANE_1_ARM_EXISTING_POSITION_REFUSED');
     return { status: 200, body: { armed: state.armed === true, state: state.stage,
-      positionSide: state.positionSide, instructionAllowed: 'BUY_TO_COVER',
+      positionSide: state.positionSide, instructionAllowed,
       expiresAt: state.expiresAt } };
   } catch (error) {
     return { status: 422, body: { armed: false,
@@ -904,11 +944,14 @@ export async function disarmLane1FromDashboard({ env, ownerId, now = () => Date.
 export async function lane1ControlStateFromDashboard({ env, ownerId }) {
   try {
     const state = await coordinatorV2Adapter(env, ownerId).status();
-    if (typeof state?.armed !== 'boolean' || typeof state?.stage !== 'string') {
+    if (typeof state?.armed !== 'boolean' || typeof state?.stage !== 'string'
+      || typeof state?.positionSide !== 'string') {
       return { status: 503, body: { faultCode: 'LANE_1_CONTROL_STATE_UNAVAILABLE' } };
     }
     return { status: 200, body: {
-      armed: state.armed, state: state.stage, updatedAt: state.updatedAt ?? null,
+      armed: state.armed, state: state.stage, positionSide: state.positionSide ?? 'UNKNOWN',
+      pendingFill: Boolean(state.pendingFill), faultCode: state.fault?.faultCode ?? null,
+      updatedAt: state.updatedAt ?? null,
     } };
   } catch (error) {
     return { status: 503, body: {

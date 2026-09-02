@@ -611,17 +611,50 @@ export class VsimAccountCoordinator extends DurableObject {
     brokerSnapshot }) {
     const state = this.#laneV2State();
     assertLane1SendSnapshot(brokerSnapshot);
-    if (reason !== 'PRINCIPAL_DASHBOARD_ARM_EXISTING'
-      || principalConfirmation !== 'ARM_EXISTING_SHORT_1_SPY'
-      || state.armed || state.stage !== 'OPEN_SHORT' || state.positionSide !== 'SHORT'
-      || state.latestUnit?.state !== 'OPEN_SHORT' || state.latestUnit?.symbol !== 'SPY'
-      || state.latestUnit?.quantity !== 1 || !state.latestUnit?.openingFillId
-      || !state.entryIdentity?.identity || state.pendingFill || state.fault
-      || brokerSnapshot.positionSide !== 'SHORT'
-      || Date.now() - Date.parse(brokerSnapshot.acquiredAt) > 5_000
-      || !Number.isFinite(Date.parse(armedAt)) || !Number.isFinite(Date.parse(expiresAt))
-      || Date.parse(expiresAt) <= Date.parse(armedAt)) {
-      throw new Error('LANE_1_ARM_EXISTING_PRECONDITION_REFUSED');
+    const side = state.stage === 'OPEN_SHORT' ? 'SHORT'
+      : state.stage === 'OPEN_LONG' ? 'LONG' : null;
+    const expectedConfirmation = side ? `ARM_EXISTING_${side}_1_SPY` : null;
+    const instructionAllowed = side === 'SHORT' ? 'BUY_TO_COVER'
+      : side === 'LONG' ? 'SELL' : null;
+    const brokerAcquiredAt = Date.parse(brokerSnapshot.acquiredAt);
+    const armedAtMs = Date.parse(armedAt);
+    const expiresAtMs = Date.parse(expiresAt);
+    if (reason !== 'PRINCIPAL_DASHBOARD_ARM_EXISTING') {
+      throw new Error('LANE_1_ARM_EXISTING_REASON_REFUSED');
+    }
+    if (!side) throw new Error('LANE_1_ARM_EXISTING_STAGE_REFUSED');
+    if (principalConfirmation !== expectedConfirmation) {
+      throw new Error('LANE_1_ARM_EXISTING_CONFIRMATION_REFUSED');
+    }
+    if (state.armed) throw new Error('LANE_1_ARM_EXISTING_ALREADY_ARMED');
+    if (state.positionSide !== side) throw new Error('LANE_1_ARM_EXISTING_POSITION_REFUSED');
+    if (state.latestUnit?.state !== `OPEN_${side}`) {
+      throw new Error('LANE_1_ARM_EXISTING_UNIT_STATE_REFUSED');
+    }
+    if (state.latestUnit?.symbol !== 'SPY') {
+      throw new Error('LANE_1_ARM_EXISTING_SYMBOL_REFUSED');
+    }
+    if (state.latestUnit?.quantity !== 1) {
+      throw new Error('LANE_1_ARM_EXISTING_QUANTITY_REFUSED');
+    }
+    if (!state.latestUnit?.openingFillId) {
+      throw new Error('LANE_1_ARM_EXISTING_FILL_ID_REFUSED');
+    }
+    if (!state.entryIdentity?.identity) {
+      throw new Error('LANE_1_ARM_EXISTING_ENTRY_IDENTITY_REFUSED');
+    }
+    if (state.pendingFill) throw new Error('LANE_1_ARM_EXISTING_FILL_PENDING');
+    if (state.fault) throw new Error('LANE_1_ARM_EXISTING_FAULT_PRESENT');
+    if (brokerSnapshot.positionSide !== side) {
+      throw new Error('LANE_1_ARM_EXISTING_BROKER_POSITION_REFUSED');
+    }
+    if (!Number.isFinite(brokerAcquiredAt)
+      || Date.now() - brokerAcquiredAt > 5_000 || brokerAcquiredAt > Date.now() + 5_000) {
+      throw new Error('LANE_1_ARM_EXISTING_BROKER_SNAPSHOT_STALE');
+    }
+    if (!Number.isFinite(armedAtMs) || !Number.isFinite(expiresAtMs)
+      || expiresAtMs <= armedAtMs) {
+      throw new Error('LANE_1_ARM_EXISTING_TIME_REFUSED');
     }
     assertLane1FillIdentity(state.entryIdentity.identity);
     assertLane1FillEvidence(state.entryIdentity.captureEvidence,
@@ -629,10 +662,10 @@ export class VsimAccountCoordinator extends DurableObject {
     assertUnitFillIdentity(state.latestUnit, state.entryIdentity.identity, 'OPEN');
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(`UPDATE lane_1_spy_v2_state SET armed=1,armed_at=?,expires_at=?,
-        stage='OPEN_SHORT',position_side='SHORT',updated_at=? WHERE singleton=1`,
-      armedAt, expiresAt, armedAt);
+        stage=?,position_side=?,updated_at=? WHERE singleton=1`,
+      armedAt, expiresAt, `OPEN_${side}`, side, armedAt);
       this.#laneV2Record('ARMED_EXISTING', { armedAt, expiresAt, reason,
-        positionSide: 'SHORT', instructionAllowed: 'BUY_TO_COVER',
+        positionSide: side, instructionAllowed,
         entryFillId: state.latestUnit.openingFillId,
         evidenceOrigin: state.entryIdentity.evidenceOrigin }, armedAt);
     });

@@ -163,6 +163,7 @@ export function buildLane1BotSummary(events, coordinatorState, {
       : { status: 'NOT_MEASURED', reason: 'LANE_CONTRACT_SOURCE_UNAVAILABLE' },
     arm: stateAvailable
       ? { value: coordinatorState.armed === true ? 'ON' : 'OFF', stage: coordinatorState.stage,
+        positionSide: coordinatorState.positionSide,
         source: 'ACCOUNT_COORDINATOR' }
       : { value: 'NOT_MEASURED', reason: 'COORDINATOR_STATE_UNAVAILABLE' },
     position,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildE3SpineTab } from '../src/dashboard/e3-spine-tab.js';
 import {
-  rewriteDesignHtml, liveDashboardScript, resolveLaneControlOutcome,
+  armLaneContract, rewriteDesignHtml, liveDashboardScript, resolveLaneControlOutcome,
 } from '../cloudflare/worker.js';
 
 test('pane C shows the durable LANE_1_SPY diary unit and never calls it a fixture', () => {
@@ -93,7 +93,7 @@ test('pane C is confined to Engine spine and Overview source remains untouched',
   const laneBranch = script.slice(laneStart, laneEnd);
   assert.equal((laneBranch.match(/window\.confirm\(/gu) || []).length, 1,
     'ARM confirms once while DISARM starts immediately');
-  assert.match(laneBranch, /action === 'laneArm' && !window\.confirm/u);
+  assert.match(laneBranch, /if \(action === 'laneArm'\)[\s\S]{0,900}if \(!window\.confirm/u);
   assert.doesNotMatch(laneBranch, /action === 'laneDisarm'[^\n]{0,160}window\.confirm/u);
   assert.doesNotMatch(laneBranch, /window\.alert|scroll|location|hash/u);
   assert.doesNotMatch(script, /Arm LANE_1_SPY until you click DISARM/u);
@@ -104,8 +104,17 @@ test('lane UI reducer updates only accepted success and preserves prior state on
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneArm', previousArmed: false,
     result: { armed: true, state: 'FLAT', reason: 'PRINCIPAL_DASHBOARD_ARM' },
-    readback: { armed: true, state: 'FLAT' },
+    readback: { armed: true, state: 'FLAT', positionSide: 'FLAT' },
   }), { armed: true, error: null });
+  assert.deepEqual(resolveLaneControlOutcome({
+    action: 'laneArm', previousArmed: false,
+    result: { armed: true, state: 'OPEN_SHORT', positionSide: 'SHORT' },
+    readback: { armed: true, state: 'OPEN_SHORT', positionSide: 'SHORT' },
+  }), { armed: true, error: null });
+  assert.match(resolveLaneControlOutcome({
+    action: 'laneArm', previousArmed: false,
+    readback: { armed: true, state: 'OPEN_SHORT', positionSide: 'FLAT' },
+  }).error, /LANE_1_PRINCIPAL_ARM_STATE_MISMATCH/u);
   assert.deepEqual(resolveLaneControlOutcome({
     action: 'laneDisarm', previousArmed: true,
     result: { armed: false, state: 'DISARMED', reason: 'PRINCIPAL_DASHBOARD_DISARM' },
@@ -139,6 +148,27 @@ test('lane UI reducer updates only accepted success and preserves prior state on
     error: 'DISARM UNCONFIRMED — the lane may still be armed. Cancel any in-flight order at Schwab directly. (ACCOUNT_COORDINATOR_UNAVAILABLE)' });
 });
 
+test('ARM panel contract follows live coordinator stage and names illegal states', () => {
+  assert.deepEqual(armLaneContract({ state: 'OPEN_SHORT', positionSide: 'SHORT' }), {
+    permitted: true, transition: 'ARM_EXISTING_SHORT',
+    text: 'ARM · OPEN_SHORT · only BUY_TO_COVER permitted',
+  });
+  assert.deepEqual(armLaneContract({ state: 'OPEN_LONG', positionSide: 'LONG' }), {
+    permitted: true, transition: 'ARM_EXISTING_LONG',
+    text: 'ARM · OPEN_LONG · only SELL permitted',
+  });
+  assert.equal(armLaneContract({ state: 'FLAT', positionSide: 'FLAT' }).transition,
+    'FLAT_ONLY');
+  assert.equal(armLaneContract({ state: 'FAULT', positionSide: 'SHORT',
+    faultCode: 'TEST' }).faultCode, 'LANE_1_ARM_FAULT_PRESENT');
+  assert.equal(armLaneContract({ state: 'FILL_PENDING_FEE', positionSide: 'SHORT',
+    pendingFill: true }).faultCode, 'LANE_1_ARM_FILL_PENDING');
+  const script = liveDashboardScript({ e3SpineTab: true });
+  assert.match(script, /ARM_LANE_1_CURRENT_STATE/u);
+  assert.match(script, /ARM · OPEN_SHORT · only BUY_TO_COVER permitted/u);
+  assert.match(script, /liveArmState = await bounded\(operations\.laneState\(\)/u);
+});
+
 test('lane control is single-flight and always releases after failure', () => {
   const script = liveDashboardScript({ e3SpineTab: true });
   const branchStart = script.indexOf("if (action === 'laneArm' || action === 'laneDisarm')");
@@ -147,7 +177,7 @@ test('lane control is single-flight and always releases after failure', () => {
   assert.match(branch, /if \(laneControlInFlight\) return;/u);
   assert.match(branch, /laneControlInFlight = true;/u);
   assert.match(branch, /finally \{\s*laneControlInFlight = false;/u);
-  assert.match(branch, /action === 'laneArm' && !window\.confirm/u);
+  assert.match(branch, /if \(action === 'laneArm'\)[\s\S]{0,900}if \(!window\.confirm/u);
   assert.doesNotMatch(branch, /action === 'laneDisarm'[^\n]{0,160}window\.confirm/u);
   assert.ok(branch.indexOf('if (laneControlInFlight) return;')
     < branch.indexOf('operations[action]()'), 'guard precedes the write');

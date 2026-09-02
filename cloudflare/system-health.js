@@ -1,9 +1,10 @@
-const COLORS = new Set(['GREEN', 'RED']);
+const COLORS = new Set(['GREEN', 'AMBER', 'RED']);
 
 export const SYSTEM_HEALTH = Object.freeze({
   CUSTODY_STALE_MS: 20 * 60 * 1000,
   LIVE_PROBE_STALE_MS: 5 * 60 * 1000,
   TAPE_STALE_MS: 5 * 60 * 1000,
+  RECENT_SIGNAL_MS: 30 * 60 * 1000,
 });
 
 function instant(value) {
@@ -29,12 +30,40 @@ export function proofsForWorker(rows = [], workerVersion) {
       currentWorker: proofVersion === workerVersion,
       error: detail.error ?? null,
       source: detail.source ?? null,
+      ingressId: record.id ?? detail.ingressId ?? null,
+      acceptedInstruction: detail.acceptedInstruction ?? null,
+      ingressKind: detail.ingressKind ?? null,
+      signalShapeAccepted: detail.signalShapeAccepted === true,
+      replayEligible: detail.replayEligible === true,
       spy: Number.isFinite(Number(detail.spy)) ? Number(detail.spy) : null,
       vix: Number.isFinite(Number(detail.vix)) ? Number(detail.vix) : null,
       asOf: detail.asOf ?? null,
     };
   }
   return result;
+}
+
+const LANE_1_INSTRUCTIONS = new Set(['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER']);
+
+export function tradingViewIngressHealth(proof, workerVersion, now = Date.now()) {
+  const at = new Date(Number(now)).toISOString();
+  if (!proof || proof.currentWorker !== true || proof.workerVersion !== workerVersion) {
+    return Object.freeze({ attempted: false, ok: false, state: 'UNPROVEN', at,
+      evidenceAt: proof?.at ?? null, ingressId: proof?.ingressId ?? null,
+      error: 'TV_INGRESS_UNPROVEN_ON_CURRENT_VERSION' });
+  }
+  const accepted = proof.ingressKind === 'ORDER_SIGNAL'
+    && proof.signalShapeAccepted === true && proof.replayEligible === true
+    && LANE_1_INSTRUCTIONS.has(proof.acceptedInstruction) && !proof.error;
+  if (!accepted) {
+    return Object.freeze({ attempted: true, ok: false, state: 'BROKEN', at,
+      evidenceAt: proof.at ?? null, ingressId: proof.ingressId ?? null,
+      error: proof.error ?? 'TV_AUTHENTICATED_INGRESS_INVALID' });
+  }
+  return Object.freeze({ attempted: true, ok: true, state: 'HEALTHY', at,
+    evidenceAt: proof.at, ingressId: proof.ingressId,
+    instruction: proof.acceptedInstruction,
+    recent: fresh(proof.at, Number(now), SYSTEM_HEALTH.RECENT_SIGNAL_MS), error: null });
 }
 
 function fresh(value, nowMs, staleMs = SYSTEM_HEALTH.LIVE_PROBE_STALE_MS) {
@@ -60,7 +89,7 @@ function tapeSource(spyProbe, vixProbe) {
 export function buildSystemHealth({
   now = Date.now(), dashboardVersion = 'local', marketVersion = 'unknown',
   storageProbe, schwabAuth, schwabConnection, custody, laneState,
-  tradingViewEndpointProbe, tradingViewTape, spyProbe, vixProbe,
+  tradingViewIngressHealth: tvIngress, tradingViewTape, spyProbe, vixProbe,
   marketIdentityProbe, discordProbe,
 } = {}) {
   const nowMs = Number(now);
@@ -94,37 +123,52 @@ export function buildSystemHealth({
       : (marketIdentityProbe?.error ?? spyProbe?.error ?? vixProbe?.error ?? 'MARKET SERVICE UNPROVEN'),
     providerSource);
 
-  const endpointOk = liveProbe(tradingViewEndpointProbe, nowMs);
+  const ingressProven = tvIngress?.state === 'HEALTHY' && tvIngress.ok === true;
+  const ingressBroken = tvIngress?.state === 'BROKEN';
   const tvTapeFresh = tradingViewTape?.source === 'TRADINGVIEW'
     && Number.isFinite(tradingViewTape.spy) && Number.isFinite(tradingViewTape.vix)
     && fresh(tradingViewTape.asOf, nowMs, SYSTEM_HEALTH.TAPE_STALE_MS);
-  const tvOk = endpointOk && (!marketOpen || tvTapeFresh);
-  const tv = row('TV', tvOk ? 'GREEN' : 'RED', tvOk ? 'LIVE' : 'DOWN',
-    tvTapeFresh ? tradingViewTape.asOf : tradingViewEndpointProbe?.at,
-    tvOk ? (marketOpen ? 'ENDPOINT + TRADINGVIEW TAPE' : 'ENDPOINT REACHABLE · MARKET CLOSED')
-      : (tradingViewEndpointProbe?.error ?? (marketOpen ? 'TRADINGVIEW TAPE STALE' : 'ENDPOINT UNREACHABLE')),
-    tvTapeFresh ? 'TRADINGVIEW' : 'TRADINGVIEW_ENDPOINT');
+  const tvBroken = ingressBroken || (ingressProven && marketOpen && !tvTapeFresh);
+  const tvColor = tvBroken ? 'RED' : ingressProven ? 'GREEN' : 'AMBER';
+  const tvStatus = tvBroken ? 'DOWN' : ingressProven ? 'LIVE' : 'UNPROVEN';
+  const evidenceIdentity = tvIngress?.ingressId
+    ? ` · ingress ${tvIngress.ingressId}` : '';
+  const tvDetail = ingressBroken
+    ? (tvIngress?.error ?? 'TV_AUTHENTICATED_INGRESS_FAILED')
+    : ingressProven && marketOpen && !tvTapeFresh
+      ? 'AUTHENTICATED INGRESS PROVEN · TRADINGVIEW TAPE STALE'
+      : ingressProven
+        ? `HEALTHY · ${tvIngress.recent ? 'RECENT SIGNAL' : 'NO NEW SIGNAL'} · ${tvIngress.instruction}${evidenceIdentity}`
+        : 'UNPROVEN · NO ACCEPTED SIGNAL ON THIS VERSION · SILENCE IS NOT A FAULT';
+  const tv = row('TV', tvColor, tvStatus,
+    tvTapeFresh ? tradingViewTape.asOf : tvIngress?.evidenceAt,
+    tvDetail, ingressProven ? 'D1_AUTHENTICATED_INGRESS' : 'UNPROVEN');
 
   const discordOk = liveProbe(discordProbe, nowMs);
   const discord = row('DISCORD', discordOk ? 'GREEN' : 'RED', discordOk ? 'LIVE' : 'DOWN',
     discordProbe?.at, discordOk ? 'SILENT WEBHOOK VALIDATION' : (discordProbe?.error ?? 'NEVER_PROBED'),
     'DISCORD_WEBHOOK_GET');
 
-  const connectorsOk = [d1, schwab, market, tv, discord].every((entry) => entry.color === 'GREEN');
+  const tvPreflightPass = tv.color === 'GREEN'
+    || (tv.color === 'AMBER' && tv.status === 'UNPROVEN');
+  const connectorsOk = [d1, schwab, market, discord].every((entry) => entry.color === 'GREEN')
+    && tvPreflightPass;
   const armed = laneState?.armed === true;
   const laneFault = laneState?.configurationFault ?? laneState?.fault?.faultCode ?? null;
   const botReady = armed && connectorsOk && !laneFault;
   const bot = row('BOT', botReady ? 'GREEN' : 'RED', botReady ? 'READY' : armed ? 'BLOCKED' : 'OFF',
     laneState?.updatedAt ?? schwabAuth?.at,
-    botReady ? (marketOpen ? 'ARMED · READY FOR VALID TV SIGNAL' : 'WAITING · MARKET CLOSED')
+    botReady ? (tv.status === 'UNPROVEN' ? 'ARMED · WAITING FOR FIRST SIGNAL PROOF'
+      : marketOpen ? 'ARMED · READY FOR VALID TV SIGNAL' : 'WAITING · MARKET CLOSED')
       : (!armed ? 'DISARMED' : (laneFault ?? 'CONNECTOR GATE FAILED')),
     'DURABLE_ARM_AND_FAIL_CLOSED_GATES');
 
   const rows = Object.freeze([d1, schwab, market, tv, discord, bot]);
+  const anyRed = rows.some((entry) => entry.color === 'RED');
   const allHealthy = rows.every((entry) => entry.color === 'GREEN');
   return Object.freeze({
-    status: allHealthy ? 'ALL HEALTHY' : 'ACTION REQUIRED',
-    color: allHealthy ? 'GREEN' : 'RED',
+    status: allHealthy ? 'ALL HEALTHY' : anyRed ? 'ACTION REQUIRED' : 'UNPROVEN',
+    color: allHealthy ? 'GREEN' : anyRed ? 'RED' : 'AMBER',
     checkedAt: new Date(nowMs).toISOString(),
     versions: Object.freeze({ dashboard: dashboardVersion, market: marketVersion }),
     rows,

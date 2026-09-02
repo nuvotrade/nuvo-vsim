@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSystemHealth, proofsForWorker } from '../cloudflare/system-health.js';
+import { buildSystemHealth, proofsForWorker,
+  tradingViewIngressHealth } from '../cloudflare/system-health.js';
 import { handleLane1TvWebhook } from '../cloudflare/lane-1-runtime.js';
 import {
   discordWebhookProbe, fullDashboard, liveDashboardScript, rewriteDesignHtml,
-  tradingViewEndpointProbe,
 } from '../cloudflare/worker.js';
 
 const NOW = Date.parse('2026-08-28T20:00:00.000Z');
@@ -21,7 +21,9 @@ function healthy(extra = {}) {
     schwabConnection: { status: 'CONNECTED' },
     custody: { observedAt: at(-2_000) },
     laneState: { armed: true, updatedAt: at(-500) },
-    tradingViewEndpointProbe: probe(),
+    tradingViewIngressHealth: { attempted: true, ok: true, state: 'HEALTHY',
+      at: at(-1_000), evidenceAt: at(-1_000), ingressId: 'INGRESS-1',
+      instruction: 'SELL_SHORT', recent: true },
     tradingViewTape: { source: 'TRADINGVIEW', spy: 770.11, vix: 15.03, asOf: at(-1_000) },
     spyProbe: probe({ value: 769.27, source: 'POLYGON_SNAPSHOT', asOf: at(-500) }),
     vixProbe: probe({ value: 14.82, source: 'MASSIVE', asOf: at(-600) }),
@@ -44,7 +46,9 @@ test('configuration alone proves nothing and fail-closed state stays red', () =>
   const model = buildSystemHealth({ now: NOW, schwabConnection: { status: 'CONNECTED' },
     laneState: { armed: true } });
   assert.equal(model.status, 'ACTION REQUIRED');
-  assert.ok(model.rows.every((row) => row.color === 'RED'));
+  assert.ok(model.rows.filter((row) => row.label !== 'TV')
+    .every((row) => row.color === 'RED'));
+  assert.equal(byLabel(model).TV.color, 'AMBER');
   assert.equal(byLabel(model).BOT.status, 'BLOCKED');
 });
 
@@ -89,16 +93,74 @@ test('valid recent operational proof survives a Worker version change', () => {
   assert.equal(proof.LANE_1_TV_TAPE.currentWorker, false);
 });
 
-test('same-host invalid-signal response proves the TradingView endpoint without a secret', async () => {
-  const calls = [];
-  const result = await tradingViewEndpointProbe({ PUBLIC_ORIGIN: 'https://example.test' }, async (url, init) => {
-    calls.push({ url: String(url), method: init.method, body: init.body });
-    return new Response(JSON.stringify({ faultCode: 'LANE_1_INVALID_SIGNAL', sent: false }), {
-      status: 400, headers: { 'content-type': 'application/json' },
-    });
-  });
-  assert.equal(result.ok, true);
-  assert.deepEqual(calls, [{ url: 'https://example.test/lane/tv', method: 'POST', body: '{}' }]);
+test('TV health is UNPROVEN on a new Worker and silence never becomes broken', () => {
+  const prior = { id: 'INGRESS-PRIOR', event_type: 'LANE_1_TV_INGRESS',
+    created_at: at(-18 * 60 * 60 * 1000), detail_json: JSON.stringify({
+      workerVersion: 'prior', ingressKind: 'ORDER_SIGNAL', signalShapeAccepted: true,
+      replayEligible: true, acceptedInstruction: 'SELL_SHORT' }) };
+  const proof = proofsForWorker([prior], 'current').LANE_1_TV_INGRESS;
+  const health = tradingViewIngressHealth(proof, 'current', NOW);
+  assert.equal(health.state, 'UNPROVEN');
+  const model = healthy({ tradingViewIngressHealth: health,
+    schwabAuth: probe({ session: 'CLOSED' }), tradingViewTape: null });
+  const tv = byLabel(model).TV;
+  assert.equal(tv.color, 'AMBER');
+  assert.equal(tv.status, 'UNPROVEN');
+  assert.match(tv.detail, /SILENCE IS NOT A FAULT/u);
+  assert.doesNotMatch(tv.detail, /STALE|BROKEN/u);
+  assert.equal(byLabel(model).BOT.color, 'GREEN');
+  assert.match(byLabel(model).BOT.detail, /WAITING FOR FIRST SIGNAL PROOF/u);
+  assert.equal(model.status, 'UNPROVEN');
+});
+
+test('accepted current-version ingress flips TV to green and records time and ingress ID', () => {
+  const record = { id: 'INGRESS-CURRENT', event_type: 'LANE_1_TV_INGRESS',
+    created_at: at(-2_000), detail_json: JSON.stringify({ workerVersion: 'current',
+      ingressKind: 'ORDER_SIGNAL', signalShapeAccepted: true, replayEligible: true,
+      acceptedInstruction: 'SELL_SHORT' }) };
+  const proof = proofsForWorker([record], 'current').LANE_1_TV_INGRESS;
+  const health = tradingViewIngressHealth(proof, 'current', NOW);
+  assert.equal(health.state, 'HEALTHY');
+  assert.equal(health.ingressId, 'INGRESS-CURRENT');
+  assert.equal(health.evidenceAt, at(-2_000));
+  const tv = byLabel(healthy({ tradingViewIngressHealth: health })).TV;
+  assert.equal(tv.color, 'GREEN');
+  assert.match(tv.detail, /INGRESS-CURRENT/u);
+});
+
+test('explicit failed authenticated ingress is red and can never report healthy', () => {
+  const record = { id: 'INGRESS-BROKEN', event_type: 'LANE_1_TV_INGRESS',
+    created_at: at(-2_000), detail_json: JSON.stringify({ workerVersion: 'current',
+      ingressKind: 'ORDER_SIGNAL', signalShapeAccepted: false, replayEligible: false,
+      signalFaultCode: 'LANE_1_INVALID_SIGNAL' }) };
+  const proof = proofsForWorker([record], 'current').LANE_1_TV_INGRESS;
+  const health = tradingViewIngressHealth(proof, 'current', NOW);
+  assert.equal(health.state, 'BROKEN');
+  const tv = byLabel(healthy({ tradingViewIngressHealth: health,
+    schwabAuth: probe({ session: 'CLOSED' }), tradingViewTape: null })).TV;
+  assert.equal(tv.color, 'RED');
+  assert.equal(tv.status, 'DOWN');
+});
+
+test('old accepted current-version ingress remains healthy without inferring STALE', () => {
+  const record = { id: 'INGRESS-OLD', event_type: 'LANE_1_TV_INGRESS',
+    created_at: at(-4 * 60 * 60 * 1000), detail_json: JSON.stringify({ workerVersion: 'current',
+      ingressKind: 'ORDER_SIGNAL', signalShapeAccepted: true, replayEligible: true,
+      acceptedInstruction: 'BUY' }) };
+  const health = tradingViewIngressHealth(
+    proofsForWorker([record], 'current').LANE_1_TV_INGRESS, 'current', NOW);
+  assert.equal(health.recent, false);
+  const tv = byLabel(healthy({ tradingViewIngressHealth: health,
+    schwabAuth: probe({ session: 'CLOSED' }), tradingViewTape: null })).TV;
+  assert.equal(tv.color, 'GREEN');
+  assert.match(tv.detail, /HEALTHY · NO NEW SIGNAL/u);
+  assert.doesNotMatch(tv.detail, /STALE|BROKEN/u);
+});
+
+test('Worker source contains no self-referential POST to the order ingress route', () => {
+  const source = readFileSync(new URL('../cloudflare/worker.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /PUBLIC_ORIGIN[\s\S]{0,600}\/lane\/tv/u);
+  assert.doesNotMatch(source, /\/lane\/tv[\s\S]{0,180}body:\s*'\{\}'/u);
 });
 
 test('Discord heartbeat uses silent GET validation and sends no message', async () => {

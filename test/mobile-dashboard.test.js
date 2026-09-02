@@ -42,7 +42,7 @@ test('BOT emergency DISARM is the first phone surface and reports coordinator tr
   assert.match(script, /function setLaneUnconfirmed\(\)[\s\S]{0,260}text\(node, 'UNCONFIRMED'\)/u);
   assert.match(script, /if \(laneControlInFlight\) return;/u);
   assert.match(script, /finally \{\s*laneControlInFlight = false;/u);
-  assert.match(script, /if \(action === 'laneArm' && !window\.confirm/u);
+  assert.match(script, /if \(action === 'laneArm'\)[\s\S]{0,900}if \(!window\.confirm/u);
   assert.doesNotMatch(script, /action === 'laneDisarm'[^\n]{0,160}window\.confirm/u);
   assert.doesNotMatch(script, /bot-arm-state[^\n]{0,180}(?:fetch|api\()/u);
 });

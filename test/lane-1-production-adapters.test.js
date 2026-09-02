@@ -256,25 +256,79 @@ test('market preview retains SHORT only when BUY and SELL_SHORT both clear exact
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('dashboard ARM directly enables the durable lane without preview or order', async () => {
+test('dashboard ARM reads live FLAT coordinator state and selects flat-only arm', async () => {
   const calls = [];
   const stub = {
+    async laneV2Status() {
+      calls.push({ status: true });
+      return { armed: false, stage: 'FLAT', positionSide: 'FLAT' };
+    },
     async laneV2PrincipalArm(value) {
       calls.push(value);
-      return { armed: true, stage: 'FLAT', expiresAt: value.expiresAt };
+      return { armed: true, stage: 'FLAT', positionSide: 'FLAT', expiresAt: value.expiresAt };
     },
+    async laneV2PrincipalArmExisting() { throw new Error('WRONG_TRANSITION'); },
   };
   const result = await armLane1FromDashboard({
     env: { ACCOUNT_COORDINATOR: { getByName: (owner) => {
       assert.equal(owner, 'OWNER'); return stub;
-    } } }, ownerId: 'OWNER', now: () => Date.parse('2026-08-28T18:55:00.000Z'),
+    } } }, ownerId: 'OWNER', principalConfirmation: 'ARM_LANE_1_CURRENT_STATE',
+    now: () => Date.parse('2026-08-28T18:55:00.000Z'),
   });
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, { armed: true, state: 'FLAT',
     reason: 'PRINCIPAL_DASHBOARD_ARM',
+    positionSide: 'FLAT', instructionAllowed: ['BUY', 'SELL_SHORT'],
     expiresAt: '2026-08-29T18:55:00.000Z' });
-  assert.deepEqual(calls, [{ reason: 'PRINCIPAL_DASHBOARD_ARM',
+  assert.deepEqual(calls, [{ status: true }, { reason: 'PRINCIPAL_DASHBOARD_ARM',
     armedAt: '2026-08-28T18:55:00.000Z', expiresAt: '2026-08-29T18:55:00.000Z' }]);
+});
+
+test('dashboard ARM reads live OPEN_SHORT and routes only to guarded arm-existing', async () => {
+  const calls = [];
+  const acquiredAt = new Date().toISOString();
+  const coordinator = {
+    async status() { calls.push('live-status');
+      return { armed: false, stage: 'OPEN_SHORT', positionSide: 'SHORT' }; },
+    async principalArm() { throw new Error('WRONG_FLAT_TRANSITION'); },
+    async principalArmExisting(value) {
+      calls.push('arm-existing');
+      assert.equal(value.principalConfirmation, 'ARM_EXISTING_SHORT_1_SPY');
+      assert.equal(value.brokerSnapshot.positionSide, 'SHORT');
+      return { armed: true, stage: 'OPEN_SHORT', positionSide: 'SHORT',
+        expiresAt: value.expiresAt };
+    },
+  };
+  const result = await armLane1FromDashboard({ env: {}, ownerId: 'OWNER',
+    principalConfirmation: 'ARM_LANE_1_CURRENT_STATE', dependencies: {
+      coordinator,
+      client: { async lane1V21SendSnapshot() { calls.push('broker'); return {
+        accountHash: 'ACCOUNT', positionSide: 'SHORT', acquiredAt, workingOrders: [],
+      }; } },
+    } });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.positionSide, 'SHORT');
+  assert.equal(result.body.instructionAllowed, 'BUY_TO_COVER');
+  assert.deepEqual(calls, ['live-status', 'broker', 'arm-existing']);
+});
+
+test('dashboard ARM names FAULT and pending-fill refusals before either transition', async () => {
+  for (const [state, faultCode] of [
+    [{ armed: false, stage: 'FAULT', positionSide: 'SHORT', fault: { faultCode: 'TEST' } },
+      'LANE_1_ARM_FAULT_PRESENT'],
+    [{ armed: false, stage: 'FILL_PENDING_FEE', positionSide: 'SHORT', pendingFill: {} },
+      'LANE_1_ARM_FILL_PENDING'],
+  ]) {
+    let transitionCalls = 0;
+    const coordinator = { async status() { return state; },
+      async principalArm() { transitionCalls += 1; },
+      async principalArmExisting() { transitionCalls += 1; } };
+    const result = await armLane1FromDashboard({ env: {}, ownerId: 'OWNER',
+      principalConfirmation: 'ARM_LANE_1_CURRENT_STATE', dependencies: { coordinator } });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.faultCode, faultCode);
+    assert.equal(transitionCalls, 0);
+  }
 });
 
 test('dashboard DISARM persists directly without invoking the Discord notifier', async () => {
@@ -334,10 +388,12 @@ test('dashboard DISARM is idempotent but still requires authoritative readback',
 
 test('dashboard control-state read exposes coordinator truth and rejects an incomplete state', async () => {
   const env = { ACCOUNT_COORDINATOR: { getByName: () => ({
-    laneV2Status: async () => ({ armed: false, stage: 'DISARMED', updatedAt: 'NOW' }),
+    laneV2Status: async () => ({ armed: false, stage: 'DISARMED', positionSide: 'FLAT',
+      pendingFill: null, fault: null, updatedAt: 'NOW' }),
   }) } };
   assert.deepEqual(await lane1ControlStateFromDashboard({ env, ownerId: 'OWNER' }), {
-    status: 200, body: { armed: false, state: 'DISARMED', updatedAt: 'NOW' },
+    status: 200, body: { armed: false, state: 'DISARMED', positionSide: 'FLAT',
+      pendingFill: false, faultCode: null, updatedAt: 'NOW' },
   });
   const incomplete = { ACCOUNT_COORDINATOR: { getByName: () => ({
     laneV2Status: async () => ({ stage: 'DISARMED' }),

@@ -7,8 +7,8 @@ import { readFile } from 'node:fs/promises';
 let mf;
 before(async () => {
   const coordinatorMutations = {
-    ARM_CLEARS_POSITION: ["stage='OPEN_SHORT',position_side='SHORT',updated_at=?",
-      "stage='FLAT',position_side='FLAT',updated_at=?"],
+    ARM_CLEARS_POSITION: ['      armedAt, expiresAt, `OPEN_${side}`, side, armedAt);',
+      "      armedAt, expiresAt, 'FLAT', 'FLAT', armedAt);"],
     DIFFERING_RECOVERY_IDENTITY_IS_NOOP: ['if (sameLane1FillIdentity(state.entryIdentity.identity, identity)) {',
       'if (true || sameLane1FillIdentity(state.entryIdentity.identity, identity)) {'],
     ARM_EXISTING_PERMITS_WRONG_EXIT: ['      || seal?.brokerInstruction !== expectedInstruction) {', ') {'],
@@ -252,4 +252,54 @@ test('arm-existing preserves recovered SHORT and the coordinator admits only BUY
   assert.equal(cover.result.claimed, true);
   assert.equal(cover.result.state.stage, 'EXIT_SENDING');
   assert.equal(cover.result.state.positionSide, 'SHORT');
+});
+
+test('arm-existing preserves recovered LONG and admits only SELL', async () => {
+  const owner = 'ARM-EXISTING-LONG-OWNER';
+  const now = Date.now();
+  const armedAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + 86_400_000).toISOString();
+  const seal = { brokerInstruction: 'BUY', quantityShares: 1,
+    clientOrderId: 'CLIENT-1', tvBodyBindingSha256: hash(), proposalHash: hash('d') };
+  assert.equal((await rpc(owner, 'laneV2PrincipalArm', {
+    reason: 'PRINCIPAL_DASHBOARD_ARM', armedAt, expiresAt })).status, 200);
+  assert.equal((await rpc(owner, 'laneV2Claim', { signal: 'LONG', seal })).result.claimed, true);
+  await rpc(owner, 'laneV2RecordAccepted', { signal: 'LONG', brokerOrderId: 'ORDER-1',
+    acceptedAt: new Date(now + 1).toISOString() });
+  await rpc(owner, 'laneV2RecordPendingFill', { signal: 'LONG', seal,
+    accepted: { brokerOrderId: 'ORDER-1', acceptedAt: new Date(now + 1).toISOString() },
+    ownerId: owner, brokerOrderId: 'ORDER-1', clientOrderId: 'CLIENT-1', side: 'BUY',
+    startedAt: new Date(now + 1).toISOString(), deadlineAt: new Date(now + 120_001).toISOString(),
+    pendingReason: 'MISSING_FEE', tvBodyBindingSha256: hash() });
+  await rpc(owner, 'laneV2RecordFault', { faultCode: 'MISSING_FEE', brokerOrderId: 'ORDER-1',
+    at: new Date(now + 2).toISOString() });
+  const longIdentity = identity({ instruction: 'BUY' });
+  const longEvidence = evidence();
+  for (const value of Object.values(longEvidence)) value.instruction = 'BUY';
+  const longUnit = { ...unit(), state: 'OPEN_LONG', positionSide: 'LONG',
+    events: unit().events.map((event) => ({ ...event, side: 'BUY' })) };
+  const recovered = await rpc(owner, 'laneV2RecoverOpen', { signal: 'LONG', unit: longUnit,
+    identity: longIdentity, evidenceOrigin: 'BROKER_LEDGER_RECONSTRUCTION',
+    captureEvidence: longEvidence, receiptId: 'RECEIPT-LONG', brokerSnapshot: snapshot('LONG'),
+    principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN' });
+  assert.equal(recovered.status, 200, JSON.stringify(recovered));
+  const armed = await rpc(owner, 'laneV2PrincipalArmExisting', {
+    reason: 'PRINCIPAL_DASHBOARD_ARM_EXISTING', principalConfirmation: 'ARM_EXISTING_LONG_1_SPY',
+    armedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    brokerSnapshot: snapshot('LONG') });
+  assert.equal(armed.status, 200, JSON.stringify(armed));
+  assert.equal(armed.result.stage, 'OPEN_LONG');
+  assert.equal(armed.result.positionSide, 'LONG');
+  for (const [signal, brokerInstruction] of [
+    ['LONG', 'BUY'], ['SHORT', 'SELL_SHORT'], ['EXIT', 'BUY_TO_COVER'],
+  ]) {
+    const refused = await rpc(owner, 'laneV2Claim', { signal,
+      seal: { ...seal, brokerInstruction } });
+    assert.equal(refused.result.claimed, false, brokerInstruction);
+  }
+  const sell = await rpc(owner, 'laneV2Claim', { signal: 'EXIT',
+    seal: { ...seal, brokerInstruction: 'SELL' } });
+  assert.equal(sell.result.claimed, true);
+  assert.equal(sell.result.state.stage, 'EXIT_SENDING');
+  assert.equal(sell.result.state.positionSide, 'LONG');
 });
