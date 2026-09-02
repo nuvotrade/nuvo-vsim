@@ -2165,7 +2165,10 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
-    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + botLedgerStyles + mobileStyles + e3Styles + '<style>body{visibility:hidden}body.live-ready{visibility:visible}</style></head>')
+    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + botLedgerStyles + mobileStyles + e3Styles + `<style>
+      body:not(.live-ready) .shell{visibility:hidden}
+      body:not(.live-ready)::before{content:'Loading live account data…';position:fixed;inset:0;display:grid;place-items:center;color:#8fa49b;background:#03100c;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase}
+    </style></head>`)
     .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
     .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="decisions">Decisions</button><button class="nav-button" data-view="bot">BOT</button>')
     .replace('<button class="nav-button" data-view="system">System</button>', e3Nav + '<button class="nav-button" data-view="system">System</button>')
@@ -4148,14 +4151,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   relocateOverviewEvidencePanels();
   relocateTopOpportunities();
   scrubPreviewLanguage();
-  document.body.classList.add('live-ready');
-  text(q('.header-status strong'), 'Running live audit…');
   refresh().catch(error => {
     text(q('.header-status strong'), 'Live data unavailable');
     text(q('.safety-title'), '◇  FAIL-CLOSED');
     text(q('.safety-banner p'), 'The protected live state could not be loaded: ' + error.message + '. No synthetic account or opportunity values are displayed.');
     qa('.metric-value').forEach(node => text(node, 'UNAVAILABLE'));
     qa('tbody').forEach(clear);
+    document.body.classList.add('live-ready');
   });
   window.setInterval(pollLane1EventLedger, 5_000);
 })();`;

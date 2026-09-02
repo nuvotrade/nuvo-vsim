@@ -118,6 +118,9 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /today-pnl-card \.metric-value\{font-variant-numeric:tabular-nums/u);
     assert.doesNotMatch(rewriteSource, /today-pnl-card \.metric-value\{[^}]*font-(?:size|weight)/u);
     assert.doesNotMatch(rewriteSource, /today-pnl-card \.metric-value\{[^}]*line-height/u);
+    assert.match(html, /body:not\(\.live-ready\) \.shell\{visibility:hidden\}/u);
+    assert.match(html, /Loading live account data/u);
+    assert.doesNotMatch(html, /body\{visibility:hidden\}/u);
   });
 
   test('ships syntactically valid live bindings for every protected shadow surface', () => {
