@@ -32,6 +32,14 @@ test('broker SHORT against coordinator FLAT is prominent POSITION_DRIFT with bot
   assert.equal(result.broker.acquiredAt, '2026-09-01T13:35:11.000Z');
 });
 
+test('a coordinator fault does not fabricate POSITION_DRIFT when both positions agree', () => {
+  const result = buildLane1PositionProjection({ coordinatorState: coordinator('SHORT', 'FAULT'),
+    brokerSnapshot: broker('SHORT'), brokerRead: { ok: true } });
+  assert.equal(result.status, 'AGREE');
+  assert.equal(result.positionSide, 'SHORT');
+  assert.equal(result.coordinator.stage, 'FAULT');
+});
+
 test('broker failure labels coordinator belief unverified and coordinator FAULT never renders FLAT', () => {
   const unverified = buildLane1PositionProjection({ coordinatorState: coordinator('SHORT'),
     brokerSnapshot: broker('SHORT'), brokerRead: { ok: false, error: 'BROKER_UNREACHABLE',

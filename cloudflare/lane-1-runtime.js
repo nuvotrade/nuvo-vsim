@@ -750,6 +750,28 @@ export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
       const candidateIdentity = lane1FillIdentity({ fill: candidate,
         tvBodyBindingSha256: seal.tvBodyBindingSha256 });
       if (sameLane1FillIdentity(state.entryIdentity.identity, candidateIdentity)) {
+        if (state.stage === 'FAULT') {
+          const restored = await coordinator.recoverOpen({ signal: 'SHORT',
+            unit: state.latestUnit, identity: state.entryIdentity.identity,
+            evidenceOrigin: state.entryIdentity.evidenceOrigin,
+            captureEvidence: state.entryIdentity.captureEvidence,
+            receiptId: state.entryIdentity.receiptId, brokerSnapshot,
+            principalConfirmation });
+          if (restored.stage !== 'OPEN_SHORT' || restored.positionSide !== 'SHORT'
+            || restored.fault) {
+            return { status: 409, body: { state: restored.stage,
+              faultCode: 'LANE_1_RECOVERY_FAULT_NOT_CLEARED',
+              coordinatorPositionSide: restored.positionSide ?? 'UNKNOWN',
+              brokerPositionSide: brokerSnapshot.positionSide,
+              coordinatorUpdatedAt: restored.updatedAt ?? null,
+              brokerAcquiredAt: brokerSnapshot.acquiredAt } };
+          }
+          return { status: 200, body: { state: restored.stage,
+            disposition: 'BROKER_LEDGER_RECONSTRUCTION · INSTRUCTION_REFUSAL_FAULT_CLEARED',
+            positionSide: restored.positionSide,
+            receiptId: state.entryIdentity.receiptId,
+            qualifiedStage0Fill: false } };
+        }
         return { status: 200, body: { state: state.stage,
           disposition: 'BROKER_LEDGER_RECONSTRUCTION · IDEMPOTENT_NO_OP',
           positionSide: state.positionSide,

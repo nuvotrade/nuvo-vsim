@@ -171,6 +171,10 @@ test('contradictory TV instructions return named refusals before any claim or se
     const result = await h.controller.signal(signal(requested));
     assert.equal(result.status, 200); assert.equal(result.body.faultCode, faultCode);
     assert.equal(result.body.sent, false);
+    assert.equal(result.body.disposition, 'instruction-state-refused');
+    assert.equal(h.state().armed, true);
+    assert.equal(h.state().stage, positionSide === 'FLAT' ? 'FLAT' : 'OPEN_' + positionSide);
+    assert.equal(h.notices.length, 0);
     assert.equal(h.calls.some((entry) => /^(claim|market):/u.test(entry)), false);
   }
   const off = makeHarness({ armed: false });
@@ -360,12 +364,16 @@ test('four-action: numeric one exact SPY and exact body keys remain required', a
   }
 });
 
-test('four-action: SELL while SHORT refuses and never constructs a cover dispatch', async () => {
+test('four-action: SELL while SHORT refuses without faulting or constructing a cover dispatch', async () => {
   const h = makeHarness({ positionSide: 'SHORT' });
   const result = await h.controller.signal(signal('SELL'));
-  assert.deepEqual(result, { status: 200, body: { state: 'FAULT',
-    faultCode: 'LANE_1_SELL_REQUIRES_LONG', sent: false } });
-  assert.equal(h.state().fault.detail, 'LANE_1_SELL_REQUIRES_LONG');
+  assert.equal(result.status, 200);
+  assert.equal(result.body.state, 'OPEN_SHORT');
+  assert.equal(result.body.disposition, 'instruction-state-refused');
+  assert.equal(result.body.faultCode, 'LANE_1_SELL_REQUIRES_LONG');
+  assert.equal(result.body.sent, false);
+  assert.equal(h.state().armed, true);
+  assert.equal(h.state().fault, undefined);
   assert.deepEqual(h.calls, ['position:SHORT']);
   assert.deepEqual(h.writes, []);
 });

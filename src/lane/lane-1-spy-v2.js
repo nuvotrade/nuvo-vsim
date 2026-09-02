@@ -88,6 +88,18 @@ function faultCode(error) {
     ?? 'LANE_1_SYSTEM_FAULT';
 }
 
+const INSTRUCTION_STATE_REFUSALS = new Set([
+  'LANE_1_BUY_REQUIRES_FLAT',
+  'LANE_1_SELL_REQUIRES_LONG',
+  'LANE_1_SELL_SHORT_REQUIRES_FLAT',
+  'LANE_1_BUY_TO_COVER_REQUIRES_SHORT',
+]);
+
+function instructionStateRefusal(error) {
+  const code = faultCode(error);
+  return INSTRUCTION_STATE_REFUSALS.has(code) ? code : null;
+}
+
 export async function lane1V2ProposalSeal({ signal, rawSignalSide,
   tvBodyBindingSha256, positionSide, now, uuid, prior = null }) {
   const normalized = normalizeLane1V21Signal(rawSignalSide);
@@ -298,7 +310,12 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
         expectedSnapshot = await broker.sendSnapshot();
         custody = custodyDisposition(state, expectedSnapshot, body.side);
       }
-      catch (error) { return recordFault(error); }
+      catch (error) {
+        const refusal = instructionStateRefusal(error);
+        if (refusal) return noSend('instruction-state-refused', state,
+          { faultCode: refusal, tvBodyBindingSha256 });
+        return recordFault(error);
+      }
       if (custody) return custody;
       let session;
       try { session = await marketSession(); } catch (error) { return recordFault(error); }
@@ -309,7 +326,12 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
         rawSignalSide: body.side, tvBodyBindingSha256, positionSide,
         now: instant, uuid, prior: state.open?.seal ?? null });
       try { assertLane1InstructionState({ instruction: seal.brokerInstruction, positionSide, quantity: 1 }); }
-      catch (error) { return recordFault(error); }
+      catch (error) {
+        const refusal = instructionStateRefusal(error);
+        if (refusal) return noSend('instruction-state-refused', state,
+          { faultCode: refusal, tvBodyBindingSha256 });
+        return recordFault(error);
+      }
       const claim = await coordinator.claim({ signal: normalized.signal, seal });
       if (!claim.claimed) return noSend('duplicate-in-flight', claim.state);
       state = claim.state;

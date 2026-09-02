@@ -43,10 +43,11 @@ export function buildLane1PositionProjection({ coordinatorState, brokerSnapshot 
   const brokerError = brokerRead?.ok === false
     ? String(brokerRead.error ?? 'BROKER_UNREACHABLE') : null;
   const coordinatorUnknown = coordinator.positionSide === 'UNKNOWN'
-    || ['UNKNOWN', 'FAULT'].includes(coordinator.stage);
+    || coordinator.stage === 'UNKNOWN';
+  const coordinatorFaulted = coordinator.stage === 'FAULT';
 
   if (brokerError || !broker) {
-    return Object.freeze({ status: 'UNVERIFIED', positionSide: coordinatorUnknown
+    return Object.freeze({ status: 'UNVERIFIED', positionSide: coordinatorUnknown || coordinatorFaulted
       ? 'UNKNOWN' : coordinator.positionSide, coordinator, broker,
     brokerRead: { ok: false, error: brokerError ?? 'BROKER_SNAPSHOT_UNAVAILABLE',
       attemptedAt: brokerRead?.attemptedAt ?? null,

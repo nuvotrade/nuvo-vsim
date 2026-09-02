@@ -69,6 +69,7 @@ test('broker-ledger reconstruction reads broker first, creates a strict recovere
       assert.equal(payload.principalConfirmation, 'RECONCILE_BROKER_LEDGER_OPEN');
       assert.equal(payload.identity.transactionActivityId, '129577264235');
       assert.equal(payload.unit.openingFeeCents, -2);
+      if (current.fault?.faultCode === 'UNRELATED_BROKER_FAULT') return current;
       current = { ...current, stage: 'OPEN_SHORT', positionSide: 'SHORT',
         latestUnit: payload.unit, fault: null, entryIdentity: {
           identity: payload.identity, evidenceOrigin: payload.evidenceOrigin,
@@ -99,6 +100,27 @@ test('broker-ledger reconstruction reads broker first, creates a strict recovere
   assert.equal(second.body.disposition, 'BROKER_LEDGER_RECONSTRUCTION · IDEMPOTENT_NO_OP');
   assert.deepEqual(calls, ['broker', 'coordinator', 'candidate']);
   assert.equal(receipts.length, 1);
+
+  current = { ...current, armed: false, stage: 'FAULT',
+    fault: { faultCode: 'LANE_1_BUY_REQUIRES_FLAT' } };
+  calls.length = 0;
+  const restored = await reconcileLane1OpenFromBrokerLedger({ env: {}, ownerId: 'OWNER',
+    principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN', dependencies });
+  assert.equal(restored.body.disposition,
+    'BROKER_LEDGER_RECONSTRUCTION · INSTRUCTION_REFUSAL_FAULT_CLEARED');
+  assert.equal(restored.body.state, 'OPEN_SHORT');
+  assert.deepEqual(calls, ['broker', 'coordinator', 'candidate', 'transition']);
+  assert.equal(receipts.length, 1);
+
+  current = { ...current, armed: false, stage: 'FAULT',
+    fault: { faultCode: 'UNRELATED_BROKER_FAULT' } };
+  calls.length = 0;
+  const unrelated = await reconcileLane1OpenFromBrokerLedger({ env: {}, ownerId: 'OWNER',
+    principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN', dependencies });
+  assert.equal(unrelated.status, 409);
+  assert.equal(unrelated.body.faultCode, 'LANE_1_RECOVERY_FAULT_NOT_CLEARED');
+  assert.equal(unrelated.body.state, 'FAULT');
+  assert.deepEqual(calls, ['broker', 'coordinator', 'candidate', 'transition']);
 });
 
 test('broker failure makes no reconstruction or coordinator correction', async () => {

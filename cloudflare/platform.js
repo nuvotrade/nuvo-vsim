@@ -584,6 +584,24 @@ export class VsimAccountCoordinator extends DurableObject {
     const recovery = { identity, evidenceOrigin, captureEvidence, receiptId };
     if (state.entryIdentity) {
       if (sameLane1FillIdentity(state.entryIdentity.identity, identity)) {
+        const recoverableInstructionFault = state.stage === 'FAULT'
+          && ['LANE_1_BUY_REQUIRES_FLAT', 'LANE_1_SELL_REQUIRES_LONG',
+            'LANE_1_SELL_SHORT_REQUIRES_FLAT',
+            'LANE_1_BUY_TO_COVER_REQUIRES_SHORT'].includes(state.fault?.faultCode);
+        if (recoverableInstructionFault) {
+          const at = new Date().toISOString();
+          this.ctx.storage.transactionSync(() => {
+            this.sql.exec(`UPDATE lane_1_spy_v2_state SET armed=0,stage=?,position_side=?,
+              pending_fill_json=NULL,fault_json=NULL,updated_at=? WHERE singleton=1`,
+            `OPEN_${signal}`, signal, at);
+            this.#laneV2Record('RECOVERY_RESTORED', {
+              reason: 'BROKER_LEDGER_RECONSTRUCTION · INSTRUCTION_REFUSAL_FAULT_CLEARED',
+              instruction: state.fault.faultCode, positionSide: signal,
+              receiptId: state.entryIdentity.receiptId,
+            }, at);
+          });
+          return this.#laneV2State({ changed: true });
+        }
         return this.#laneV2State({ changed: false });
       }
       await this.laneV2RecordFault({ faultCode: 'LANE_1_RECOVERY_IDENTITY_CONFLICT',
