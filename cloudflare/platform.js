@@ -533,10 +533,16 @@ export class VsimAccountCoordinator extends DurableObject {
   async laneV2RecordOpen({ signal, unit, identity, evidenceOrigin, captureEvidence, receiptId }) {
     if (!['LONG', 'SHORT'].includes(signal)) throw new Error('LANE_1_OPEN_RECORD_INVALID');
     const state = this.#laneV2State();
+    assertLane1FillIdentity(identity); assertLane1FillEvidence(captureEvidence, evidenceOrigin, identity);
     if (!['FILL_PENDING_EXECUTION', 'FILL_PENDING_FEE'].includes(state.stage)) {
+      if (state.stage === `OPEN_${signal}` && state.positionSide === signal
+        && state.latestUnit?.openingFillId === identity.executionActivityId
+        && state.entryIdentity?.receiptId === receiptId
+        && sameLane1FillIdentity(state.entryIdentity?.identity, identity)) {
+        return this.#laneV2State({ changed: false });
+      }
       throw new Error('LANE_1_OPEN_PENDING_STATE_REQUIRED');
     }
-    assertLane1FillIdentity(identity); assertLane1FillEvidence(captureEvidence, evidenceOrigin, identity);
     if (identity.instruction !== (signal === 'LONG' ? 'BUY' : 'SELL_SHORT')
       || identity.brokerOrderId !== state.pendingFill?.brokerOrderId
       || identity.clientOrderId !== state.pendingFill?.clientOrderId
@@ -557,7 +563,7 @@ export class VsimAccountCoordinator extends DurableObject {
         manifestHash: unit.manifestHash, evidenceOrigin, receiptId, identity,
         captureIds: Object.values(captureEvidence).map((capture) => capture.captureId) }, at);
     });
-    return this.#laneV2State();
+    return this.#laneV2State({ changed: true });
   }
 
   async laneV2RecoverOpen({ signal, unit, identity, evidenceOrigin, captureEvidence,
@@ -692,10 +698,20 @@ export class VsimAccountCoordinator extends DurableObject {
 
   async laneV2RecordExit({ unit, cancellation, identity, evidenceOrigin, captureEvidence, receiptId }) {
     const state = this.#laneV2State();
+    assertLane1FillIdentity(identity); assertLane1FillEvidence(captureEvidence, evidenceOrigin, identity);
     if (!['FILL_PENDING_EXECUTION', 'FILL_PENDING_FEE'].includes(state.stage)) {
+      const lastExit = [...this.sql.exec(`SELECT detail_json FROM lane_1_spy_v2_history
+        WHERE event_type='EXIT_FILLED' ORDER BY sequence DESC LIMIT 1`)][0] ?? null;
+      let lastExitDetail = null;
+      try { lastExitDetail = JSON.parse(lastExit?.detail_json ?? 'null'); } catch { /* fail closed */ }
+      if (state.stage === 'FLAT' && state.positionSide === 'FLAT' && !state.pendingFill
+        && state.latestUnit?.closingFillId === identity.executionActivityId
+        && lastExitDetail?.receiptId === receiptId
+        && sameLane1FillIdentity(lastExitDetail?.identity, identity)) {
+        return this.#laneV2State({ changed: false });
+      }
       throw new Error('LANE_1_EXIT_PENDING_STATE_REQUIRED');
     }
-    assertLane1FillIdentity(identity); assertLane1FillEvidence(captureEvidence, evidenceOrigin, identity);
     const expectedInstruction = state.positionSide === 'LONG' ? 'SELL'
       : state.positionSide === 'SHORT' ? 'BUY_TO_COVER' : null;
     if (identity.instruction !== expectedInstruction
@@ -720,7 +736,41 @@ export class VsimAccountCoordinator extends DurableObject {
         evidenceOrigin, receiptId, identity,
         captureIds: Object.values(captureEvidence).map((capture) => capture.captureId) }, at);
     });
-    return this.#laneV2State();
+    return this.#laneV2State({ changed: true });
+  }
+
+  async laneV2ResolveCompletedExitFault({ brokerSnapshot, principalConfirmation }) {
+    const state = this.#laneV2State();
+    assertLane1SendSnapshot(brokerSnapshot);
+    const lastExit = [...this.sql.exec(`SELECT detail_json,created_at
+      FROM lane_1_spy_v2_history WHERE event_type='EXIT_FILLED'
+      ORDER BY sequence DESC LIMIT 1`)][0] ?? null;
+    let detail = null;
+    try { detail = JSON.parse(lastExit?.detail_json ?? 'null'); } catch { /* fail closed */ }
+    const fresh = Date.now() - Date.parse(brokerSnapshot.acquiredAt);
+    if (principalConfirmation !== 'RESOLVE_COMPLETED_EXIT_FAULT'
+      || state.armed || state.stage !== 'FAULT' || state.positionSide !== 'FLAT'
+      || state.fault?.faultCode !== 'LANE_1_EXIT_PENDING_STATE_REQUIRED'
+      || state.pendingFill || brokerSnapshot.positionSide !== 'FLAT'
+      || !Number.isFinite(fresh) || fresh < 0 || fresh > 5_000
+      || !state.latestUnit?.closingFillId || state.latestUnit?.positionSide !== 'FLAT'
+      || detail?.fillId !== state.latestUnit.closingFillId
+      || String(detail?.brokerOrderId ?? '') !== String(state.fault?.brokerOrderId ?? '')
+      || !detail?.receiptId || !Number.isSafeInteger(detail?.realizedPnlCents)) {
+      throw new Error('LANE_1_COMPLETED_EXIT_FAULT_RESOLUTION_REFUSED');
+    }
+    const at = new Date().toISOString();
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`UPDATE lane_1_spy_v2_state SET armed=0,stage='FLAT',position_side='FLAT',
+        pending_fill_json=NULL,fault_json=NULL,updated_at=? WHERE singleton=1`, at);
+      this.#laneV2Record('COMPLETED_EXIT_FAULT_RESOLVED', {
+        priorFaultCode: state.fault.faultCode, brokerOrderId: detail.brokerOrderId,
+        fillId: detail.fillId, receiptId: detail.receiptId,
+        realizedPnlCents: detail.realizedPnlCents,
+        reason: 'BROKER_VERIFIED_DUPLICATE_COMPLETION_RECOVERY',
+      }, at);
+    });
+    return this.#laneV2State({ changed: true });
   }
 
   async laneV2RecordFault(detail) {

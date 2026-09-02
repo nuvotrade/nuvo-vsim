@@ -4,6 +4,7 @@ import {
   bindLane1V21ReplayBody, createLane1SpyV2Controller, lane1V2ProposalSeal, normalizeLane1V21Signal,
   replayBodyFromAuthenticatedLane1V21Signal,
 } from '../src/lane/lane-1-spy-v2.js';
+import { resumeLane1PendingFill } from '../cloudflare/lane-1-runtime.js';
 import { syntheticSnapshot } from './fixtures/lane-1-synthetic-state.js';
 
 const SECRET = 'v2-secret';
@@ -133,17 +134,26 @@ function makeHarness({ armed = true, configArmed = armed,
         } };
     },
   };
+  const bundleStore = { async write(bundle) { writes.push(bundle); return { objectPrefix: 'test/unit' }; } };
+  const notifier = { async send(message) { notices.push(message); } };
+  const receiptStore = { async write(receipt) {
+    return { id: `RECEIPT-${receipt.identity.executionActivityId}` };
+  } };
   const controller = createLane1SpyV2Controller({
     config: { armed: configArmed, armedAt: state.armedAt, ttlMs: 86_400_000,
       ownerId: 'owner-1', secret: SECRET,
       notificationsReady: true }, coordinator, broker,
-    bundleStore: { async write(bundle) { writes.push(bundle); return { objectPrefix: 'test/unit' }; } },
-    notifier: { async send(message) { notices.push(message); } },
-    receiptStore: { async write(receipt) { return { id: `RECEIPT-${receipt.identity.executionActivityId}` }; } },
+    bundleStore, notifier, receiptStore,
     marketSession: async () => market, now: () => NOW,
     uuid: (() => { let n = 0; return () => '00000000-0000-4000-8000-' + String(++n).padStart(12, '0'); })(),
   });
-  return { controller, calls, writes, notices, state: () => structuredClone(state) };
+  const completePending = () => resumeLane1PendingFill({ env: {}, ownerId: 'owner-1',
+    coordinator, now: () => NOW + 2_000, dependencies: {
+      client: { waitForLane1V2RecordedFill: (_ownerId, pending) => broker.waitForFill(pending) },
+      bundleStore, receiptStore, notifier,
+    } });
+  return { controller, completePending, calls, writes, notices,
+    state: () => structuredClone(state) };
 }
 
 test('TV vocabulary is exactly four broker instructions with explicit exit intent', () => {
@@ -189,7 +199,9 @@ test('TV BUY then TV SELL creates two market order ids and resolves flat while A
   const h = makeHarness();
   const opened = await h.controller.signal(signal('BUY'));
   assert.equal(opened.status, 200); assert.equal(opened.body.brokerOrderId, 'TV-ORDER-1');
-  assert.equal(opened.body.positionSide, 'LONG');
+  assert.equal(opened.body.state, 'FILL_PENDING_EXECUTION');
+  await h.completePending();
+  assert.equal(h.state().positionSide, 'LONG');
   assert.match(opened.body.tvBodyBindingSha256, /^[a-f0-9]{64}$/u);
   assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')), ['market:BUY:true']);
   const openingEvents = JSON.parse(h.writes[0].bytes['order-events.json']).appendLog;
@@ -200,7 +212,9 @@ test('TV BUY then TV SELL creates two market order ids and resolves flat while A
 
   const exited = await h.controller.signal(signal('SELL'));
   assert.equal(exited.status, 200); assert.equal(exited.body.brokerOrderId, 'TV-ORDER-2');
-  assert.equal(exited.body.positionSide, 'FLAT'); assert.equal(exited.body.realizedPnlCents, 250);
+  assert.equal(exited.body.state, 'FILL_PENDING_EXECUTION');
+  await h.completePending();
+  assert.equal(h.state().positionSide, 'FLAT');
   assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
     ['market:BUY:true', 'market:SELL:true']);
   assert.equal(h.writes[1].manifest.status, 'RESOLVED_FLAT');
@@ -215,21 +229,26 @@ test('SELL_SHORT opens and only BUY_TO_COVER closes the synthetic short round tr
   const h = makeHarness();
   const opened = await h.controller.signal(signal('SELL_SHORT'));
   assert.equal(opened.body.brokerOrderId, 'TV-ORDER-1');
+  await h.completePending();
   const exited = await h.controller.signal(signal('BUY_TO_COVER'));
   assert.equal(exited.body.brokerOrderId, 'TV-ORDER-2');
+  await h.completePending();
   assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
     ['market:SELL_SHORT:true', 'market:BUY_TO_COVER:true']);
-  assert.equal(exited.body.positionSide, 'FLAT');
+  assert.equal(h.state().positionSide, 'FLAT');
 });
 
 test('ARM remains live after explicit SELL and a later opening starts a new episode', async () => {
   const h = makeHarness();
-  assert.equal((await h.controller.signal(signal('BUY'))).body.disposition, 'opened');
-  assert.equal((await h.controller.signal(signal('SELL'))).body.disposition, 'exited');
+  assert.equal((await h.controller.signal(signal('BUY'))).body.disposition, 'fill-pending-execution');
+  await h.completePending();
+  assert.equal((await h.controller.signal(signal('SELL'))).body.disposition, 'fill-pending-execution');
+  await h.completePending();
   const reopened = await h.controller.signal(signal('SELL_SHORT'));
   assert.equal(reopened.status, 200);
-  assert.equal(reopened.body.disposition, 'opened');
-  assert.equal(reopened.body.positionSide, 'SHORT');
+  assert.equal(reopened.body.disposition, 'fill-pending-execution');
+  await h.completePending();
+  assert.equal(h.state().positionSide, 'SHORT');
   assert.equal(h.writes.length, 3);
   const reopenedEvents = JSON.parse(h.writes[2].bytes['order-events.json']).appendLog;
   assert.equal(reopenedEvents.filter((row) => row.eventType === 'EQUITY_FILL').length, 1);
@@ -240,8 +259,9 @@ test('MISSING_FEE is durable FILL_PENDING_FEE and never a terminal fault', async
   const h = makeHarness({ fillFault: 'FILL_PENDING_FEE' });
   const result = await h.controller.signal(signal('SELL_SHORT'));
   assert.equal(result.status, 200);
-  assert.equal(result.body.state, 'FILL_PENDING_FEE');
-  assert.equal(result.body.disposition, 'fill-pending-fee');
+  assert.equal(result.body.state, 'FILL_PENDING_EXECUTION');
+  const polled = await h.completePending();
+  assert.equal(polled.status, 'FILL_PENDING_FEE');
   assert.equal(result.body.faultCode, null);
   assert.equal(result.body.sent, true);
   assert.equal(h.state().armed, true);
@@ -271,8 +291,10 @@ test('durable Principal ARM enables BUY and SELL while environment stays OFF', a
   const h = makeHarness({ armed: true, configArmed: false });
   const opened = await h.controller.signal(signal('BUY'));
   assert.equal(opened.status, 200); assert.equal(opened.body.brokerOrderId, 'TV-ORDER-1');
+  await h.completePending();
   const exited = await h.controller.signal(signal('SELL'));
   assert.equal(exited.status, 200); assert.equal(exited.body.brokerOrderId, 'TV-ORDER-2');
+  await h.completePending();
   assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
     ['market:BUY:true', 'market:SELL:true']);
   assert.equal(h.state().armed, true);
@@ -426,12 +448,15 @@ for (const instruction of ['BUY', 'SELL', 'SELL_SHORT', 'BUY_TO_COVER']) {
     const h = makeHarness();
     if (instruction === 'SELL' || instruction === 'BUY_TO_COVER') {
       const opening = instruction === 'SELL' ? 'BUY' : 'SELL_SHORT';
-      assert.equal((await h.controller.signal(signal(opening))).body.disposition, 'opened');
+      assert.equal((await h.controller.signal(signal(opening))).body.disposition,
+        'fill-pending-execution');
+      await h.completePending();
       h.calls.length = 0;
     }
     const result = await h.controller.signal(signal(instruction));
     assert.equal(result.status, 200);
     assert.equal(result.body.sent, true, 'synthetic dispatch, not a live fill');
+    await h.completePending();
     assert.deepEqual(h.calls.filter((entry) => entry.startsWith('market:')),
       [`market:${instruction}:true`]);
     const proposals = JSON.parse(h.writes.at(-1).bytes['order-events.json']).appendLog

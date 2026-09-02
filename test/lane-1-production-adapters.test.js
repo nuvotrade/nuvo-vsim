@@ -331,6 +331,36 @@ test('dashboard ARM names FAULT and pending-fill refusals before either transiti
   }
 });
 
+test('dashboard ARM broker-verifies and clears only the exact completed-exit race fault', async () => {
+  const calls = [];
+  let state = { armed: false, stage: 'FAULT', positionSide: 'FLAT',
+    fault: { faultCode: 'LANE_1_EXIT_PENDING_STATE_REQUIRED' } };
+  const coordinator = {
+    async status() { calls.push('status'); return structuredClone(state); },
+    async resolveCompletedExitFault({ brokerSnapshot, principalConfirmation }) {
+      calls.push('resolve');
+      assert.equal(principalConfirmation, 'RESOLVE_COMPLETED_EXIT_FAULT');
+      assert.equal(brokerSnapshot.positionSide, 'FLAT');
+      state = { armed: false, stage: 'FLAT', positionSide: 'FLAT', fault: null };
+      return { ...state, changed: true };
+    },
+    async principalArm(value) { calls.push('arm');
+      state = { ...state, armed: true, expiresAt: value.expiresAt };
+      return state; },
+  };
+  const result = await armLane1FromDashboard({ env: {}, ownerId: 'OWNER',
+    principalConfirmation: 'ARM_LANE_1_CURRENT_STATE', dependencies: {
+      coordinator, client: { async lane1V21SendSnapshot() { calls.push('broker'); return {
+        accountHash: 'ACCOUNT', positionSide: 'FLAT', acquiredAt: new Date().toISOString(),
+        workingOrders: [],
+      }; } },
+    } });
+  assert.equal(result.status, 200, JSON.stringify(result));
+  assert.equal(result.body.armed, true);
+  assert.equal(result.body.state, 'FLAT');
+  assert.deepEqual(calls, ['status', 'broker', 'status', 'resolve', 'status', 'arm']);
+});
+
 test('dashboard DISARM persists directly without invoking the Discord notifier', async () => {
   const calls = [];
   const stub = {

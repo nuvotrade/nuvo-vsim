@@ -400,6 +400,7 @@ function coordinatorV2Adapter(env, ownerId) {
     recordMarketValidation: (value) => stub.laneV2RecordMarketValidation(value),
     principalArm: (value) => stub.laneV2PrincipalArm(value),
     principalArmExisting: (value) => stub.laneV2PrincipalArmExisting(value),
+    resolveCompletedExitFault: (value) => stub.laneV2ResolveCompletedExitFault(value),
     recoverOpen: (value) => stub.laneV2RecoverOpen(value),
     disarm: (value) => stub.laneV2Disarm(value),
     status: () => stub.laneV2Status(),
@@ -484,11 +485,27 @@ function bundleStore(env, ownerId) {
 function fillReceiptStore(env, ownerId) {
   return {
     async write(receipt) {
-      const proof = await recordOperationalProof(env, ownerId, 'LANE_1_FILL_RECEIPT', {
-        qualifiedStage0Fill: receipt.evidenceOrigin === 'SCHWAB_WIRE_CAPTURE', ...receipt,
-      });
-      if (!proof?.id) throw new Error('LANE_1_FILL_RECEIPT_WRITE_FAILED');
-      return proof;
+      if (!env.DB?.prepare || !ownerId) throw new Error('LANE_1_FILL_RECEIPT_STORAGE_UNAVAILABLE');
+      const qualifiedStage0Fill = receipt.evidenceOrigin === 'SCHWAB_WIRE_CAPTURE';
+      const detail = { qualifiedStage0Fill, ...receipt };
+      const identityKey = await sha256(canonical({ ownerId, type: receipt.type,
+        identity: receipt.identity }));
+      const id = `lane-1-fill-${identityKey}`;
+      const createdAt = String(receipt.recordedAt ?? new Date().toISOString());
+      const workerVersion = env.CF_VERSION_METADATA?.id ?? 'local';
+      await env.DB.prepare(`INSERT OR IGNORE INTO operational_audit
+        (id,owner_id,event_type,detail_json,created_at) VALUES (?,?,?,?,?)`).bind(
+        id, ownerId, 'LANE_1_FILL_RECEIPT', JSON.stringify({ ...detail, workerVersion }), createdAt,
+      ).run();
+      const stored = await env.DB.prepare(`SELECT owner_id,event_type,detail_json,created_at
+        FROM operational_audit WHERE id=? LIMIT 1`).bind(id).first();
+      const storedDetail = parseObject(stored?.detail_json);
+      const { workerVersion: _storedWorkerVersion, ...storedReceipt } = storedDetail ?? {};
+      if (stored?.owner_id !== ownerId || stored?.event_type !== 'LANE_1_FILL_RECEIPT'
+        || !storedDetail || canonical(storedReceipt) !== canonical(detail)) {
+        throw new Error('LANE_1_FILL_RECEIPT_IDENTITY_CONFLICT');
+      }
+      return { id, createdAt: stored.created_at, changed: stored.created_at === createdAt };
     },
   };
 }
@@ -614,9 +631,11 @@ export async function resumeLane1PendingFill({ env, ownerId, coordinator,
       priceUsdPerShare: unit.openingPriceUsdPerShare, feesCents: unit.openingFeeCents,
       netCents: unit.netCashMovementCents, brokerOrderId: pending.brokerOrderId,
       tvBodyBindingSha256: pending.tvBodyBindingSha256, evidenceOrigin };
-  await (dependencies.notifier ?? notifier(env, ownerId)).send(notice);
+  if (next.changed !== false) {
+    await (dependencies.notifier ?? notifier(env, ownerId)).send(notice);
+  }
   return { status: next.stage, terminal: true, receiptId: receipt.id,
-    manifestHash: unit.manifestHash };
+    manifestHash: unit.manifestHash, changed: next.changed !== false };
 }
 
 export async function validateLane1V21Market({ env, ownerId }) {
@@ -664,8 +683,17 @@ export async function armLane1FromDashboard({ env, ownerId, principalConfirmatio
       faultCode: 'LANE_1_ARM_FILL_PENDING' } };
   }
   if (liveState?.fault || liveState?.stage === 'FAULT') {
-    return { status: 409, body: { armed: false, state: liveState?.stage,
-      faultCode: 'LANE_1_ARM_FAULT_PRESENT' } };
+    if (liveState?.fault?.faultCode === 'LANE_1_EXIT_PENDING_STATE_REQUIRED') {
+      const repaired = await resolveLane1CompletedExitFault({ env, ownerId,
+        principalConfirmation: 'RESOLVE_COMPLETED_EXIT_FAULT',
+        dependencies: { ...dependencies, coordinator } });
+      if (repaired.status !== 200) return { status: repaired.status, body: {
+        armed: false, state: liveState?.stage, faultCode: repaired.body.faultCode } };
+      liveState = await coordinator.status();
+    } else {
+      return { status: 409, body: { armed: false, state: liveState?.stage,
+        faultCode: 'LANE_1_ARM_FAULT_PRESENT' } };
+    }
   }
   if (['OPEN_SHORT', 'OPEN_LONG'].includes(liveState?.stage)) {
     const side = liveState.stage === 'OPEN_SHORT' ? 'SHORT' : 'LONG';
@@ -694,6 +722,38 @@ export async function armLane1FromDashboard({ env, ownerId, principalConfirmatio
       expiresAt: state.expiresAt } };
   } catch (error) {
     return { status: 422, body: { armed: false,
+      faultCode: String(error?.message ?? error).split(':')[0] } };
+  }
+}
+
+export async function resolveLane1CompletedExitFault({ env, ownerId,
+  principalConfirmation, dependencies = {} }) {
+  if (principalConfirmation !== 'RESOLVE_COMPLETED_EXIT_FAULT') {
+    return { status: 400, body: { state: 'REFUSED',
+      faultCode: 'LANE_1_COMPLETED_EXIT_FAULT_CONFIRMATION_REQUIRED' } };
+  }
+  const coordinator = dependencies.coordinator ?? coordinatorV2Adapter(env, ownerId);
+  const client = dependencies.client ?? new SchwabD1Client(env);
+  let brokerSnapshot;
+  try {
+    // Broker first: the stale coordinator fault is never trusted as position truth.
+    brokerSnapshot = await client.lane1V21SendSnapshot(ownerId, {
+      accountHash: env.LANE_1_SCHWAB_ACCOUNT_HASH ?? null,
+    });
+  } catch (error) {
+    return { status: 503, body: { state: 'UNKNOWN',
+      faultCode: 'BROKER_UNREACHABLE', detail: String(error?.message ?? error) } };
+  }
+  try {
+    const before = await coordinator.status();
+    const state = await coordinator.resolveCompletedExitFault({ brokerSnapshot,
+      principalConfirmation });
+    return { status: 200, body: { state: state.stage, armed: state.armed === true,
+      positionSide: state.positionSide, changed: state.changed !== false,
+      priorFaultCode: before?.fault?.faultCode ?? null,
+      brokerAcquiredAt: brokerSnapshot.acquiredAt } };
+  } catch (error) {
+    return { status: 409, body: { state: 'REFUSED',
       faultCode: String(error?.message ?? error).split(':')[0] } };
   }
 }

@@ -51,6 +51,19 @@ function exactFillInstructions(events) {
   return result;
 }
 
+function uniqueFillEvents(events) {
+  const seen = new Set();
+  return events.filter((event) => {
+    if (event.event !== 'FILL') return true;
+    const key = event.fillId
+      ? [event.fillId, event.brokerOrderId, event.instruction, event.fillType].join('||')
+      : event.recordId;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function buildLane1BotSummary(events, coordinatorState, {
   now = Date.now(), positionProjection = null,
 } = {}) {
@@ -58,13 +71,14 @@ export function buildLane1BotSummary(events, coordinatorState, {
   const stateAvailable = coordinatorState && typeof coordinatorState === 'object';
   const rows = historyAvailable ? events : [];
   const today = newYorkDate(now);
-  const fillEvents = rows.filter((event) => event.event === 'FILL'
+  const uniqueRows = uniqueFillEvents(rows);
+  const fillEvents = uniqueRows.filter((event) => event.event === 'FILL'
     && event.qualifiedStage0Fill === true);
   const todayFills = fillEvents.filter((event) => newYorkDate(event.timestamp) === today);
-  const exits = rows.filter((event) => event.sourceEventType === 'LANE_1_FILL_RECEIPT'
+  const exits = uniqueRows.filter((event) => event.sourceEventType === 'LANE_1_FILL_RECEIPT'
     && event.fillType === 'EXIT_FILLED' && event.qualifiedStage0Fill === true);
   const todayExits = exits.filter((event) => newYorkDate(event.timestamp) === today);
-  const exactFills = exactFillInstructions(rows);
+  const exactFills = exactFillInstructions(uniqueRows);
   const matrix = {};
   for (const instruction of LANE_1_INSTRUCTIONS) {
     const preview = [...rows].reverse().find((event) => event.instruction === instruction
@@ -205,7 +219,11 @@ export function buildLane1BotSummary(events, coordinatorState, {
           ? 'PREVIEW · CLEAR'
           : lastSignalPreview?.sourceEventType === 'LANE_1_ORDER_PREVIEW_REFUSED'
             ? `PREVIEW · ${lastSignalPreviewAttestation?.outcome ?? 'REFUSED'}`
-            : lastSignal.instruction ? 'CONTRACT_ACCEPTED · DISPATCH_OUTCOME_NOT_PERSISTED'
+            : lastSignal.instruction && faultCode
+              ? `CONTRACT_ACCEPTED · NO_DISPATCH · ${faultCode}`
+              : lastSignal.instruction && coordinatorState?.armed !== true
+                ? 'CONTRACT_ACCEPTED · NO_DISPATCH · ARM_OFF'
+                : lastSignal.instruction ? 'CONTRACT_ACCEPTED · DISPATCH_PENDING'
               : 'CONTRACT_REFUSED',
       recordId: lastSignal.recordId,
       previewReceiptId: lastSignalPreview?.recordId ?? null,
@@ -358,7 +376,8 @@ export async function lane1EventLedger(env, ownerId, { limit = 250,
       d1Read, coordinatorRead, stateRead, brokerRead, projectionRead,
   ]);
   const d1Events = d1Result.status === 'fulfilled'
-    ? (d1Result.value?.results ?? []).map(projectLane1LedgerRow).filter(Boolean) : [];
+    ? uniqueFillEvents((d1Result.value?.results ?? []).map(projectLane1LedgerRow).filter(Boolean))
+    : [];
   const receiptFillIds = new Set(d1Events.filter((event) => event.sourceEventType
     === 'LANE_1_FILL_RECEIPT' && event.fillId).map((event) => String(event.fillId)));
   const coordinatorEvents = coordinatorResult.status === 'fulfilled'

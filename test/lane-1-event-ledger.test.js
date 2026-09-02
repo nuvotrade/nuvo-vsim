@@ -199,6 +199,39 @@ test('Lane 1 summary counts only explicit fill receipts and uses captured exit r
   assert.equal(summary.pnl.aggregate.status, 'NOT_MEASURED');
 });
 
+test('duplicate delivery of one fill cannot double fills or realized P&L', () => {
+  const receipt = { event: 'FILL', sourceEventType: 'LANE_1_FILL_RECEIPT',
+    fillType: 'EXIT_FILLED', instruction: 'BUY_TO_COVER', qualifiedStage0Fill: true,
+    fillId: '129766132555', brokerOrderId: '1007804693875', realizedPnlCents: -324,
+    timestamp: '2026-09-02T18:00:07.571Z' };
+  const state = { armed: false, stage: 'FLAT', positionSide: 'FLAT', fault: null,
+    latestUnit: { symbol: 'SPY', quantity: 1, positionSide: 'FLAT' } };
+  const summary = buildLane1BotSummary([
+    { ...receipt, recordId: 'receipt-a' }, { ...receipt, recordId: 'receipt-b' },
+  ], state, { now: Date.parse('2026-09-02T23:00:00.000Z'),
+    positionProjection: projectionFor(state) });
+  assert.equal(summary.fills.today, 1);
+  assert.equal(summary.fills.total, 1);
+  assert.deepEqual(summary.pnl.realizedToday,
+    { valueCents: -324, source: 'LANE_1_FILL_RECEIPT' });
+});
+
+test('projected ledger renders one row when legacy audit contains duplicate receipts', async () => {
+  const detail = { type: 'EXIT_FILLED', qualifiedStage0Fill: true,
+    realizedPnlCents: -324, evidenceOrigin: 'SCHWAB_WIRE_CAPTURE', identity: {
+      executionActivityId: '129766132555', brokerOrderId: '1007804693875',
+      instruction: 'BUY_TO_COVER', quantityShares: 1,
+    } };
+  const state = { armed: false, stage: 'FLAT', positionSide: 'FLAT', fault: null,
+    latestUnit: { symbol: 'SPY', quantity: 1, positionSide: 'FLAT' } };
+  const audit = [row('LANE_1_FILL_RECEIPT', detail, '2026-09-02T18:00:07.571Z', 'a'),
+    row('LANE_1_FILL_RECEIPT', detail, '2026-09-02T18:00:07.572Z', 'b')];
+  const ledger = await lane1EventLedger(environment(audit, [], state).env, 'owner-1');
+  assert.equal(ledger.events.filter((event) => event.event === 'FILL').length, 1);
+  assert.equal(ledger.counts.FILL, 1);
+  assert.equal(ledger.summary.pnl.realizedToday.valueCents, -324);
+});
+
 test('open BOT position exposes only complete coordinator fill economics', () => {
   const state = { armed: true, stage: 'OPEN_LONG', positionSide: 'LONG', fault: null,
     latestUnit: { symbol: 'SPY', quantity: 1, positionSide: 'LONG', openingFillId: 'FILL-1',

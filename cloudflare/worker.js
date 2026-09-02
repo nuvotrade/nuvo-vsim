@@ -45,7 +45,7 @@ import {
   handleLane1PreviewRequest, handleLane1TvWebhook,
   handlePrincipalFlatten, lane1ControlStateFromDashboard, lane1Status,
   latestLane1ReplayIngress, readBoundedJson, reconcileLane1OpenFromBrokerLedger,
-  recordOperationalProof, validateLane1V21Market,
+  recordOperationalProof, resolveLane1CompletedExitFault, validateLane1V21Market,
 } from './lane-1-runtime.js';
 import { lane1EventLedger } from './lane-1-event-ledger.js';
 import { buildSystemHealth, proofsForWorker,
@@ -4138,6 +4138,18 @@ async function route(request, env, ctx) {
     }
     const result = await reconcileLane1OpenFromBrokerLedger({ env, ownerId: owner.id,
       principalConfirmation: body?.confirm });
+    return json(result.body, result.status);
+  }
+  if (url.pathname === '/api/lane-1-spy/resolve-completed-exit-fault'
+    && request.method === 'POST') {
+    const body = await readBoundedJson(request, 1_024).catch(() => ({}));
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || JSON.stringify(Object.keys(body).sort()) !== JSON.stringify(['confirm'])) {
+      return json({ state: 'REFUSED',
+        faultCode: 'LANE_1_COMPLETED_EXIT_FAULT_REQUEST_INVALID' }, 400);
+    }
+    const result = await resolveLane1CompletedExitFault({ env, ownerId: owner.id,
+      principalConfirmation: body.confirm });
     return json(result.body, result.status);
   }
   if (url.pathname === '/api/lane-1-spy/arm-existing' && request.method === 'POST') {

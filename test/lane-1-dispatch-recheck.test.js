@@ -157,7 +157,9 @@ test('production runtime wiring carries snapshot and claim identity through to t
         ACCOUNT_COORDINATOR: { getByName: () => stub },
         EVIDENCE: previewEvidenceBucket() }, 'SYNTHETIC-OWNER');
       const result = await runtime.signal({ ticker: 'SPY', side: 'BUY', qty: 1, secret: 'SYNTHETIC-TEST-ONLY' });
-      assert.equal(result.body.faultCode, 'SYNTHETIC_STOP_AFTER_FAKE_POST');
+      assert.equal(result.body.faultCode, null);
+      assert.equal(result.body.state, 'FILL_PENDING_EXECUTION');
+      assert.equal(result.body.disposition, 'fill-pending-execution');
       assert.equal(scenario.mutationCount, 1);
       // Harness baseline + runtime baseline + mandatory final live-read mock.
       assert.equal(scenario.calls.filter((call) => call.includes('?fields=positions')).length, 3);

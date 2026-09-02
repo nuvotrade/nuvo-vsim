@@ -303,3 +303,65 @@ test('arm-existing preserves recovered LONG and admits only SELL', async () => {
   assert.equal(sell.result.state.stage, 'EXIT_SENDING');
   assert.equal(sell.result.state.positionSide, 'LONG');
 });
+
+test('exact exit redelivery is a no-op and its stale race fault clears only against broker FLAT', async () => {
+  const owner = 'EXIT-REDELIVERY-OWNER';
+  const timing = await faultedShortDispatch(owner);
+  await rpc(owner, 'laneV2RecoverOpen', { signal: 'SHORT', unit: unit(), identity: identity(),
+    evidenceOrigin: 'BROKER_LEDGER_RECONSTRUCTION', captureEvidence: evidence(),
+    receiptId: 'RECEIPT-ENTRY', brokerSnapshot: snapshot(),
+    principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN' });
+  await rpc(owner, 'laneV2PrincipalArmExisting', {
+    reason: 'PRINCIPAL_DASHBOARD_ARM_EXISTING', principalConfirmation: 'ARM_EXISTING_SHORT_1_SPY',
+    armedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    brokerSnapshot: snapshot() });
+  const exitSeal = { ...timing.seal, brokerInstruction: 'BUY_TO_COVER',
+    clientOrderId: 'CLIENT-EXIT', tvBodyBindingSha256: hash('e') };
+  assert.equal((await rpc(owner, 'laneV2Claim', { signal: 'EXIT', seal: exitSeal }))
+    .result.claimed, true);
+  const acceptedAt = new Date().toISOString();
+  await rpc(owner, 'laneV2RecordAccepted', { signal: 'EXIT', brokerOrderId: 'ORDER-EXIT',
+    acceptedAt });
+  await rpc(owner, 'laneV2RecordPendingFill', { signal: 'EXIT', seal: exitSeal,
+    accepted: { brokerOrderId: 'ORDER-EXIT', acceptedAt }, ownerId: owner,
+    brokerOrderId: 'ORDER-EXIT', clientOrderId: 'CLIENT-EXIT', side: 'BUY_TO_COVER',
+    startedAt: acceptedAt, deadlineAt: new Date(Date.parse(acceptedAt) + 120_000).toISOString(),
+    pendingReason: 'EXECUTION', tvBodyBindingSha256: hash('e') });
+  const exitIdentity = identity({ brokerOrderId: 'ORDER-EXIT', clientOrderId: 'CLIENT-EXIT',
+    executionActivityId: 'EXECUTION-EXIT', transactionActivityId: 'TRANSACTION-EXIT',
+    instruction: 'BUY_TO_COVER', occurredAt: acceptedAt, priceUsdPerShare: 765.2,
+    tvBodyBindingSha256: hash('e') });
+  const exitEvidence = wireEvidence();
+  for (const value of Object.values(exitEvidence)) {
+    value.brokerOrderId = 'ORDER-EXIT'; value.clientOrderId = 'CLIENT-EXIT';
+    value.instruction = 'BUY_TO_COVER';
+  }
+  const exitUnit = { ...unit(), state: 'RESOLVED_FLAT', positionSide: 'FLAT',
+    closingFillId: 'EXECUTION-EXIT', closingPriceUsdPerShare: 765.2,
+    closingFeeCents: -2, totalFeesCents: -4, realizedPnlCents: -324,
+    updatedAt: acceptedAt, events: [...unit().events, { eventType: 'EQUITY_FILL',
+      fillId: 'EXECUTION-EXIT', brokerOrderId: 'ORDER-EXIT', clientOrderId: 'CLIENT-EXIT',
+      side: 'BUY_TO_COVER', symbol: 'SPY', quantityShares: 1,
+      executionPriceUsdPerShare: 765.2, feeCents: -2, brokerOccurredAt: acceptedAt }] };
+  const args = { unit: exitUnit, cancellation: null, identity: exitIdentity,
+    evidenceOrigin: 'SCHWAB_WIRE_CAPTURE', captureEvidence: exitEvidence,
+    receiptId: 'RECEIPT-EXIT' };
+  const first = await rpc(owner, 'laneV2RecordExit', args);
+  assert.equal(first.result.stage, 'FLAT');
+  assert.equal(first.result.changed, true);
+  const repeated = await rpc(owner, 'laneV2RecordExit', args);
+  assert.equal(repeated.status, 200, JSON.stringify(repeated));
+  assert.equal(repeated.result.changed, false);
+  const history = await rpc(owner, 'laneV2History', { limit: 100 });
+  assert.equal(history.result.events.filter((event) => event.event_type === 'EXIT_FILLED').length, 1);
+
+  await rpc(owner, 'laneV2RecordFault', { faultCode: 'LANE_1_EXIT_PENDING_STATE_REQUIRED',
+    brokerOrderId: 'ORDER-EXIT', at: new Date().toISOString() });
+  const resolved = await rpc(owner, 'laneV2ResolveCompletedExitFault', {
+    brokerSnapshot: snapshot('FLAT'), principalConfirmation: 'RESOLVE_COMPLETED_EXIT_FAULT' });
+  assert.equal(resolved.status, 200, JSON.stringify(resolved));
+  assert.equal(resolved.result.stage, 'FLAT');
+  assert.equal(resolved.result.positionSide, 'FLAT');
+  assert.equal(resolved.result.armed, false);
+  assert.equal(resolved.result.fault, null);
+});
