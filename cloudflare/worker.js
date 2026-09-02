@@ -2121,11 +2121,11 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
   </section>`;
   const additions = `<style>
     .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th,#calculators table td,#calculators table th{white-space:nowrap}.cc-directive,.cc-back{appearance:none;border:1px solid rgba(61,222,169,.55);border-radius:4px;background:rgba(35,196,143,.1);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:7px 10px;cursor:pointer}.cc-directive:hover,.cc-back:hover{background:rgba(35,196,143,.2)}.cc-unavailable{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.cc-status[data-state="blocked"],.csp-status[data-state="blocked"]{border-color:rgba(242,118,118,.38)}.cc-status[data-state="ready"],.csp-status[data-state="ready"]{border-color:rgba(96,226,168,.38)}.cc-reason,.cc-decision-impact{color:var(--text);line-height:1.55}.cc-rule{margin-top:12px;padding:11px 13px;border-left:2px solid var(--amber);background:rgba(244,186,97,.06);color:var(--amber);font-size:11px}.cc-tenors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.cc-tenor{padding:13px;border:1px solid var(--line);border-radius:5px;background:rgba(7,23,20,.42)}.cc-tenor strong,.cc-tenor span,.cc-tenor small{display:block}.cc-tenor strong{color:var(--green);font-size:16px}.cc-tenor span{margin:5px 0;color:var(--text);font-size:11px}.cc-tenor small{color:var(--muted);font-size:9px}.cc-metrics{margin-top:8px}.cc-decision-impact{margin:14px 0 0;color:var(--green)}.calculator-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.calculator-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.calculator-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.calculator-pane{display:grid;gap:12px}.calculator-pane[hidden]{display:none}.calculator-selector{margin-bottom:0}.calculator-symbols{display:flex;flex-wrap:wrap;gap:8px}.calculator-symbol{display:grid;grid-template-columns:auto auto;gap:3px 14px;align-items:center;text-align:left}.calculator-symbol b{color:var(--text)}.calculator-symbol small{grid-column:1/-1;color:var(--muted);font-size:8px}.calculator-symbol[data-actionable="false"]{border-color:var(--line);color:var(--amber);background:rgba(244,186,97,.05)}.csp-run{margin-top:12px}.csp-recommendation{border-color:rgba(96,226,168,.38)}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}.cc-tenors{grid-template-columns:1fr}.calculator-tabs{overflow:auto}.calculator-symbol{width:100%}}
-    .underwrite-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.underwrite-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.underwrite-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.underwrite-pane[hidden]{display:none}.underwrite-pane>.page-heading{display:none}.history-link{appearance:none;background:transparent;border:0;color:var(--green);cursor:pointer}.mandate-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}.attribution-row{width:100%;appearance:none;border:0;padding:4px;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:4px}.attribution-row:hover,.attribution-row.active{background:rgba(35,196,143,.1);outline:1px solid rgba(61,222,169,.25)}.performance-chart{touch-action:none;cursor:crosshair}.performance-chart .range-selection{fill:rgba(96,226,168,.14);stroke:#60e2a8;stroke-width:1}.performance-ledger{margin-top:16px}.ledger-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:12px;color:var(--muted);font-size:10px}.ledger-filters>span{margin-right:auto;color:var(--text)}.ledger-filters label{display:flex;align-items:center;gap:6px}.ledger-filters input{color:var(--text);background:#071712;border:1px solid var(--line);border-radius:4px;padding:6px;font:10px var(--mono);color-scheme:dark}.broker-activity{margin-top:16px}.broker-activity summary{cursor:pointer;color:var(--text);font-weight:700}.performance-ledger td,.performance-ledger th,.broker-activity td,.broker-activity th{white-space:nowrap}.system-history{scroll-margin-top:20px}.system-decisions{margin-top:28px;padding-top:28px;border-top:1px solid var(--line)}@media(max-width:680px){.mandate-metrics{grid-template-columns:1fr 1fr}.ledger-filters>span{width:100%;margin-right:0}}
+    .underwrite-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.underwrite-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.underwrite-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.underwrite-pane[hidden]{display:none}.underwrite-pane>.page-heading{display:none}.history-link{appearance:none;background:transparent;border:0;color:var(--green);cursor:pointer}.mandate-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}.attribution-row{width:100%;appearance:none;border:0;padding:4px;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:4px}.attribution-row:hover,.attribution-row.active{background:rgba(35,196,143,.1);outline:1px solid rgba(61,222,169,.25)}.performance-chart{touch-action:none;cursor:crosshair}.performance-chart .range-selection{fill:rgba(96,226,168,.14);stroke:#60e2a8;stroke-width:1}.performance-ledger{margin-top:16px}.ledger-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:12px;color:var(--muted);font-size:10px}.ledger-filters>span{margin-right:auto;color:var(--text)}.ledger-filters label{display:flex;align-items:center;gap:6px}.ledger-filters input{color:var(--text);background:#071712;border:1px solid var(--line);border-radius:4px;padding:6px;font:10px var(--mono);color-scheme:dark}.broker-activity{margin-top:16px}.broker-activity summary{cursor:pointer;color:var(--text);font-weight:700}.performance-ledger td,.performance-ledger th,.broker-activity td,.broker-activity th{white-space:nowrap}.system-history{scroll-margin-top:20px}.system-decisions{margin-top:28px;padding-top:28px;border-top:1px solid var(--line)}.system-decisions>.page-heading{align-items:center;margin-bottom:14px}.system-decisions>.page-heading h2{font-size:22px}.system-decisions .evidence-layout{grid-template-columns:minmax(0,2fr) minmax(220px,.7fr)}.guardian-panel .package-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 18px}@media(max-width:1000px){.system-decisions .evidence-layout{grid-template-columns:1fr}}@media(max-width:680px){.mandate-metrics{grid-template-columns:1fr 1fr}.ledger-filters>span{width:100%;margin-right:0}.guardian-panel .package-facts{grid-template-columns:1fr}}
     .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}}
   </style>`;
   const operationalStyles = `<style>
-    #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.environment-panel .score-ring{font-size:22px}.environment-panel .score-ring span{font-size:22px}.environment-panel .signal-grid small{line-height:1.35;min-height:24px}.environment-panel .confidence .bar{display:none}.evidence-operational-panels{margin:0 0 12px}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}.environment-panel[data-readiness="ready"] .regime{color:var(--green);border-color:rgba(96,226,168,.3);background:rgba(96,226,168,.07)}.environment-panel[data-readiness="waiting"] .regime{color:var(--amber);border-color:rgba(244,186,97,.3);background:rgba(244,186,97,.08)}.environment-panel[data-readiness="blocked"] .regime{color:var(--red);border-color:rgba(242,118,118,.3);background:rgba(242,118,118,.07)}#overview .system-brief .health-list li{align-items:center;gap:10px;padding:8px 0}#overview .system-brief .health-label{display:grid;grid-template-columns:10px 1fr;align-items:center;min-width:0}#overview .system-brief .health-label small{grid-column:2;color:var(--muted);font-size:7px;margin-top:2px;font-family:ui-monospace,monospace}#overview .system-brief .health-value{text-align:right;font-size:8px}#overview .system-brief .health-green{background:var(--green);box-shadow:0 0 6px rgba(96,226,168,.6)}#overview .system-brief .health-red{background:var(--red);box-shadow:0 0 6px rgba(242,118,118,.45)}#overview .system-brief .health-amber{background:var(--amber)}#overview .system-brief .health-tape{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font:8px/1.45 ui-monospace,monospace;white-space:normal}#overview .system-brief .tv-live-widget{margin-top:8px;min-height:44px;overflow:hidden;border:1px solid var(--line);border-radius:5px;background:#07110e}#overview .system-brief .tv-live-widget .tv-placeholder{padding:13px;color:var(--red);font:8px ui-monospace,monospace}@media(max-width:660px){.environment-panel .signal-grid{grid-template-columns:1fr}.environment-panel .signal-grid>div{border-right:0;border-bottom:1px solid var(--line)}.environment-panel .signal-grid>div:last-child{border-bottom:0}.environment-panel .signal-grid small{min-height:0}}
+    #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}#overview .system-brief .health-list li{align-items:center;gap:10px;padding:8px 0}#overview .system-brief .health-label{display:grid;grid-template-columns:10px 1fr;align-items:center;min-width:0}#overview .system-brief .health-label small{grid-column:2;color:var(--muted);font-size:7px;margin-top:2px;font-family:ui-monospace,monospace}#overview .system-brief .health-value{text-align:right;font-size:8px}#overview .system-brief .health-green{background:var(--green);box-shadow:0 0 6px rgba(96,226,168,.6)}#overview .system-brief .health-red{background:var(--red);box-shadow:0 0 6px rgba(242,118,118,.45)}#overview .system-brief .health-amber{background:var(--amber)}#overview .system-brief .health-tape{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font:8px/1.45 ui-monospace,monospace;white-space:normal}#overview .system-brief .tv-live-widget{margin-top:8px;min-height:44px;overflow:hidden;border:1px solid var(--line);border-radius:5px;background:#07110e}#overview .system-brief .tv-live-widget .tv-placeholder{padding:13px;color:var(--red);font:8px ui-monospace,monospace}
   </style>`;
   const systemHealthStyles = `<style>
     #overview .system-brief{min-width:0}.system-health-head{align-items:center;margin-bottom:14px}.system-overall{padding:6px 9px;border:1px solid currentColor;border-radius:4px;font:800 8px/1 ui-monospace,monospace;letter-spacing:.12em}.system-health-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.system-health-tile{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:55px;padding:12px 14px;border:1px solid currentColor;background:#07110e;font:700 10px/1 ui-monospace,monospace;letter-spacing:.1em}.system-health-tile>span{color:var(--muted)}.system-health-tile strong{display:flex;align-items:center;gap:7px}.health-light{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.system-green{color:var(--green)}.system-amber{color:var(--amber)}.system-red{color:var(--red)}.system-neutral{color:var(--muted)}.system-neutral .health-light{box-shadow:none}.system-health-details{margin-top:12px;border-top:1px solid var(--line);color:var(--muted);font:9px/1.45 ui-monospace,monospace}.system-health-details summary{padding:10px 0 4px;color:var(--muted);cursor:pointer}.system-health-details p{display:flex;justify-content:space-between;gap:12px;margin:0;padding:7px 0;border-top:1px solid rgba(28,48,42,.55)}.system-health-details p strong{color:var(--text)}.system-health-details p span{text-align:right}.system-health-meta{margin:12px 0 0;color:var(--muted);font:8px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}@media(max-width:660px){.system-health-grid{grid-template-columns:1fr}.system-health-details p{display:block}.system-health-details p span{display:block;margin-top:4px;text-align:left}}
@@ -2174,6 +2174,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .replace('<button class="nav-button" data-view="system">System</button>', e3Nav + '<button class="nav-button" data-view="system">System</button>')
     .replace(readinessScorecard, laneSummaryCard)
     .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
+    .replace(/\n\s{8}<div class="two-column">\n\s{10}<article class="panel environment-panel">[\s\S]*?\n\s{8}<\/div>(?=\n\n\s{8}<article class="panel table-panel">)/u, '')
     .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + bot + '\n      <section class="view" id="decisions"')
     .replace('<section class="view" id="system" aria-labelledby="system-title">', '<section class="view" id="system" aria-labelledby="system-title">' + mobileSystemCard)
     .replace('</main>', e3View + '</main>')
@@ -2344,133 +2345,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     }
   }
 
-  const marketSourceName = value => {
-    const source = String(value || '').toUpperCase();
-    if (source.includes('SCHWAB')) return 'Schwab market data';
-    if (source.includes('MASSIVE') || source.includes('POLYGON')) return 'Massive / Polygon market data';
-    return 'Market-data provider';
-  };
-
-  const marketFailureText = (value, symbol) => {
-    const code = String(value || '').toUpperCase();
-    const prefix = symbol ? symbol + ' ' : '';
-    if (/QUOTE.*STALE|STALE.*QUOTE/u.test(code)) return prefix + 'underlying quote is older than the allowed freshness window.';
-    if (/CHAIN.*STALE|STALE.*CHAIN/u.test(code)) return prefix + 'option chain is older than the allowed freshness window.';
-    if (/QUOTE.*MISSING|MISSING.*QUOTE|QUOTE.*UNAVAILABLE/u.test(code)) return prefix + 'underlying quote is missing.';
-    if (/CHAIN.*MISSING|MISSING.*CHAIN|CHAIN.*UNAVAILABLE/u.test(code)) return prefix + 'option chain is missing.';
-    if (/GREEK/u.test(code)) return prefix + 'option chain is missing required pricing Greeks.';
-    if (/EVENT/u.test(code)) return prefix + 'corporate-event calendar could not be verified.';
-    if (/SESSION/u.test(code)) return 'The market-session feed could not be verified.';
-    if (/TIMEOUT/u.test(code)) return 'The market-data provider did not respond before the safety timeout.';
-    return 'At least one required market input failed freshness or completeness checks.';
-  };
-
-  function marketReadiness(status) {
-    const market = status.marketCheck || null;
-    const marketState = market && market.marketState || {};
-    const symbols = market && Array.isArray(market.symbols) ? market.symbols : [];
-    const failed = symbols.find(row => row && (row.ok === false || (row.errors && row.errors.length))) || null;
-    const rawCode = marketState.error || (failed && failed.errors && failed.errors[0]) || null;
-    const session = String(marketState.status || '').toUpperCase();
-    const source = marketSourceName(market && (market.source || market.provider));
-    const symbol = failed && failed.symbol || null;
-    const rawUpper = String(rawCode || '').toUpperCase();
-    const affectedInput = /CHAIN|GREEK/u.test(rawUpper) ? 'Option chain'
-      : /EVENT/u.test(rawUpper) ? 'Event calendar'
-        : /SESSION/u.test(rawUpper) ? 'Market session' : 'Underlying quote';
-    const affectedAsOf = failed && (/CHAIN|GREEK/u.test(rawUpper) ? failed.chainAsOf : failed.quoteAsOf);
-    const baselineReady = ['CAPTURED', 'RECONCILED_CHECKPOINT'].includes(String(status.baseline && status.baseline.status || '').toUpperCase());
-    const controls = status.controls || {};
-    const diagnostics = {
-      market_check: market,
-      schwab_status: status.schwab || null,
-      reconciliation_checkpoint: status.baseline || null,
-      operator_controls: controls,
-    };
-
-    if (controls.independentKill) return {
-      state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
-      headline: 'New trade evaluation is blocked by the safety switch.',
-      summary: 'VSIM will not underwrite new exposure while the independent kill switch is active.',
-      blockerShort: 'Safety switch active', blocker: 'The independent kill switch is active.',
-      source: 'Constitutional control plane', sourceAsOf: controls.updatedAt ? when(controls.updatedAt) : 'Active now',
-      nextShort: 'MANUAL CLEAR', next: 'Evaluation resumes only after the cause is verified and the switch is explicitly cleared.',
-      userAction: 'Review required', diagnostics,
-    };
-    if (controls.globalPause) return {
-      state: 'waiting', badge: 'PAUSED', glyph: 'Ⅱ', allowed: 'NO',
-      headline: 'New trade evaluation is paused.',
-      summary: 'Scheduled and manual opportunity scans remain stopped; existing positions are unaffected.',
-      blockerShort: 'Global pause active', blocker: 'The global cycle pause is active.',
-      source: 'Operator control plane', sourceAsOf: controls.updatedAt ? when(controls.updatedAt) : 'Active now',
-      nextShort: 'MANUAL RESUME', next: 'Evaluation resumes after the pause reason is reviewed and cycles are explicitly resumed.',
-      userAction: 'Review required', diagnostics,
-    };
-    if (!connectorOk(status.schwab && status.schwab.status)) return {
-      state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
-      headline: 'New trade evaluation is blocked.',
-      summary: 'VSIM cannot verify the live Schwab account and will fail closed before underwriting.',
-      blockerShort: 'Schwab unavailable', blocker: 'The Schwab read-only connection is not currently verified.',
-      source: 'Schwab custody connection', sourceAsOf: when(status.schwab && status.schwab.lastSuccessfulSyncAt),
-      nextShort: 'AUTO RECHECK', next: 'The next cycle will recheck the connection. Reconnect Schwab if it remains unavailable.',
-      userAction: 'Only if persistent', diagnostics,
-    };
-    if (!baselineReady) return {
-      state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
-      headline: 'New trade evaluation is blocked.',
-      summary: 'VSIM cannot compare a new decision with a verified account checkpoint, so underwriting will not start.',
-      blockerShort: 'Checkpoint required', blocker: 'The Schwab reconciliation checkpoint is missing or no longer matches current custody.',
-      source: 'Schwab account checkpoint', sourceAsOf: when(status.baseline && status.baseline.observedAt),
-      nextShort: 'REFRESH NEEDED', next: 'Refresh and reconcile the read-only account checkpoint before the next scan.',
-      userAction: 'Checkpoint required', diagnostics,
-    };
-    if (!market) return {
-      state: 'waiting', badge: 'NOT CHECKED', glyph: '…', allowed: 'NO',
-      headline: 'Live market inputs have not been verified yet.',
-      summary: 'VSIM has no current basis for evaluating a new trade and will fail closed until verification completes.',
-      blockerShort: 'Verification pending', blocker: 'Quotes, option chains, session state, and events have not been checked.',
-      source, sourceAsOf: 'No verified timestamp',
-      nextShort: 'AUTO VERIFY', next: 'The next scheduled or manual scan will verify every required market input first.',
-      userAction: 'None', diagnostics,
-    };
-    if (!market.ok || rawCode) {
-      const blocker = marketFailureText(rawCode, symbol);
-      return {
-        state: 'blocked', badge: 'BLOCKED', glyph: '×', allowed: 'NO',
-        headline: 'New trade evaluation is blocked by invalid market data.',
-        summary: blocker + ' VSIM will not score or rank new trades from this input.',
-        blockerShort: symbol ? affectedInput + ' · ' + symbol : 'Market input invalid', blocker,
-        source: source + (symbol ? ' · ' + symbol : '') + ' · ' + affectedInput,
-        sourceAsOf: affectedAsOf ? when(affectedAsOf) : 'Timestamp missing',
-        nextShort: 'AUTO RECHECK', next: 'The next scheduled cycle will fetch fresh data and resume evaluation automatically after every check passes.',
-        userAction: 'None unless persistent', diagnostics,
-      };
-    }
-    if (session !== 'OPEN') {
-      const sessionText = session === 'PRE' ? 'Regular trading hours have not opened.'
-        : session === 'POST' ? 'Regular trading hours have ended.' : 'The market is closed.';
-      return {
-        state: 'waiting', badge: 'WAITING', glyph: '◷', allowed: 'NO',
-        headline: 'Market data is valid, but new trade evaluation is waiting for regular hours.',
-        summary: sessionText + ' This is a timing gate, not a system failure or investment rejection.',
-        blockerShort: 'Outside regular hours', blocker: sessionText,
-        source: source + ' · market session', sourceAsOf: marketState.asOf ? when(marketState.asOf) : when(market.checkedAt),
-        nextShort: 'AUTO RESUME', next: 'VSIM will recheck automatically and may evaluate once regular trading hours open with fresh data.',
-        userAction: 'None', diagnostics,
-      };
-    }
-    const contractCount = symbols.reduce((sum, row) => sum + Number(row.contractCount || 0), 0);
-    return {
-      state: 'ready', badge: 'READY', glyph: '✓', allowed: 'YES',
-      headline: 'Market and account inputs are valid for a new trade evaluation.',
-      summary: 'VSIM may underwrite current candidates now. Portfolio, risk, and constitutional gates still decide whether any proposal survives.',
-      blockerShort: 'Nothing', blocker: 'No market-data or account-readiness blocker is active.',
-      source: source, sourceAsOf: when(market.checkedAt),
-      nextShort: 'EVALUATE', next: number(contractCount) + ' live contracts across ' + number(symbols.length) + ' underlyings are available to the next scan.',
-      userAction: 'None', diagnostics,
-    };
-  }
-
   function scrubPreviewLanguage() {
     text(q('.header-status strong'), 'Protected shadow');
     text(q('.header-status small'), 'Loading verified data…');
@@ -2511,7 +2385,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     const decisions = q('#decisions');
     if (decisions) {
       const heading = q('.page-heading h2', decisions);
-      if (heading) heading.textContent = 'Decisions';
+      if (heading) heading.textContent = 'Decision evidence';
+      const kicker = q('.page-heading .kicker', decisions);
+      if (kicker) kicker.textContent = 'Canonical audit trail · sealed records';
     }
     setUnderwriteMode('scan');
   }
@@ -2529,21 +2405,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     if (!panel) return;
     panel.classList.add('top-opportunities-panel');
     opportunitiesView.insertBefore(panel, detailed);
-  }
-
-  function relocateOverviewEvidencePanels() {
-    const overview = q('#overview');
-    const evidenceView = q('#decisions');
-    if (!overview || !evidenceView) return;
-    const layout = q('.evidence-layout', evidenceView);
-    if (!layout) return;
-    const panels = Array.from(overview.children).find(node =>
-      node.matches('.two-column') && q('.environment-panel', node) && q('.decision-panel', node));
-    if (!panels) return;
-    panels.classList.add('evidence-operational-panels');
-    const redundantJump = q('[data-jump="evidence"]', panels);
-    if (redundantJump) redundantJump.remove();
-    evidenceView.insertBefore(panels, layout);
   }
 
   function consolidateDecisionsIntoSystem() {
@@ -3338,54 +3199,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     }
     text(q('#overview .snapshot strong'), when(custody.observedAt));
 
-    const environment = q('#decisions .environment-panel');
-    if (environment) {
-      const readiness = marketReadiness(status);
-      environment.dataset.readiness = readiness.state;
-      text(q('.kicker', environment), 'Operational gate · New trade evaluation');
-      text(q('h3', environment), 'Market & data readiness');
-      text(q('.regime', environment), readiness.badge);
-      text(q('.score-ring span', environment), readiness.glyph);
-      text(q('.score-ring small', environment), '');
-      const ring = q('.score-ring', environment);
-      if (ring) ring.style.background = readiness.state === 'ready'
-        ? 'radial-gradient(circle at center,#0c1915 54%,transparent 56%),conic-gradient(var(--green) 0 100%,#1b2a25 100%)'
-        : readiness.state === 'waiting'
-          ? 'radial-gradient(circle at center,#0c1915 54%,transparent 56%),conic-gradient(var(--amber) 0 65%,#1b2a25 65%)'
-          : 'radial-gradient(circle at center,#0c1915 54%,transparent 56%),conic-gradient(var(--red) 0 100%,#1b2a25 100%)';
-      text(q('.regime-score strong', environment), readiness.headline);
-      text(q('.regime-score p', environment), readiness.summary);
-      const signals = qa('.signal-grid > div', environment);
-      const values = [
-        ['May evaluate new trades?', readiness.allowed, readiness.allowed === 'YES' ? 'Market-data gate passed' : 'Fails closed before underwriting'],
-        ['What is blocking it?', readiness.blockerShort, readiness.blocker],
-        ['Affected data / source', readiness.source, readiness.sourceAsOf],
-        ['What happens next?', readiness.nextShort, readiness.next],
-      ];
-      signals.forEach((node, index) => { const value = values[index]; if (!value) return; text(q('span', node), value[0]); text(q('strong', node), value[1]); text(q('small', node), value[2]); });
-      text(q('.confidence span', environment), 'User action required');
-      text(q('.confidence strong', environment), readiness.userAction);
-      let details = q('.vsim-diagnostics', environment);
-      if (!details) {
-        details = make('details', undefined, 'vsim-diagnostics');
-        details.append(make('summary', 'Technical diagnostics'), make('pre'));
-        environment.append(details);
-      }
-      text(q('pre', details), JSON.stringify(readiness.diagnostics, null, 2));
-    }
-
-    const decision = q('#decisions .decision-panel');
-    if (decision) {
-      const outcome = cycle.outcome || 'NO CYCLE';
-      text(q('h3', decision), outcome === 'REFUSED' ? 'Proposal withheld' : outcome);
-      text(q('.decision-badge', decision), outcome);
-      text(q('.decision-copy strong', decision), cycle.reason || 'No completed live decision yet');
-      text(q('.decision-copy p', decision), cycle.cycleId ? ('Cycle ' + cycle.cycleId + ' · proposals remain read-only; execution is locked.') : 'Run a verified live proposal scan after reconciliation and market freshness pass.');
-      const trace = q('.trace-mini', decision); clear(trace);
-      const steps = cycle.trace && cycle.trace.length ? cycle.trace.slice(-4) : ['Custody synchronized', 'Reconciliation baseline checked', 'Live market freshness checked', 'Risk governor retained'];
-      steps.forEach((step, index) => { const li = make('li', undefined, index === steps.length - 1 && outcome === 'REFUSED' ? 'stop' : 'pass'); li.append(make('span', typeof step === 'string' ? step : (step.layer || step.stage || 'Verified gate')), make('small', index === steps.length - 1 ? (cycle.reason || 'Shadow only') : 'Recorded')); trace.append(li); });
-    }
-
     const opportunities = cycle.opportunities || [];
     const topBody = q('#underwrite [data-underwrite-pane="scan"] .top-opportunities-panel tbody');
     renderRows(topBody, opportunities.slice(0, 10), [
@@ -3556,7 +3369,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       + (safety.updatedAt ? ' · ' + when(safety.updatedAt) : ''));
   }
 
-  function renderGuardian(guardianPayload, ledger) {
+  function renderGuardian(guardianPayload) {
     const root = q('#system');
     if (!root) return;
     let panel = q('.guardian-panel', root);
@@ -3569,24 +3382,12 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     const facts = make('dl', undefined, 'package-facts');
     [['Mandate', guardianPayload.mandateVersion], ['Last review', review?.createdAt ? when(review.createdAt) : 'Not available'],
       ['Margin debit', money(review?.report?.marginDebit)], ['Campaign contracts', String(guardianPayload.activeCampaigns || 0)],
-      ['Discord delivery', guardianPayload.discord?.configured ? 'CONFIGURED' : 'NOT CONFIGURED'],
-      ['Ledger observations', String(ledger.observations?.length || 0)]].forEach(pair => {
+      ['Discord delivery', guardianPayload.discord?.configured ? 'CONFIGURED' : 'NOT CONFIGURED']].forEach(pair => {
       const row = make('div'); row.append(make('dt', pair[0]), make('dd', pair[1])); facts.append(row);
     });
     panel.append(facts);
     const violations = review?.report?.violations || [];
     panel.append(make('p', violations.length ? 'Violations: ' + violations.map(row => row.code).join(' · ') : 'COMPLIANT — NO ACTION REQUIRED', 'connector-note'));
-    panel.append(make('h3', 'Broker transaction ledger'));
-    const wrap = make('div', undefined, 'table-wrap'); const table = make('table');
-    const thead = make('thead'); const hr = make('tr');
-    ['Occurred','Type','Symbol','Side','Qty','Price','Amount','State'].forEach(label => hr.append(make('th', label))); thead.append(hr);
-    const tbody = make('tbody');
-    (ledger.events || []).slice(0, 50).forEach(event => { const row = make('tr');
-      [when(event.occurred_at || event.first_seen_at), event.event_type, event.symbol || '—', event.side || '—', number(event.quantity), money(event.price), money(event.amount), event.state || '—']
-        .forEach(value => row.append(make('td', value))); tbody.append(row); });
-    if (!(ledger.events || []).length) { const row = make('tr'); const cell = make('td', 'No broker events have been ingested yet.'); cell.colSpan = 8; row.append(cell); tbody.append(row); }
-    table.append(thead, tbody); wrap.append(table); panel.append(wrap,
-      make('p', 'Append-only Schwab order, execution, cash, assignment, exercise, and transfer events. Raw broker packets remain protected.', 'connector-note'));
     const decisions = q('#decisions', root);
     if (decisions) root.append(decisions);
   }
@@ -3954,7 +3755,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       performanceState.calendar = payloads[4];
       renderOverview(currentStatus, payloads[2]);
       renderSystem(currentStatus, payloads[3]);
-      renderGuardian(payloads[0], payloads[1]);
+      renderGuardian(payloads[0]);
       renderPortfolio(payloads[2], payloads[3]);
       renderBrokerActivity(payloads[3], payloads[1]);
       renderPerformance(payloads[3], payloads[2]);
@@ -4160,7 +3961,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   });
   window.addEventListener('popstate', () => { applyPerformanceUrl(); renderPerformanceLedger(); loadPerformanceCalendar(); });
   composeConsolidatedViews();
-  relocateOverviewEvidencePanels();
   consolidateDecisionsIntoSystem();
   relocateTopOpportunities();
   scrubPreviewLanguage();
