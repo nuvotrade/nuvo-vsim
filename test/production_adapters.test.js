@@ -45,9 +45,11 @@ describe('protected live dashboard', () => {
     const dashboard = await fullDashboard();
     const html = await dashboard.text();
     assert.match(html, /NUVO VSIM v5 — Live Shadow/u);
-    for (const view of ['overview', 'underwrite', 'performance', 'decisions', 'bot', 'system']) {
+    for (const view of ['overview', 'underwrite', 'performance', 'bot', 'system']) {
       assert.match(html, new RegExp(`data-view="${view}"`, 'u'));
     }
+    assert.doesNotMatch(html, /data-view="decisions"/u);
+    assert.match(html, /id="decisions"/u);
     assert.equal(await (await designAsset('styles.css')).text(), BUNDLED_DESIGN_STYLES);
     assert.match(await (await designAsset('app.js')).text(), /live shadow/u);
     assert.throws(() => fullDashboard(''), /DESIGN_UNAVAILABLE/u);
@@ -90,7 +92,9 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /Covered calls/u);
     assert.match(rewriteSource, /data-view="underwrite">Underwrite/u);
     assert.match(rewriteSource, /data-view="performance">Performance/u);
-    assert.match(rewriteSource, /data-view="decisions">Decisions/u);
+    assert.doesNotMatch(rewriteSource, /data-view="decisions">Decisions/u);
+    assert.match(liveDashboardScript(), /system\.append\(decisions\)/u);
+    assert.match(liveDashboardScript(), /decisions\.classList\.remove\('view', 'active'\)/u);
     assert.doesNotMatch(rewriteSource, /data-view="records">Records/u);
     assert.doesNotMatch(rewriteSource, /data-view="calculators">Calculators/u);
     assert.match(rewriteSource, /Options calculators/u);
