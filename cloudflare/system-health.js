@@ -76,10 +76,23 @@ function liveProbe(probe, nowMs, { requirePayloadFresh = false } = {}) {
   return !requirePayloadFresh || fresh(probe.asOf, nowMs);
 }
 
+function probeFailure(probe, nowMs, label, { requirePayloadFresh = true } = {}) {
+  if (!probe?.attempted) return `${label}_NOT_ATTEMPTED`;
+  if (!probe.ok) return probe.error ?? `${label}_FAILED`;
+  if (!fresh(probe.at, nowMs)) return `${label}_CHECK_STALE`;
+  if (requirePayloadFresh && !fresh(probe.asOf, nowMs)) {
+    const observed = instant(probe.asOf);
+    const ageSeconds = observed === null ? null : Math.max(0, Math.floor((nowMs - observed) / 1000));
+    return ageSeconds === null ? `${label}_TIMESTAMP_MISSING` : `${label}_STALE_${ageSeconds}S`;
+  }
+  return null;
+}
+
 function tapeSource(spyProbe, vixProbe) {
   const sources = [spyProbe?.source, vixProbe?.source].filter(Boolean)
     .map((value) => String(value).toUpperCase());
   if (!sources.length) return 'UNPROVEN';
+  if (sources.every((value) => value.includes('SCHWAB'))) return 'SCHWAB REALTIME';
   if (sources.every((value) => value.includes('TRADINGVIEW'))) return 'TRADINGVIEW';
   if (sources.some((value) => value.includes('POLYGON'))) return 'POLYGON';
   if (sources.some((value) => value.includes('MASSIVE'))) return 'MASSIVE';
@@ -90,7 +103,7 @@ export function buildSystemHealth({
   now = Date.now(), dashboardVersion = 'local', marketVersion = 'unknown',
   storageProbe, schwabAuth, schwabConnection, custody, laneState,
   tradingViewIngressHealth: tvIngress, tradingViewTape, spyProbe, vixProbe,
-  marketIdentityProbe, discordProbe,
+  marketIdentityProbe, discordProbe, custodyRefreshProbe,
 } = {}) {
   const nowMs = Number(now);
   const marketOpen = schwabAuth?.session === 'OPEN';
@@ -105,11 +118,13 @@ export function buildSystemHealth({
     && !(schwabConnection?.error
       && instant(schwabConnection?.updatedAt) >= instant(custody.observedAt))
     && (!marketOpen || fresh(custody.observedAt, nowMs, SYSTEM_HEALTH.CUSTODY_STALE_MS));
-  const schwabOk = authOk && custodyOk;
+  const refreshOk = custodyRefreshProbe === undefined || liveProbe(custodyRefreshProbe, nowMs);
+  const schwabOk = authOk && custodyOk && refreshOk;
   const schwab = row('SCHWAB', schwabOk ? 'GREEN' : 'RED', schwabOk ? 'LIVE' : 'DOWN',
     custody?.observedAt ?? schwabAuth?.at,
     schwabOk ? `AUTH + CUSTODY · ${marketOpen ? 'MARKET OPEN' : 'MARKET CLOSED'}`
-      : (schwabAuth?.error ?? schwabConnection?.error ?? 'AUTH/CUSTODY UNPROVEN'),
+      : (custodyRefreshProbe?.error ?? schwabAuth?.error ?? schwabConnection?.error
+        ?? 'AUTH/CUSTODY UNPROVEN'),
     'SCHWAB_READ_ONLY');
 
   const identityOk = liveProbe(marketIdentityProbe, nowMs);
@@ -119,8 +134,11 @@ export function buildSystemHealth({
   const providerSource = tapeSource(spyProbe, vixProbe);
   const market = row('MARKET', marketOk ? 'GREEN' : 'RED', marketOk ? 'LIVE' : 'DOWN',
     marketIdentityProbe?.at ?? spyProbe?.at ?? vixProbe?.at,
-    marketOk ? `${providerSource} · ${marketOpen ? 'LIVE TAPE' : 'SERVICE REACHABLE · MARKET CLOSED'}`
-      : (marketIdentityProbe?.error ?? spyProbe?.error ?? vixProbe?.error ?? 'MARKET SERVICE UNPROVEN'),
+    marketOk ? `${providerSource} · MASTER SERVICE REACHABLE · ${marketOpen ? 'LIVE TAPE' : 'MARKET CLOSED'}`
+      : (probeFailure(marketIdentityProbe, nowMs, 'MASTER_SERVICE', { requirePayloadFresh: false })
+        ?? probeFailure(spyProbe, nowMs, 'SPY_QUOTE')
+        ?? probeFailure(vixProbe, nowMs, 'VIX_QUOTE')
+        ?? 'MARKET SERVICE UNPROVEN'),
     providerSource);
 
   const ingressProven = tvIngress?.state === 'HEALTHY' && tvIngress.ok === true;

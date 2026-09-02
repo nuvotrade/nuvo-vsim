@@ -6,6 +6,7 @@ import { buildSystemHealth, proofsForWorker,
 import { handleLane1TvWebhook } from '../cloudflare/lane-1-runtime.js';
 import {
   discordWebhookProbe, fullDashboard, liveDashboardScript, rewriteDesignHtml,
+  schwabRealtimeMarketProbe,
 } from '../cloudflare/worker.js';
 
 const NOW = Date.parse('2026-08-28T20:00:00.000Z');
@@ -80,6 +81,33 @@ test('open-session stale market and TradingView tape fail closed', () => {
   assert.equal(rows.MARKET.color, 'RED');
   assert.equal(rows.TV.color, 'RED');
   assert.equal(rows.BOT.color, 'RED');
+  assert.match(rows.MARKET.detail, /SPY_QUOTE_STALE_600S/u);
+});
+
+test('market health uses authoritative Schwab real-time quotes and verifies master reachability', async () => {
+  const result = await schwabRealtimeMarketProbe({
+    async marketQuote(_ownerId, symbol) {
+      return { value: { last: symbol === 'SPY' ? 765.12 : 15.4 }, asOf: NOW - 500,
+        source: 'SCHWAB_MARKET_DATA_REALTIME' };
+    },
+  }, 'owner', 'SPY');
+  assert.equal(result.ok, true);
+  assert.equal(result.value, 765.12);
+  assert.equal(result.source, 'SCHWAB_MARKET_DATA_REALTIME');
+  const market = byLabel(healthy({
+    spyProbe: probe({ value: 765.12, source: 'SCHWAB_MARKET_DATA_REALTIME', asOf: at(-500) }),
+    vixProbe: probe({ value: 15.4, source: 'SCHWAB_MARKET_DATA_REALTIME', asOf: at(-500) }),
+  })).MARKET;
+  assert.equal(market.color, 'GREEN');
+  assert.match(market.detail, /SCHWAB REALTIME · MASTER SERVICE REACHABLE · LIVE TAPE/u);
+});
+
+test('failed login custody refresh cannot inherit a green Schwab tile from cached custody', () => {
+  const rows = byLabel(healthy({ custodyRefreshProbe: probe({ ok: false,
+    error: 'SCHWAB_CUSTODY_REFRESH_FAILED' }) }));
+  assert.equal(rows.SCHWAB.color, 'RED');
+  assert.equal(rows.SCHWAB.detail, 'SCHWAB_CUSTODY_REFRESH_FAILED');
+  assert.equal(rows.BOT.status, 'BLOCKED');
 });
 
 test('valid recent operational proof survives a Worker version change', () => {
@@ -198,6 +226,7 @@ test('Overview renderer is a quiet two-column grid with explicit Pacific time', 
   const script = liveDashboardScript();
   assert.match(script, /system-health-grid/u);
   assert.match(script, /'D1','SCHWAB','MARKET','TV','DISCORD','BOT'/u);
+  assert.match(script, /\/api\/self-audit/u);
   assert.match(script, /timeZone: 'America\/Los_Angeles'/u);
   const renderer = script.slice(script.indexOf("const systemCards = qa('.system-brief')"),
     script.indexOf('function renderOpportunities'));

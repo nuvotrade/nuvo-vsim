@@ -150,7 +150,7 @@ describe('protected live dashboard', () => {
     assert.match(source, /short-option capital \/ NAV/u);
     assert.match(source, /five-metrics/u);
     assert.match(source, /share_open_pnl/u);
-    assert.match(source, /market && market\.ok/u);
+    assert.match(source, /market\?\.color === 'GREEN'/u);
     assert.match(source, /\/api\/covered-call\/calculate\?symbol=/u);
     assert.match(source, /SELL CC/u);
     assert.match(source, /covered_call_actionable/u);

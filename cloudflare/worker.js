@@ -170,41 +170,6 @@ async function boundedResponseJson(response, maximumBytes = 65_536) {
   return total ? JSON.parse(new TextDecoder().decode(bytes)) : null;
 }
 
-async function marketServiceProbe(env, path) {
-  const at = nowIso();
-  if (!env.MARKET?.fetch) return { attempted: false, ok: false, at, error: 'MARKET_BINDING_UNAVAILABLE' };
-  try {
-    const response = await env.MARKET.fetch(new Request(`https://market.internal${path}`), {
-      signal: AbortSignal.timeout(8_000),
-    });
-    const body = await boundedResponseJson(response);
-    if (!response.ok || body?.error || body?.status === 'INCOMPLETE') {
-      return { attempted: true, ok: false, at,
-        error: body?.error ?? (body?.status === 'INCOMPLETE'
-          ? 'MARKET_SERVICE_INCOMPLETE' : `MARKET_SERVICE_HTTP_${response.status}`) };
-    }
-    const asOf = body?.quote_as_of ?? body?.as_of ?? body?.observed_at
-      ?? (Number.isFinite(Number(body?.response_ts))
-        ? new Date(Number(body.response_ts)).toISOString() : null);
-    const pathname = new URL(`https://market.internal${path}`).pathname;
-    const validPayload = pathname === '/v1/spot'
-      ? Number.isFinite(Number(body?.spot ?? body?.last)) && Number.isFinite(Date.parse(asOf ?? ''))
-      : pathname === '/v1/vix'
-        ? Number.isFinite(Number(body?.vix)) && Number.isFinite(Date.parse(asOf ?? ''))
-      : pathname === '/v1/market-status'
-        ? Boolean(body?.market ?? body?.session ?? body?.market_status)
-          && Number.isFinite(Date.parse(asOf ?? ''))
-        : false;
-    if (!validPayload) return { attempted: true, ok: false, at,
-      error: 'MARKET_SERVICE_PAYLOAD_UNVERIFIED' };
-    return { attempted: true, ok: true, at, asOf,
-      value: pathname === '/v1/vix' ? Number(body.vix) : Number(body?.spot ?? body?.last),
-      source: String(body?.source ?? (pathname === '/v1/vix' ? 'MASSIVE' : 'POLYGON')).toUpperCase() };
-  } catch (error) {
-    return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
-  }
-}
-
 export async function marketIdentityProbe(env) {
   const at = nowIso();
   if (!env.MARKET?.fetch) return { attempted: false, ok: false, at, error: 'MARKET_BINDING_UNAVAILABLE' };
@@ -223,6 +188,26 @@ export async function marketIdentityProbe(env) {
     };
   } catch (error) {
     return { attempted: true, ok: false, at, error: String(error?.message ?? error) };
+  }
+}
+
+export async function schwabRealtimeMarketProbe(client, ownerId, symbol) {
+  const at = nowIso();
+  try {
+    const quote = await client.marketQuote(ownerId, symbol);
+    return {
+      attempted: true, ok: true, at,
+      asOf: new Date(quote.asOf).toISOString(),
+      value: Number(quote.value?.last),
+      source: quote.source,
+      symbol,
+    };
+  } catch (error) {
+    return {
+      attempted: true, ok: false, at, asOf: null, value: null,
+      source: 'SCHWAB_MARKET_DATA_REALTIME', symbol,
+      error: String(error?.message ?? error).split(':')[0],
+    };
   }
 }
 
@@ -1050,7 +1035,7 @@ export async function runShadowCycle(env, ownerId, {
   }
 }
 
-async function apiStatus(env, ownerId) {
+async function apiStatus(env, ownerId, { custodyRefreshProbe } = {}) {
   const client = new SchwabD1Client(env);
   const [connection, baseline, custody, latest, evidenceCount, marketCheck, controls, guardian,
     ledgerStatus, reconciliation, schwabAuth, laneState, workerProofs, spyProbe,
@@ -1072,8 +1057,9 @@ async function apiStatus(env, ownerId) {
     schwabAuthProbe(client, ownerId),
     lane1Status(env, ownerId).catch(() => null),
     currentWorkerProofs(env, ownerId),
-    marketServiceProbe(env, '/v1/spot?ticker=SPY'),
-    marketServiceProbe(env, '/v1/vix'),
+    schwabRealtimeMarketProbe(client, ownerId, 'SPY'),
+    schwabRealtimeMarketProbe(client, ownerId,
+      String(env.NUVO_SCHWAB_VIX_SYMBOL ?? '$VIX')),
     marketIdentityProbe(env),
     discordWebhookProbe(env),
     storageHealthProbe(env, ownerId),
@@ -1095,6 +1081,7 @@ async function apiStatus(env, ownerId) {
     vixProbe,
     marketIdentityProbe: marketIdentity,
     discordProbe: discord,
+    custodyRefreshProbe,
   });
   await persistConnectorProbes(env, ownerId, Object.fromEntries(systemHealth.rows.map((entry) => [
     entry.label, { attempted: true, ok: entry.color === 'GREEN',
@@ -1132,6 +1119,12 @@ async function apiStatus(env, ownerId) {
     evidence: { records: Number(evidenceCount?.count ?? 0), storage: 'D1_INDEX_R2_IMMUTABLE_OBJECT' },
     marketCheck: marketCheck ? parseJson(marketCheck.detail_json, null) : null,
     systemHealth,
+    lane: laneState ? {
+      armed: laneState.armed === true,
+      stage: laneState.stage ?? 'UNKNOWN',
+      positionSide: laneState.positionSide ?? 'UNKNOWN',
+      updatedAt: laneState.updatedAt ?? null,
+    } : null,
     controls,
     guardian: guardian ? {
       state: guardian.state, reviewId: guardian.id, reviewedAt: guardian.createdAt,
@@ -2478,10 +2471,10 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     text(q('.header-status strong'), 'Protected shadow');
     text(q('.header-status small'), 'Loading verified data…');
     text(q('.safety-title'), '◇  LIVE SHADOW');
-    text(q('.safety-banner p'), 'Loading protected account, market, and evidence state. Broker mutation remains disabled.');
+    text(q('.safety-banner p'), 'Running the live account, market, evidence, and Lane 1 self-audit…');
     text(q('.authority-pill strong'), '2 · PROPOSE ONLY');
     text(q('footer span:first-child'), 'NUVO VSIM v5 · Protected live shadow');
-    text(q('footer span:nth-child(2)'), 'Schwab read-only custody and market data · no broker mutation');
+    text(q('footer span:nth-child(2)'), 'Live Lane 1 state loading · Schwab custody read-only');
   }
 
   function setUnderwriteMode(mode) {
@@ -3696,8 +3689,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     const connectors = new Map((status?.systemHealth?.rows || [])
       .filter(row => ['D1','SCHWAB','MARKET','TV','DISCORD'].includes(row.label))
       .map(row => [row.label, row.color]));
-    const online = ['D1','SCHWAB','MARKET','TV','DISCORD']
-      .every(label => connectors.get(label) === 'GREEN');
+    const online = ['D1','SCHWAB','MARKET','DISCORD']
+      .every(label => connectors.get(label) === 'GREEN')
+      && ['GREEN','AMBER'].includes(connectors.get('TV'));
     const onlineNode = q('[data-vsim="bot-online-state"]');
     text(onlineNode, online ? 'ONLINE' : 'OFFLINE');
     if (onlineNode) onlineNode.dataset.state = online ? 'online' : 'offline';
@@ -3851,8 +3845,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
 
   let currentStatus = null;
   let laneControlInFlight = false;
+  let initialSelfAudit = true;
   async function refresh() {
-    const requests = [api('/api/status'), api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
+    const statusRequest = initialSelfAudit
+      ? api('/api/self-audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      : api('/api/status');
+    initialSelfAudit = false;
+    const requests = [statusRequest, api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
       api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope)),
       api('/api/lane-1-spy/ledger?limit=250')];
     if (E3_SPINE_ENABLED) requests.push(api('/api/e3-spine'));
@@ -3865,11 +3864,20 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     if (E3_SPINE_ENABLED) renderE3Spine(payloads[7]);
     text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
-    const market = currentStatus.marketCheck;
-    text(q('.safety-banner p'), market && market.ok
-      ? 'Live Schwab custody, verified market data, and D1/R2 evidence are connected. Broker order mutation is disabled.'
-      : 'Schwab custody and D1/R2 evidence are connected. New-trade market data is '
-        + (market ? 'blocked or stale' : 'not yet verified') + '; broker order mutation is disabled.');
+    const market = (currentStatus.systemHealth?.rows || [])
+      .find((row) => row.label === 'MARKET');
+    const lane = currentStatus.lane || {};
+    const laneMutation = lane.armed
+      ? 'Lane 1 is ARMED · ' + (lane.stage || 'UNKNOWN')
+        + ' · live orders are enabled only for the legal instruction from this state.'
+      : 'Lane 1 is DISARMED · no Lane 1 order can be submitted.';
+    text(q('.safety-banner p'), market?.color === 'GREEN'
+      ? 'Live Schwab custody, verified market data, D1/R2 evidence, and coordinator state are connected. '
+        + laneMutation
+      : 'The live self-audit found a failed source. ' + laneMutation);
+    text(q('footer span:nth-child(2)'), lane.armed
+      ? 'Lane 1 ARMED · live order path state-gated · Schwab custody read-only'
+      : 'Lane 1 DISARMED · Schwab custody and market data read-only');
     const versions = currentStatus.systemHealth && currentStatus.systemHealth.versions || {};
     text(q('footer span:nth-child(3)'), 'Dashboard ' + String(versions.dashboard || currentStatus.version || '').slice(0, 12)
       + ' · Market ' + String(versions.market || 'unknown').slice(0, 12));
@@ -4151,6 +4159,36 @@ async function route(request, env, ctx) {
 
   const client = new SchwabD1Client(env);
   if (url.pathname === '/api/status' && request.method === 'GET') return json(await apiStatus(env, owner.id));
+  if (url.pathname === '/api/self-audit' && request.method === 'POST') {
+    try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
+    const startedAt = nowIso();
+    let custodyRefreshProbe;
+    try {
+      const snapshot = await reconciledSnapshot(env, owner.id);
+      custodyRefreshProbe = {
+        attempted: true, ok: true, at: nowIso(),
+        asOf: new Date(snapshot.asOf).toISOString(),
+        snapshotHash: snapshot.snapshotHash,
+      };
+    } catch (error) {
+      custodyRefreshProbe = {
+        attempted: true, ok: false, at: nowIso(),
+        error: String(error?.message ?? error).split(':')[0],
+      };
+    }
+    const status = await apiStatus(env, owner.id, { custodyRefreshProbe });
+    const completedAt = nowIso();
+    const passed = !status.systemHealth.rows.some((row) => row.color === 'RED');
+    await audit(env, owner.id, 'DASHBOARD_SELF_AUDIT', {
+      startedAt, completedAt, passed,
+      workerVersion: env.CF_VERSION_METADATA?.id ?? 'local',
+      custodyRefresh: custodyRefreshProbe,
+      sources: Object.fromEntries(status.systemHealth.rows.map((row) => [row.label, {
+        status: row.status, detail: row.detail, asOf: row.asOf,
+      }])),
+    });
+    return json({ ...status, selfAudit: { startedAt, completedAt, passed } });
+  }
   if (url.pathname === '/api/e3-spine' && request.method === 'GET') {
     if (!e3SpineTabEnabled(env)) return json({ error: 'NOT_FOUND' }, 404);
     const positionStub = env.ACCOUNT_COORDINATOR?.getByName?.(owner.id);
