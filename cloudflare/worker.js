@@ -2083,7 +2083,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     </article>`;
   const mobileSystemCard = `<article class="panel system-brief mobile-system-brief" aria-label="System status"></article>`;
   const botStatusCard = `<article class="panel bot-status-card" aria-labelledby="bot-status-title">
-    <div class="bot-status-head"><div><p class="kicker">LANE_1 · LIVE CONTROL</p><h2 id="bot-status-title" data-vsim="bot-broker-symbol">Schwab · —</h2></div><div class="bot-status-actions"><button class="chip" type="button" data-action="laneRefresh" aria-label="Refresh Schwab bot position">↻</button><button class="cc-directive bot-quick-disarm" type="button" data-action="laneDisarm">DISARM</button><details class="bot-control-menu"><summary aria-label="BOT controls">•••</summary><div><button type="button" data-action="laneArm" data-vsim="bot-menu-arm">ARM</button><button type="button" data-action="laneDisarm" data-vsim="bot-menu-disarm">DISARM</button><button type="button" disabled title="Available after live-exit validation">FLATTEN</button><small>Available after live-exit validation</small></div></details></div></div>
+    <div class="bot-status-head"><div><p class="kicker">LANE_1 · LIVE CONTROL</p><h2 id="bot-status-title" data-vsim="bot-broker-symbol">Schwab · —</h2></div><div class="bot-status-actions"><button class="chip" type="button" data-action="laneRefresh" aria-label="Refresh Schwab bot position">↻</button><button class="cc-directive bot-quick-disarm" type="button" data-action="laneDisarm">DISARM</button><details class="bot-control-menu"><summary aria-label="BOT controls">•••</summary><div><button type="button" data-action="laneArm" data-vsim="bot-menu-arm">ARM</button><button type="button" data-action="laneDisarm" data-vsim="bot-menu-disarm">DISARM</button><button type="button" data-action="laneRecover">RECOVER OPEN POSITION</button><button type="button" disabled title="Available after live-exit validation">FLATTEN</button><small>Recovery is broker-first and never arms or trades.</small><small>Available after live-exit validation</small></div></details></div></div>
     <div class="bot-position"><strong data-vsim="bot-position">—</strong><span data-vsim="bot-position-copy">position unavailable</span></div>
     <p class="bot-arm-contract" data-vsim="bot-arm-contract">ARM transition unavailable</p>
     <div class="bot-pnl-grid"><div><span>OPEN P/L</span><strong data-vsim="bot-open-pnl">—</strong></div><div><span>DAY P/L</span><strong data-vsim="bot-day-pnl">—</strong></div></div>
@@ -3913,6 +3913,10 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         body: JSON.stringify({ confirm: 'ARM_LANE_1_CURRENT_STATE' }),
       }),
       laneRefresh: () => api('/api/lane-1-spy/ledger?limit=250&refresh=1'),
+      laneRecover: () => api('/api/lane-1-spy/reconcile-open', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ confirm: 'RECONCILE_BROKER_LEDGER_OPEN' }),
+      }),
       lanePreview: () => {
         const source = q('[data-action="lanePreview"]');
         const ingressId = source && source.dataset.ingressId || '';
@@ -3929,6 +3933,20 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         renderLane1EventLedger(ledger, currentStatus);
         if (E3_SPINE_ENABLED) renderE3Spine(await api('/api/e3-spine'));
       } catch (error) { showLaneError('REFRESH failed: ' + error.message); }
+      finally { if (button) button.disabled = false; }
+      return;
+    }
+    if (action === 'laneRecover') {
+      if (button) button.disabled = true;
+      showLaneError(null);
+      try {
+        const result = await bounded(operations.laneRecover(), 10_000,
+          'LANE_1_RECOVERY_RESPONSE_TIMEOUT');
+        if (result.state !== 'OPEN_SHORT' || result.positionSide !== 'SHORT') {
+          throw new Error(result.faultCode || 'LANE_1_RECOVERY_STATE_MISMATCH');
+        }
+        await refresh();
+      } catch (error) { showLaneError('RECOVERY failed: ' + error.message); }
       finally { if (button) button.disabled = false; }
       return;
     }
