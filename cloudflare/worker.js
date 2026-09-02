@@ -3847,37 +3847,39 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   let currentStatus = null;
   let laneControlInFlight = false;
   let initialSelfAudit = true;
-  async function refresh() {
-    const isInitialSelfAudit = initialSelfAudit;
-    const statusRequest = isInitialSelfAudit
-      ? api('/api/self-audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
-      : api('/api/status');
-    initialSelfAudit = false;
-    const requests = [statusRequest, api('/api/guardian'), api('/api/ledger?limit=250'), api('/api/portfolio'), api('/api/performance'),
-      api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month) + '&scope=' + encodeURIComponent(performanceState.scope)),
-      api('/api/lane-1-spy/ledger?limit=250')];
-    if (E3_SPINE_ENABLED) requests.push(api('/api/e3-spine'));
-    const payloads = await Promise.all(requests);
-    if (isInitialSelfAudit && payloads[0]?.selfAudit?.tvRouteChallenge) {
-      // Leave the authenticated dashboard context and re-enter through the
-      // public TradingView door. The one-use challenge prevents public callers
-      // from generating audit writes; GET can never enter the order handler.
-      const challenge = encodeURIComponent(payloads[0].selfAudit.tvRouteChallenge);
-      await api('/lane/tv?health=1&challenge=' + challenge,
-        { method: 'GET', credentials: 'omit', cache: 'no-store' }).catch(() => null);
-      payloads[0] = await api('/api/status');
-    }
-    currentStatus = payloads[0];
-    performanceState.calendar = payloads[5];
-    renderOverview(currentStatus, payloads[3]); renderOpportunities(currentStatus); renderSystem(currentStatus, payloads[4]); await renderEvidence(currentStatus);
-    renderGuardian(payloads[1], payloads[2]); renderPortfolio(payloads[3], payloads[4]); renderBrokerActivity(payloads[4], payloads[2]); renderPerformance(payloads[4], payloads[3]);
-    renderLane1EventLedger(payloads[6], currentStatus);
-    if (E3_SPINE_ENABLED) renderE3Spine(payloads[7]);
-    text(q('.header-status strong'), 'Shadow connected'); text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }));
+
+  function applyTvRouteProof(status, proof) {
+    if (!status?.systemHealth || proof?.state !== 'REACHABLE'
+      || proof.orderDispatch !== false
+      || proof.workerVersion !== status.systemHealth.versions?.dashboard) return status;
+    const rows = status.systemHealth.rows || [];
+    const tv = rows.find(row => row.label === 'TV');
+    // A route-reachability proof can resolve UNPROVEN, but it must never hide
+    // an explicit failed authenticated ingress that the server marked red.
+    if (!tv || tv.color === 'RED' || tv.status === 'DOWN') return status;
+    tv.color = 'GREEN'; tv.status = 'LIVE'; tv.asOf = proof.at || new Date().toISOString();
+    tv.detail = 'HEALTHY · PUBLIC INGRESS ROUTE REACHABLE · NO SIGNAL REQUIRED · ingress '
+      + proof.proofId;
+    tv.source = 'D1_PUBLIC_ROUTE_PROBE';
+    const anyRed = rows.some(row => row.color === 'RED');
+    const allGreen = rows.every(row => row.color === 'GREEN');
+    status.systemHealth.status = allGreen ? 'ALL HEALTHY' : anyRed ? 'ACTION REQUIRED' : 'UNPROVEN';
+    status.systemHealth.color = allGreen ? 'GREEN' : anyRed ? 'RED' : 'AMBER';
+    return status;
+  }
+
+  function renderCoreStatus(status) {
+    currentStatus = status;
+    renderOverview(status, null);
+    renderOpportunities(status);
+    renderSystem(status, null);
+    text(q('.header-status strong'), 'Shadow connected');
+    text(q('.header-status small'), 'Updated ' + new Date().toLocaleTimeString([], {
+      hour: 'numeric', minute: '2-digit', second: '2-digit',
+    }));
     text(q('.safety-title'), '◇  LIVE PROTECTED SHADOW');
-    const market = (currentStatus.systemHealth?.rows || [])
-      .find((row) => row.label === 'MARKET');
-    const lane = currentStatus.lane || {};
+    const market = (status.systemHealth?.rows || []).find(row => row.label === 'MARKET');
+    const lane = status.lane || {};
     const laneMutation = lane.armed
       ? 'Lane 1 is ARMED · ' + (lane.stage || 'UNKNOWN')
         + ' · live orders are enabled only for the legal instruction from this state.'
@@ -3889,20 +3891,63 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     text(q('footer span:nth-child(2)'), lane.armed
       ? 'Lane 1 ARMED · live order path state-gated · Schwab custody read-only'
       : 'Lane 1 DISARMED · Schwab custody and market data read-only');
-    const versions = currentStatus.systemHealth && currentStatus.systemHealth.versions || {};
-    text(q('footer span:nth-child(3)'), 'Dashboard ' + String(versions.dashboard || currentStatus.version || '').slice(0, 12)
+    const versions = status.systemHealth?.versions || {};
+    text(q('footer span:nth-child(3)'), 'Dashboard '
+      + String(versions.dashboard || status.version || '').slice(0, 12)
       + ' · Market ' + String(versions.market || 'unknown').slice(0, 12));
-    // Render stored state first, then refresh live broker truth. The durable
-    // coordinator debounces these reads to one per 60 seconds.
-    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  async function refresh() {
+    const isInitialSelfAudit = initialSelfAudit;
+    const statusRequest = isInitialSelfAudit
+      ? api('/api/self-audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      : api('/api/status');
+    initialSelfAudit = false;
+    let status = await statusRequest;
+    if (isInitialSelfAudit && status?.selfAudit?.tvRouteChallenge) {
+      // Leave the authenticated dashboard context and re-enter through the
+      // public TradingView door. The one-use challenge prevents public callers
+      // from generating audit writes; GET can never enter the order handler.
+      const challenge = encodeURIComponent(status.selfAudit.tvRouteChallenge);
+      const routeProof = await api('/lane/tv?health=1&challenge=' + challenge,
+        { method: 'GET', credentials: 'omit', cache: 'no-store' }).catch(() => null);
+      status = applyTvRouteProof(status, routeProof);
+    }
+    renderCoreStatus(status);
+    document.body.classList.add('live-ready');
+
+    // Lane state is the next visible priority. The startup self-audit already
+    // performed a fresh broker read, so do not immediately make a duplicate.
     try {
-      const liveLedger = await api('/api/lane-1-spy/ledger?limit=250&refresh=1');
-      renderLane1EventLedger(liveLedger, currentStatus);
-      if (E3_SPINE_ENABLED) renderE3Spine(await api('/api/e3-spine'));
+      const laneLedger = await api('/api/lane-1-spy/ledger?limit=250');
+      renderLane1EventLedger(laneLedger, currentStatus);
     } catch (error) {
       const sourceNode = q('[data-vsim="bot-ledger-source-status"]');
-      text(sourceNode, 'BROKER REFRESH FAULT · ' + error.message + ' · stored state retained');
+      text(sourceNode, 'BOT LEDGER UNAVAILABLE · ' + error.message + ' · live audit retained');
       if (sourceNode) sourceNode.classList.add('source-fault');
+    }
+
+    // Historical and off-screen panels hydrate after the operational surface
+    // is already usable. A secondary-panel failure cannot blank the dashboard.
+    try {
+      const requests = [api('/api/guardian'), api('/api/ledger?limit=250'),
+        api('/api/portfolio'), api('/api/performance'),
+        api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month)
+          + '&scope=' + encodeURIComponent(performanceState.scope))];
+      if (E3_SPINE_ENABLED) requests.push(api('/api/e3-spine'));
+      const payloads = await Promise.all(requests);
+      performanceState.calendar = payloads[4];
+      renderOverview(currentStatus, payloads[2]);
+      renderSystem(currentStatus, payloads[3]);
+      renderGuardian(payloads[0], payloads[1]);
+      renderPortfolio(payloads[2], payloads[3]);
+      renderBrokerActivity(payloads[3], payloads[1]);
+      renderPerformance(payloads[3], payloads[2]);
+      if (E3_SPINE_ENABLED) renderE3Spine(payloads[5]);
+      await renderEvidence(currentStatus);
+    } catch (error) {
+      const output = q('.operator-output');
+      if (output) text(output, 'Core live data loaded. A secondary panel failed: ' + error.message);
     }
   }
 
@@ -4103,13 +4148,15 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   relocateOverviewEvidencePanels();
   relocateTopOpportunities();
   scrubPreviewLanguage();
+  document.body.classList.add('live-ready');
+  text(q('.header-status strong'), 'Running live audit…');
   refresh().catch(error => {
     text(q('.header-status strong'), 'Live data unavailable');
     text(q('.safety-title'), '◇  FAIL-CLOSED');
     text(q('.safety-banner p'), 'The protected live state could not be loaded: ' + error.message + '. No synthetic account or opportunity values are displayed.');
     qa('.metric-value').forEach(node => text(node, 'UNAVAILABLE'));
     qa('tbody').forEach(clear);
-  }).finally(() => document.body.classList.add('live-ready'));
+  });
   window.setInterval(pollLane1EventLedger, 5_000);
 })();`;
 }
@@ -4154,7 +4201,7 @@ async function route(request, env, ctx) {
         return json({ error: 'TV_ROUTE_CHALLENGE_ALREADY_USED' }, 409);
       }
       return json({ state: 'REACHABLE', workerVersion: env.CF_VERSION_METADATA?.id ?? 'local',
-        proofId: challenge, orderDispatch: false });
+        proofId: challenge, at: createdAt, orderDispatch: false });
     }
     return handleLane1TvWebhook({ request, env, ownerId: env.ACCESS_OWNER_ID });
   }

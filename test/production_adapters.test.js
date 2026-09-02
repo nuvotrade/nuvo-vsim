@@ -970,7 +970,28 @@ describe('Schwab multi-account normalization', () => {
     assert.equal(position.dayProfitLossSource, 'SCHWAB_RECONCILED_CARRIED_CURRENT_DAY_COST');
     assert.equal(position.dayProfitLossContributionMode, 'SUBSTITUTED');
     assert.equal(position.dayProfitLossTriggerReason,
-      'CURRENT_DAY_COST_IDENTITY_WITHOUT_SAME_SESSION_TRADE');
+      'UNCHANGED_PRIOR_POSITION_CONTRADICTS_RAW_DAY_PNL');
+  });
+
+  test('repairs the live Sep 2 CBRS raw day-P&L contradiction without changing traded positions', () => {
+    const position = reconcilePositionDayProfitLoss(normalizePosition({
+      instrument: { symbol: 'CBRS', assetType: 'EQUITY', netChange: 10.71 },
+      longQuantity: 600,
+      shortQuantity: 0,
+      previousSessionLongQuantity: 600,
+      currentDayProfitLoss: -10_656,
+      currentDayCost: 17_484,
+      marketValue: 110_400,
+      averagePrice: 198.26455,
+    }), [], '2026-09-02T22:53:51.745Z');
+    assert.equal(position.rawDayProfitLoss, -10_656);
+    assert.equal(position.dayProfitLossReference, 6_426);
+    assert.equal(position.dayProfitLoss, 6_426);
+    assert.equal(position.dayProfitLossAdjustment, 17_082);
+    assert.equal(position.dayProfitLossSource, 'SCHWAB_RECONCILED_CARRIED_CURRENT_DAY_COST');
+    assert.equal(position.dayProfitLossContributionMode, 'SUBSTITUTED');
+    assert.equal(position.dayProfitLossTriggerReason,
+      'UNCHANGED_PRIOR_POSITION_CONTRADICTS_RAW_DAY_PNL');
   });
 
   test('keeps same-session option fill-to-mark P&L instead of adding currentDayCost', () => {

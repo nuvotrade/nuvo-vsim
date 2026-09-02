@@ -205,8 +205,12 @@ test('public TV route probe consumes one authenticated challenge and never dispa
   const first = await worker.fetch(new Request(
     'https://vsim.nuvotrade.co/lane/tv?health=1&challenge=challenge-1'), env, {});
   assert.equal(first.status, 200);
-  assert.deepEqual(await first.json(), { state: 'REACHABLE', workerVersion: 'current',
-    proofId: 'challenge-1', orderDispatch: false });
+  const payload = await first.json();
+  assert.equal(payload.state, 'REACHABLE');
+  assert.equal(payload.workerVersion, 'current');
+  assert.equal(payload.proofId, 'challenge-1');
+  assert.equal(payload.orderDispatch, false);
+  assert.match(payload.at, /^\d{4}-\d{2}-\d{2}T/u);
   const replay = await worker.fetch(new Request(
     'https://vsim.nuvotrade.co/lane/tv?health=1&challenge=challenge-1'), env, {});
   assert.equal(replay.status, 403);

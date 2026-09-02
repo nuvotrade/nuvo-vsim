@@ -366,9 +366,12 @@ function easternDate(value) {
 
 /**
  * Schwab can carry a prior session's currentDayCost into the next session while
- * currentDayProfitLoss continues subtracting it. Repair only the exact, sealed
- * identity and only when the transaction ledger proves there was no trade in
- * this instrument during the observation's session.
+ * currentDayProfitLoss continues subtracting it. For an unchanged prior-session
+ * position with no same-session trade, instrument.netChange multiplied by the
+ * prior quantity is the broker-native day-P&L reference. Substitute that value
+ * when the raw field materially contradicts it and a non-zero carried day cost
+ * is present. Positions whose quantity changed today always retain Schwab's raw
+ * field because their intraday economics cannot be inferred from netChange.
  */
 export function reconcilePositionDayProfitLoss(position, brokerEvents, observedAt) {
   const raw = finite(position?.rawDayProfitLoss ?? position?.dayProfitLoss);
@@ -382,16 +385,16 @@ export function reconcilePositionDayProfitLoss(position, brokerEvents, observedA
     && easternDate(event.occurredAt) === sessionDate);
   const unchangedQuantity = quantity != null && previousQuantity != null
     && Math.abs(quantity - previousQuantity) < 1e-9;
-  const staleCostIdentity = raw != null && cost != null && reference != null
-    && Math.abs(cost) > 0.01 && Math.abs(cents(raw + cost) - reference) <= 0.01;
-  if (!hasSessionTrade && unchangedQuantity && staleCostIdentity) {
+  const rawContradictsReference = raw != null && cost != null && reference != null
+    && Math.abs(cost) > 0.01 && Math.abs(cents(raw) - reference) > 0.01;
+  if (!hasSessionTrade && unchangedQuantity && rawContradictsReference) {
     return {
       ...position,
       dayProfitLoss: reference,
       dayProfitLossAdjustment: cents(reference - raw),
       dayProfitLossSource: 'SCHWAB_RECONCILED_CARRIED_CURRENT_DAY_COST',
       dayProfitLossContributionMode: 'SUBSTITUTED',
-      dayProfitLossTriggerReason: 'CURRENT_DAY_COST_IDENTITY_WITHOUT_SAME_SESSION_TRADE',
+      dayProfitLossTriggerReason: 'UNCHANGED_PRIOR_POSITION_CONTRADICTS_RAW_DAY_PNL',
     };
   }
   return {
