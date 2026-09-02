@@ -514,15 +514,19 @@ export class VsimAccountCoordinator extends DurableObject {
         : prior?.pendingReason ?? 'EXECUTION' };
     const stage = merged.pendingReason === 'MISSING_FEE'
       ? 'FILL_PENDING_FEE' : 'FILL_PENDING_EXECUTION';
+    const alarmAt = lane1NextFillPollAt({ startedAt, deadlineAt });
+    await this.ctx.storage.setAlarm(alarmAt);
+    const verifiedAlarmAt = await this.ctx.storage.getAlarm();
+    if (verifiedAlarmAt !== alarmAt) throw new Error('LANE_1_FILL_ALARM_UNCONFIRMED');
     const at = new Date().toISOString();
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(`UPDATE lane_1_spy_v2_state SET stage=?,pending_fill_json=?,updated_at=?
         WHERE singleton=1`, stage, JSON.stringify(merged), at);
       this.#laneV2Record(stage, { brokerOrderId: merged.brokerOrderId,
         clientOrderId: merged.clientOrderId, instruction: merged.side,
-        deadlineAt, evidenceOrigin: merged.evidenceOrigin ?? null }, at);
+        deadlineAt, scheduledAlarmAt: new Date(alarmAt).toISOString(),
+        evidenceOrigin: merged.evidenceOrigin ?? null }, at);
     });
-    await this.ctx.storage.setAlarm(lane1NextFillPollAt({ startedAt, deadlineAt }));
     return this.#laneV2State();
   }
 

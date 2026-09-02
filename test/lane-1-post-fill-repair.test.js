@@ -115,6 +115,24 @@ test('broker failure makes no reconstruction or coordinator correction', async (
   assert.equal(writes, 0);
 });
 
+test('reconciliation reads broker first but refuses any correction while a fill is pending', async () => {
+  const calls = [];
+  const state = { armed: false, stage: 'FILL_PENDING_FEE', positionSide: 'SHORT',
+    pendingFill: { brokerOrderId: 'ORDER-COVER' }, updatedAt: '2026-09-01T13:40:00.000Z' };
+  const result = await reconcileLane1OpenFromBrokerLedger({ env: {}, ownerId: 'OWNER',
+    principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN', dependencies: {
+      client: { async lane1V21SendSnapshot() { calls.push('broker');
+        return syntheticSnapshot('SHORT', Date.now()); },
+      async lane1V2RecoverableStoredFill() { calls.push('reconstruct'); throw new Error('MUST_NOT_RUN'); } },
+      coordinator: { async status() { calls.push('coordinator'); return state; },
+        async recoverOpen() { calls.push('transition'); } },
+    } });
+  assert.equal(result.status, 409);
+  assert.equal(result.body.state, 'FILL_PENDING_FEE');
+  assert.equal(result.body.faultCode, 'LANE_1_RECONCILIATION_FILL_PENDING');
+  assert.deepEqual(calls, ['broker', 'coordinator']);
+});
+
 test('pending fee is durable and bounded; expiry becomes FILL_ECONOMICS_TIMEOUT', async () => {
   const base = { armed: false, stage: 'FILL_PENDING_FEE', positionSide: 'SHORT',
     pendingFill: { ownerId: 'OWNER', signal: 'EXIT', side: 'BUY_TO_COVER',
@@ -144,6 +162,63 @@ test('pending fee is durable and bounded; expiry becomes FILL_ECONOMICS_TIMEOUT'
   assert.equal(rescheduled.startedAt, base.pendingFill.startedAt);
   assert.equal(rescheduled.deadlineAt, base.pendingFill.deadlineAt);
   assert.equal(faulted, false);
+});
+
+test('an alarm delivered after FAULT is inert: no poll, write, notification, or reschedule', async () => {
+  let touched = false;
+  const result = await resumeLane1PendingFill({ env: {}, ownerId: 'OWNER', coordinator: {
+    async status() { return { armed: false, stage: 'FAULT', positionSide: 'SHORT',
+      pendingFill: { ownerId: 'OWNER', brokerOrderId: 'ORDER-FAULT' } }; },
+    async recordPendingFill() { touched = true; }, async recordOpen() { touched = true; },
+    async recordExit() { touched = true; }, async recordFault() { touched = true; },
+  }, dependencies: { client: { async waitForLane1V2RecordedFill() { touched = true; } },
+    notifier: { async send() { touched = true; } } } });
+  assert.deepEqual(result, { status: 'NO_PENDING_FILL', terminal: true });
+  assert.equal(touched, false);
+});
+
+test('DISARM preserves a pending open and its poll writes OPEN_FILLED while still disarmed', async () => {
+  const uuid = (() => { let value = 40; return () =>
+    `00000000-0000-4000-8000-${String(++value).padStart(12, '0')}`; })();
+  const seal = await lane1V2ProposalSeal({ signal: 'SHORT', rawSignalSide: 'SELL_SHORT',
+    tvBodyBindingSha256: hash('e'), positionSide: 'FLAT',
+    now: Date.parse('2026-09-01T13:35:00.000Z'), uuid });
+  const brokerOrderId = 'ORDER-PENDING-OPEN';
+  const accepted = { brokerOrderId, acceptedAt: '2026-09-01T13:35:03.000Z',
+    orderAcceptanceEvidence: wireCapture('WIRE-ACCEPTANCE-OPEN',
+      'SCHWAB_ORDER_ACCEPTANCE_RESPONSE', 'SELL_SHORT', brokerOrderId, seal.clientOrderId) };
+  const pending = { ownerId: 'OWNER', signal: 'SHORT', side: 'SELL_SHORT', brokerOrderId,
+    clientOrderId: seal.clientOrderId, accountHash: 'ACCOUNT-HASH', seal, accepted,
+    tvBodyBindingSha256: hash('e'), pendingReason: 'MISSING_FEE',
+    startedAt: '2026-09-01T13:35:03.000Z', deadlineAt: '2026-09-01T13:37:03.000Z' };
+  const state = { armed: false, stage: 'FILL_PENDING_FEE', positionSide: 'FLAT',
+    latestUnit: null, pendingFill: pending };
+  const fill = { ...reconstructedFill(), brokerOrderId, clientOrderId: seal.clientOrderId,
+    evidenceOrigin: 'SCHWAB_WIRE_CAPTURE', captureEvidence: {
+      order: wireCapture('WIRE-ORDER-OPEN', 'SCHWAB_ORDER_RESPONSE',
+        'SELL_SHORT', brokerOrderId, seal.clientOrderId),
+      transaction: wireCapture('WIRE-TRANSACTION-OPEN', 'SCHWAB_TRANSACTION_RESPONSE',
+        'SELL_SHORT', brokerOrderId, seal.clientOrderId),
+    } };
+  const calls = [];
+  const result = await resumeLane1PendingFill({ env: {}, ownerId: 'OWNER',
+    now: () => Date.parse('2026-09-01T13:35:06.000Z'), coordinator: {
+      async status() { return state; }, async recordOpen(payload) { calls.push('coordinator-open');
+        assert.equal(state.armed, false);
+        assert.equal(payload.unit.state, 'OPEN_SHORT');
+        assert.equal(payload.unit.positionSide, 'SHORT');
+        assert.equal(payload.identity.instruction, 'SELL_SHORT');
+        return { armed: false, stage: 'OPEN_SHORT', positionSide: 'SHORT' }; },
+    }, dependencies: {
+      client: { async waitForLane1V2RecordedFill() { calls.push('broker-fill'); return fill; } },
+      bundleStore: { async write() { return { objectPrefix: 'r2/pending-open' }; } },
+      receiptStore: { async write(receipt) { calls.push('receipt');
+        assert.equal(receipt.type, 'OPEN_FILLED'); return { id: 'RECEIPT-PENDING-OPEN' }; } },
+      notifier: { async send(notice) { calls.push('discord'); assert.equal(notice.type, 'OPENED'); } },
+    } });
+  assert.equal(result.status, 'OPEN_SHORT');
+  assert.equal(result.receiptId, 'RECEIPT-PENDING-OPEN');
+  assert.deepEqual(calls, ['broker-fill', 'receipt', 'coordinator-open', 'discord']);
 });
 
 test('a pending autonomous cover records real P&L and receipt before coordinator FLAT and Discord', async () => {

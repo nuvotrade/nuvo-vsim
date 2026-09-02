@@ -680,6 +680,14 @@ export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
       faultCode: 'BROKER_UNREACHABLE', detail: String(error?.message ?? error) } };
   }
   const state = await coordinator.status();
+  if (state.pendingFill) {
+    return { status: 409, body: { state: state.stage,
+      faultCode: 'LANE_1_RECONCILIATION_FILL_PENDING',
+      coordinatorPositionSide: state.positionSide ?? 'UNKNOWN',
+      brokerPositionSide: brokerSnapshot.positionSide,
+      coordinatorUpdatedAt: state.updatedAt ?? null,
+      brokerAcquiredAt: brokerSnapshot.acquiredAt } };
+  }
   if (brokerSnapshot.positionSide === state.positionSide
     && state.entryIdentity?.evidenceOrigin !== 'BROKER_LEDGER_RECONSTRUCTION') {
     return { status: 200, body: { state: state.stage, disposition: 'already-reconciled',

@@ -81,11 +81,12 @@ async function faultedShortDispatch(owner, { fault = true } = {}) {
   assert.equal((await rpc(owner, 'laneV2Claim', { signal: 'SHORT', seal })).result.claimed, true);
   await rpc(owner, 'laneV2RecordAccepted', { signal: 'SHORT', brokerOrderId: 'ORDER-1',
     acceptedAt: new Date(now + 1).toISOString() });
-  await rpc(owner, 'laneV2RecordPendingFill', { signal: 'SHORT', seal,
+  const pendingResult = await rpc(owner, 'laneV2RecordPendingFill', { signal: 'SHORT', seal,
     accepted: { brokerOrderId: 'ORDER-1', acceptedAt: new Date(now + 1).toISOString() },
     ownerId: owner, brokerOrderId: 'ORDER-1', clientOrderId: 'CLIENT-1', side: 'SELL_SHORT',
     startedAt: new Date(now + 1).toISOString(), deadlineAt: new Date(now + 120_001).toISOString(),
     pendingReason: 'MISSING_FEE', tvBodyBindingSha256: hash() });
+  assert.equal(pendingResult.status, 200, JSON.stringify(pendingResult));
   if (fault) await rpc(owner, 'laneV2RecordFault', { faultCode: 'MISSING_FEE',
     brokerOrderId: 'ORDER-1', at: new Date(now + 2).toISOString() });
   return { seal, armedAt, expiresAt };
@@ -153,7 +154,34 @@ test('strict recovery is atomic, idempotent, and a differing identity faults', a
 });
 
 test('normal OPEN_FILLED requires the same strict identity and complete wire capture as recovery', async () => {
-  await faultedShortDispatch('NORMAL-OPEN-OWNER', { fault: false });
+  const timing = await faultedShortDispatch('NORMAL-OPEN-OWNER', { fault: false });
+  const pending = await rpc('NORMAL-OPEN-OWNER', 'laneV2Status');
+  assert.equal(pending.result.stage, 'FILL_PENDING_FEE');
+  assert.equal(pending.result.armed, true);
+  const pendingHistory = await rpc('NORMAL-OPEN-OWNER', 'laneV2History', { limit: 50 });
+  const scheduled = pendingHistory.result.events.find((event) => event.event_type === 'FILL_PENDING_FEE');
+  assert.ok(Number.isFinite(Date.parse(JSON.parse(scheduled.detail_json).scheduledAlarmAt)));
+
+  const newSignal = await rpc('NORMAL-OPEN-OWNER', 'laneV2Claim', {
+    signal: 'LONG', seal: { ...timing.seal, brokerInstruction: 'BUY' } });
+  assert.equal(newSignal.result.claimed, false);
+  assert.equal(newSignal.result.refusal, 'LANE_1_CLAIM_INSTRUCTION_STATE_REFUSED');
+  const armWhilePending = await rpc('NORMAL-OPEN-OWNER', 'laneV2PrincipalArm', {
+    reason: 'PRINCIPAL_DASHBOARD_ARM', armedAt: timing.armedAt, expiresAt: timing.expiresAt });
+  assert.equal(armWhilePending.status, 200);
+  assert.equal(armWhilePending.result.stage, 'FILL_PENDING_FEE');
+  assert.equal(armWhilePending.result.armed, true);
+
+  const disarmed = await rpc('NORMAL-OPEN-OWNER', 'laneV2Disarm', {
+    reason: 'PRINCIPAL_DASHBOARD_DISARM', at: new Date().toISOString() });
+  assert.equal(disarmed.result.armed, false);
+  assert.equal(disarmed.result.stage, 'FILL_PENDING_FEE');
+  assert.equal(disarmed.result.pendingFill.brokerOrderId, 'ORDER-1');
+  const rearmWhilePending = await rpc('NORMAL-OPEN-OWNER', 'laneV2PrincipalArm', {
+    reason: 'PRINCIPAL_DASHBOARD_ARM', armedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 86_400_000).toISOString() });
+  assert.equal(rearmWhilePending.status, 422);
+  assert.match(rearmWhilePending.error, /LANE_1_ARM_STATE_NOT_CLEAN/u);
   const args = { signal: 'SHORT', unit: unit(), identity: identity(),
     evidenceOrigin: 'SCHWAB_WIRE_CAPTURE', captureEvidence: wireEvidence(),
     receiptId: 'RECEIPT-WIRE-1' };
@@ -167,6 +195,7 @@ test('normal OPEN_FILLED requires the same strict identity and complete wire cap
   assert.equal(recorded.status, 200, JSON.stringify(recorded));
   assert.equal(recorded.result.stage, 'OPEN_SHORT');
   assert.equal(recorded.result.positionSide, 'SHORT');
+  assert.equal(recorded.result.armed, false);
   assert.equal(recorded.result.entryIdentity.identity.instruction, 'SELL_SHORT');
   assert.equal(recorded.result.entryIdentity.evidenceOrigin, 'SCHWAB_WIRE_CAPTURE');
   const history = await rpc('NORMAL-OPEN-OWNER', 'laneV2History', { limit: 50 });
@@ -181,6 +210,15 @@ test('normal OPEN_FILLED requires the same strict identity and complete wire cap
   assert.deepEqual(detail.captureIds.sort(), [
     'WIRE-ACCEPTANCE', 'WIRE-ORDER', 'WIRE-TRANSACTION',
   ].sort());
+});
+
+test('a terminal fault remains disarmed and preserves pending identity for an inert alarm delivery', async () => {
+  await faultedShortDispatch('FAULT-ALARM-OWNER');
+  const state = await rpc('FAULT-ALARM-OWNER', 'laneV2Status');
+  assert.equal(state.result.stage, 'FAULT');
+  assert.equal(state.result.armed, false);
+  assert.equal(state.result.positionSide, 'FLAT');
+  assert.equal(state.result.pendingFill.brokerOrderId, 'ORDER-1');
 });
 
 test('arm-existing preserves recovered SHORT and the coordinator admits only BUY_TO_COVER', async () => {
