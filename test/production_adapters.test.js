@@ -6,6 +6,7 @@ import { MassiveProvider } from '../src/truth/providers/massive.js';
 import { SchwabMarketProvider, sessionStatus } from '../src/truth/providers/schwab.js';
 import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { mapCustodyRisk } from '../cloudflare/custody-risk.js';
+import { positionGreeks } from '../src/portfolio/governor.js';
 import { ReplayProvider } from '../src/evidence/replay.js';
 import {
   cycleIdFor, dashboardHtml, designAsset, fullDashboard, liveDashboardScript,
@@ -296,6 +297,8 @@ describe('Massive production provider', () => {
     assert.ok(quote.value.adv > 5_000_000);
     assert.equal(chain.value.contracts.length, 4);
     assert.ok(chain.value.contracts.every((contract) => Number.isFinite(contract.delta)));
+    assert.equal(chain.value.contracts[0].greekUnits, undefined,
+      'non-Schwab provider Greeks retain their existing per-share model units');
     assert.deepEqual(events.value, []);
     assert.equal(state.value.status, 'OPEN');
     assert.ok(Number.isFinite(state.value.drawdown));
@@ -929,6 +932,12 @@ describe('Schwab production broker boundary', () => {
     const quote = await client.marketOptionQuote('owner', 'SPXW260825C07700000');
     assert.equal(quote.value.iv, 0.18);
     assert.equal(quote.value.delta, 0.02);
+    assert.deepEqual(quote.value.greekUnits, {
+      delta: 'PER_SHARE_EQUIVALENT',
+      gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
+      vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
+      theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+    });
     assert.equal(quote.value.underlyingPrice, 7705);
     assert.equal(quote.source, 'SCHWAB_MARKET_DATA_OPTION_QUOTE_REALTIME');
   });
@@ -1193,8 +1202,40 @@ describe('custody risk mapping', () => {
     assert.equal(mapped.positions[0].economicCapital, 10_000);
     assert.equal(mapped.positions[1].economicCapital, 9_000);
     assert.equal(mapped.positions[1].quantity, -1);
+    assert.equal(mapped.positions[1].thetaUnit, 'PREMIUM_DOLLARS_PER_SHARE_PER_DAY');
     assert.ok(mapped.returnsBySymbol.SPY.length >= 120);
     assert.equal(mapped.sectors.SPY, 'CUSTODY_UNCLASSIFIED');
+  });
+
+  test('carries Schwab per-contract theta units into the Governor position', async () => {
+    const schwabUnitProvider = {
+      ...provider,
+      async optionChain(symbol) {
+        const result = await provider.optionChain(symbol);
+        return {
+          ...result,
+          value: {
+            ...result.value,
+            contracts: result.value.contracts.map((contract) => ({
+              ...contract,
+              greekUnits: {
+                delta: 'PER_SHARE_EQUIVALENT',
+                gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
+                vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
+                theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+              },
+            })),
+          },
+        };
+      },
+    };
+    const mapped = await mapCustodyRisk({ provider: schwabUnitProvider, now: NOW, positions: [
+      { symbol: 'SPY-P90', underlying: 'SPY', type: 'OPTION', right: 'put', strike: 90,
+        expiration, quantity: -6, multiplier: 100, marketValue: -720 },
+    ] });
+    assert.equal(mapped.ok, true);
+    assert.equal(mapped.positions[0].thetaUnit, 'DOLLARS_PER_CONTRACT_PER_DAY');
+    assert.equal(positionGreeks(mapped.positions[0]).theta, 0.18);
   });
 
   test('refuses an uncovered short call instead of assigning finite safe-looking risk', async () => {

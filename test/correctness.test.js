@@ -51,6 +51,24 @@ describe('GAP: multi-leg Greeks were read from leg[0] only', () => {
     assert.equal(structureGreeks(csp).delta, -1 * shortPut.delta * 100);
   });
 
+  test('Schwab theta is per contract while delta, gamma, and vega retain share scaling', () => {
+    const schwabPut = {
+      ...shortPut,
+      theta: -0.42,
+      greekUnits: { theta: 'DOLLARS_PER_CONTRACT_PER_DAY' },
+    };
+    const csp = cashSecuredPut({ underlying: 'X', put: schwabPut });
+    const g = structureGreeks(csp);
+    assert.equal(g.delta, -1 * schwabPut.delta * 100);
+    assert.equal(g.gamma, -1 * schwabPut.gamma * 100);
+    assert.equal(g.vega, -1 * schwabPut.vega * 100);
+    assert.equal(g.theta, 0.42);
+    assert.equal(positionGreeks({
+      quantity: -6, multiplier: 100, delta: 0.25, gamma: 0.01, vega: 0.12,
+      theta: -0.5733, thetaUnit: 'DOLLARS_PER_CONTRACT_PER_DAY',
+    }).theta, 3.4398);
+  });
+
   test('long shares are delta-one', () => {
     const s = longShares({ underlying: 'X', spot: 100, shares: 100 });
     assert.equal(structureGreeks(s).delta, 100);

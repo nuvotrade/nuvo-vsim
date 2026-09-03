@@ -1211,6 +1211,10 @@ async function portfolioDashboard(env, ownerId) {
             eventsVerified: Boolean(eventsResult?.value),
             dividendsVerified: eventsResult?.coverage?.dividends === true,
           },
+          rate: DEFAULT_LIMITS.riskFreeRate,
+          dividendYield: 0,
+          rateSource: `${DEFAULT_LIMITS.version}:riskFreeRate`,
+          dividendYieldSource: 'INTENTIONAL_ZERO_NO_VERIFIED_CONTINUOUS_DIVIDEND_YIELD',
           now,
         })
         : { ok: false, symbol: position.symbol,
@@ -1642,6 +1646,10 @@ async function getCoveredCallLifecycleTool(env, ownerId, truth) {
         eventsVerified: true,
         dividendsVerified: events.coverage?.dividends === true,
       },
+      rate: DEFAULT_LIMITS.riskFreeRate,
+      dividendYield: 0,
+      rateSource: `${DEFAULT_LIMITS.version}:riskFreeRate`,
+      dividendYieldSource: 'INTENTIONAL_ZERO_NO_VERIFIED_CONTINUOUS_DIVIDEND_YIELD',
       now: Date.now(),
     });
   }));
@@ -2624,8 +2632,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       if (node) node.classList.toggle('stale-value', Boolean(stale));
     };
     setValue('booked-premium', summary.booked_premium, money);
-    setValue('income-theta', summary.income_theta_per_day, money);
-    setValue('net-theta', summary.net_theta_per_day, money);
+    setValue('income-theta', summary.income_theta_per_day, moneyExact);
+    setValue('net-theta', summary.net_theta_per_day, moneyExact);
     const hasLongOptionLeg = Number(portfolio.option_positions || 0) > Number(portfolio.short_option_positions || 0);
     const netThetaCard = q('[data-vsim="net-theta-card"]');
     if (netThetaCard) {
@@ -2756,9 +2764,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       return node;
     };
     fillTable(q('[data-vsim="harvest-body"]'), portfolio.harvest || [], [
-      item => item.symbol || '—', item => item.type || '—', item => money(item.strike), item => item.expiration || '—',
-      item => number(item.quantity), item => money(item.entry_credit), item => quoteValue(item, item.mark, true), item => quoteValue(item, item.unrealized_pnl),
-      item => quoteValue(item, item.theta_per_day), item => distanceValue(item), item => money(item.capital_committed ?? item.expiration_capital),
+      item => item.symbol || '—', item => item.type || '—', item => moneyExact(item.strike), item => item.expiration || '—',
+      item => number(item.quantity), item => moneyExact(item.entry_credit), item => quoteValue(item, item.mark, true), item => quoteValue(item, item.unrealized_pnl, true),
+      item => quoteValue(item, item.theta_per_day, true), item => distanceValue(item), item => moneyExact(item.capital_committed ?? item.expiration_capital),
       item => item.quote_asof ? when(item.quote_asof) + (item.quote_freshness === 'LAST_MARKET_QUOTE' ? ' · LAST QUOTE' : '') : 'UNAVAILABLE',
     ], 'No current short-option positions in Schwab custody.');
     const lifecycleRoot = q('[data-vsim="cc-lifecycle-cards"]'); clear(lifecycleRoot);
@@ -2782,22 +2790,24 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       }
       const trade = result.current_trade || {}; const riskNeutral = result.risk_neutral || {}; const paths = result.paths || {};
       const distance = result.distance_to_strike || {}; const basisDistance = result.strike_vs_share_basis || {};
+      const rawBrokerTheta = present(trade.broker_long_theta_per_contract_per_day)
+        ? String(trade.broker_long_theta_per_contract_per_day) : 'UNAVAILABLE';
       const metrics = make('div', undefined, 'cc-life-metrics');
       [
         ['RN expire OTM', percent(riskNeutral.probability_expire_otm), 'European · excludes early exercise'],
         ['Distance to strike', percent(distance.pct_of_spot), moneyExact(distance.dollars_per_share) + ' · ' + number(distance.risk_neutral_sigma) + 'σ (−d₂)'],
-        ['Close outlay', money(trade.total_close_outlay), 'ask × shares + close fees'],
+        ['Close outlay', moneyExact(trade.total_close_outlay), 'ask × shares + close fees'],
         ['Liability left', percent(trade.total_liability_pct_of_original_gross_credit), 'close outlay / original gross credit'],
-        ['Locked option P&L', money(trade.profit_locked_if_call_closed_now), 'net entry credit − close outlay'],
-        ['Extrinsic left', percent(trade.extrinsic_pct_of_original_gross_credit), money(trade.executable_extrinsic_total)],
-        ['Theta / day', money(trade.broker_short_theta_per_day), 'broker Greek · short position'],
+        ['Locked option P&L', moneyExact(trade.profit_locked_if_call_closed_now), 'net entry credit − close outlay'],
+        ['Extrinsic left', percent(trade.extrinsic_pct_of_original_gross_credit), moneyExact(trade.executable_extrinsic_total)],
+        ['Theta / day', moneyExact(trade.broker_short_theta_per_day), 'Schwab $/contract/day × contracts; no ×100'],
         ['Adjusted basis', moneyExact(trade.adjusted_share_basis), 'share basis − net credit/share'],
       ].forEach(metric => { const node = make('div'); node.append(make('span', metric[0]), make('strong', metric[1]), make('small', metric[2])); metrics.append(node); });
       const pathGrid = make('div', undefined, 'cc-life-paths');
       [
-        ['Assignment P&L', money(paths.assignment && paths.assignment.pnl)],
-        ['Exit-now P&L', money(paths.exit_now && paths.exit_now.pnl)],
-        ['Worthless scenario', money(paths.expire_worthless && paths.expire_worthless.pnl)],
+        ['Assignment P&L', moneyExact(paths.assignment && paths.assignment.pnl)],
+        ['Exit-now P&L', moneyExact(paths.exit_now && paths.exit_now.pnl)],
+        ['Worthless scenario', moneyExact(paths.expire_worthless && paths.expire_worthless.pnl)],
         ['Close/keep crossover', moneyExact(paths.close_call_keep_shares && paths.close_call_keep_shares.crossover_share_price)],
       ].forEach(path => { const node = make('div'); node.append(make('span', path[0]), make('strong', path[1])); pathGrid.append(node); });
       const flagFacts = (result.classification.flags || []).map(flag => flag.code + ': ' + flag.explanation
@@ -2806,12 +2816,15 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         ? ' Data gaps: ' + result.classification.data_gaps.join(', ') + '.' : '';
       card.append(metrics, pathGrid, make('p', flagFacts + ' Sell/wait crossover: '
         + moneyExact(paths.sell_shares_wait_on_call && paths.sell_shares_wait_on_call.crossover_share_price)
-        + '. Opening fees: ' + money(result.entry_evidence && result.entry_evidence.opening_fees)
+        + '. Opening fees: ' + moneyExact(result.entry_evidence && result.entry_evidence.opening_fees)
         + ' from ' + (result.entry_evidence && result.entry_evidence.source || 'UNVERIFIED')
-        + '. Configured close fee: ' + money(result.current_trade && result.current_trade.close_fees)
+        + '. Configured close fee: ' + moneyExact(result.current_trade && result.current_trade.close_fees)
         + '. Share basis: ' + moneyExact(result.share_basis) + '; strike minus basis: '
         + moneyExact(basisDistance.dollars_per_share) + ' (' + percent(basisDistance.pct_of_share_basis) + ')'
-        + '. RN inputs: r ' + percent(riskNeutral.rate) + ', q ' + percent(riskNeutral.dividend_yield)
+        + '. RN inputs: r ' + percent(riskNeutral.rate) + ' (' + (riskNeutral.rate_source || 'UNLABELED')
+        + '), q ' + percent(riskNeutral.dividend_yield) + ' (' + (riskNeutral.dividend_yield_source || 'UNLABELED') + ')'
+        + '. Raw Schwab theta: ' + rawBrokerTheta + ' $/contract/day × '
+        + number(trade.broker_theta_contracts) + ' contracts; no equity multiplier'
         + '. CLOSE · ROLL · EXIT: NO_TRUTH.' + gaps, 'cc-life-foot'));
       lifecycleRoot.append(card);
     });

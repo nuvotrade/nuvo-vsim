@@ -209,7 +209,9 @@ export function structureGreeks(structure, { contracts = null } = {}) {
     g.delta += sign * (c.delta ?? 0) * units;
     g.gamma += sign * (c.gamma ?? 0) * units;
     g.vega += sign * (c.vega ?? 0) * units;
-    g.theta += sign * (c.theta ?? 0) * units;
+    const thetaUnits = c.greekUnits?.theta === 'DOLLARS_PER_CONTRACT_PER_DAY'
+      ? qty : units;
+    g.theta += sign * (c.theta ?? 0) * thetaUnits;
   }
   return g;
 }

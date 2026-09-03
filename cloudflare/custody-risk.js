@@ -190,6 +190,8 @@ export async function mapCustodyRisk({ provider, positions, now = Date.now() }) 
       strike: position.strike, expiration: position.expiration, dte,
       iv: contract.iv, delta: contract.delta, gamma: contract.gamma,
       vega: contract.vega, theta: contract.theta,
+      greekUnits: contract.greekUnits ?? null,
+      thetaUnit: contract.greekUnits?.theta ?? 'PREMIUM_DOLLARS_PER_SHARE_PER_DAY',
       economicCapital: capital, buyingPower: capital,
     });
   }

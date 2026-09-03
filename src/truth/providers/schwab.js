@@ -218,6 +218,12 @@ export class SchwabMarketProvider extends DataProvider {
           gamma: numeric(row.gamma),
           theta: numeric(row.theta),
           vega: numeric(row.vega),
+          greekUnits: {
+            delta: 'PER_SHARE_EQUIVALENT',
+            gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
+            vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
+            theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+          },
           openInterest: numeric(row.openInterest, 0),
           volume: numeric(row.totalVolume, 0),
           multiplier: numeric(row.multiplier, 100),

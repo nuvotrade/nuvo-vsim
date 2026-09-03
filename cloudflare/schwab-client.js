@@ -1499,6 +1499,12 @@ export class SchwabD1Client {
       gamma: finite(quote.gamma ?? record.gamma),
       theta: finite(quote.theta ?? record.theta),
       vega: finite(quote.vega ?? record.vega),
+      greekUnits: {
+        delta: 'PER_SHARE_EQUIVALENT',
+        gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
+        vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
+        theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+      },
       underlyingPrice: finite(quote.underlyingPrice ?? record.underlyingPrice),
       openInterest: finite(quote.openInterest ?? record.openInterest, 0),
       volume: finite(quote.totalVolume ?? record.totalVolume, 0),

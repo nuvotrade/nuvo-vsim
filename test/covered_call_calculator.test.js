@@ -204,3 +204,39 @@ test('portfolio context shows no reference observations for a book inside them',
   assert.equal(result.complete, true);
   assert.deepEqual(result.observations, []);
 });
+
+test('a candidate still appears when all portfolio reference figures are breached', () => {
+  const portfolio = summarizeCoveredCallPortfolioState({
+    nav: 100_000,
+    cash: 2_900,
+    positions: [
+      { type: 'EQUITY', symbol: 'ABC', marketValue: 97_100 },
+    ],
+  });
+  const calculation = calculateCoveredCallCandidates({
+    symbol: 'ABC', shares: 100, averagePrice: 90, availableContracts: 1, spot: 100,
+    historyBars: history(), samples: 1_500,
+    contracts: [call({ dte: 14, strike: 118, bid: 2.1, delta: 0.22 })],
+  });
+  assert.equal(portfolio.observations.some((row) => row.name === 'DEPLOYED_ABOVE_REFERENCE'), true);
+  assert.equal(portfolio.observations.some((row) => row.name === 'CASH_BELOW_REFERENCE'), true);
+  assert.equal(portfolio.observations.some((row) => row.name === 'SINGLE_UNDERLYING_ABOVE_REFERENCE'), true);
+  assert.equal(portfolio.policy_effect, 'INFORMATIONAL_ONLY_NEVER_BLOCKS_RUN');
+  assert.equal(calculation.ok, true);
+  assert.equal(calculation.selected.symbol, 'ABC14C118');
+});
+
+test('RUN proposal theta honors Schwab per-contract units without a second 100x scale', () => {
+  const schwabCall = {
+    ...call({ dte: 14, strike: 118, bid: 2.1, delta: 0.22 }),
+    theta: -0.5733,
+    greekUnits: { theta: 'DOLLARS_PER_CONTRACT_PER_DAY' },
+  };
+  const result = calculateCoveredCallCandidates({
+    symbol: 'ABC', shares: 600, averagePrice: 90, availableContracts: 6, spot: 100,
+    historyBars: history(), samples: 1_500, contracts: [schwabCall],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.selected.theta_income_per_day, 3.4398);
+  assert.equal(result.selected.theta_source_unit, 'DOLLARS_PER_CONTRACT_PER_DAY');
+});

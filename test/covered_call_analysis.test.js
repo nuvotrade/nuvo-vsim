@@ -68,6 +68,30 @@ test('risk-neutral sigma distance is exactly -d2 and reconciles with N(-d2)', ()
   assert.ok(Math.abs(result.risk_neutral.probability_expire_otm - normCdf(-d2)) < 1e-12);
 });
 
+test('Schwab per-contract theta is scaled by contract count and never by 100 shares', () => {
+  const result = analyzeCoveredCallLifecycle(spcx);
+  assert.equal(result.current_trade.broker_long_theta_per_contract_per_day, -0.18);
+  assert.equal(result.current_trade.broker_theta_contracts, 5);
+  assert.equal(result.current_trade.broker_short_theta_per_day, 0.9);
+  assert.equal(result.current_trade.broker_theta_scaling,
+    'NEGATE_LONG_CONTRACT_THETA_X_CONTRACTS_NO_EQUITY_MULTIPLIER');
+});
+
+test('risk-neutral rate sources are explicit and carried into the result', () => {
+  const result = analyzeCoveredCallLifecycle({
+    ...spcx,
+    rate: 0.045,
+    dividendYield: 0,
+    rateSource: 'constitution-v5.2.1:riskFreeRate',
+    dividendYieldSource: 'INTENTIONAL_ZERO_NO_VERIFIED_CONTINUOUS_DIVIDEND_YIELD',
+  });
+  assert.equal(result.risk_neutral.rate, 0.045);
+  assert.equal(result.risk_neutral.dividend_yield, 0);
+  assert.equal(result.risk_neutral.rate_source, 'constitution-v5.2.1:riskFreeRate');
+  assert.equal(result.risk_neutral.dividend_yield_source,
+    'INTENTIONAL_ZERO_NO_VERIFIED_CONTINUOUS_DIVIDEND_YIELD');
+});
+
 test('Black-Scholes theta uses 2*sqrt(T), not 2*T', () => {
   const input = { type: 'call', spot: 100, strike: 105, vol: 0.4, t: 0.02, rate: 0.05, yield: 0.01 };
   const { d1, d2 } = d1d2(input);

@@ -109,6 +109,8 @@ export function analyzeCoveredCallLifecycle({
   now = Date.now(),
   rate = 0,
   dividendYield = 0,
+  rateSource = 'EXPLICIT_ZERO_INPUT',
+  dividendYieldSource = 'EXPLICIT_ZERO_INPUT',
   closeCommissionPerContract = 0.65,
   closeExchangeFeePerContract = 0,
   stockExitFees = 0,
@@ -188,7 +190,10 @@ export function analyzeCoveredCallLifecycle({
   const pOtmRn = 1 - pItmRn;
   const modelGreeks = greeks({ type: 'call', spot, strike, vol: iv, t, rate, yield: dividendYield });
   const brokerLongTheta = finite(optionQuote?.theta);
-  const shortThetaPerDay = brokerLongTheta === null ? null : -brokerLongTheta * requiredShares;
+  // Schwab reports theta in dollars per option contract per day. The quote
+  // already represents the contract's 100-share deliverable, so multiplying
+  // by the equity multiplier again inflates the position theta by 100x.
+  const shortThetaPerDay = brokerLongTheta === null ? null : -brokerLongTheta * contracts;
   const modelShortThetaPerDay = Number.isFinite(modelGreeks.theta)
     ? -modelGreeks.theta * requiredShares : null;
 
@@ -295,6 +300,9 @@ export function analyzeCoveredCallLifecycle({
       executable_extrinsic_total: money(executableExtrinsicTotal),
       extrinsic_pct_of_original_gross_credit: extrinsicPctOfOriginalCredit,
       total_liability_pct_of_original_gross_credit: totalLiabilityPctOfOriginalCredit,
+      broker_long_theta_per_contract_per_day: brokerLongTheta,
+      broker_theta_contracts: contracts,
+      broker_theta_scaling: 'NEGATE_LONG_CONTRACT_THETA_X_CONTRACTS_NO_EQUITY_MULTIPLIER',
       broker_short_theta_per_day: money(shortThetaPerDay),
       model_short_theta_per_day: money(modelShortThetaPerDay),
     },
@@ -306,6 +314,8 @@ export function analyzeCoveredCallLifecycle({
       d2,
       rate,
       dividend_yield: dividendYield,
+      rate_source: rateSource,
+      dividend_yield_source: dividendYieldSource,
       label: 'RISK_NEUTRAL_EUROPEAN_EXCLUDES_EARLY_EXERCISE',
     },
     paths: {

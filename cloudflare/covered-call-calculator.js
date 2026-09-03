@@ -327,7 +327,10 @@ export function calculateCoveredCallCandidates({
       expected_move: expectedMove,
       expected_move_buffer: expectedMoveBuffer,
       delta,
-      theta_income_per_day: Number.isFinite(theta) ? -theta * 100 * contractCount : null,
+      theta_income_per_day: Number.isFinite(theta)
+        ? -theta * contractCount * (contract.greekUnits?.theta === 'DOLLARS_PER_CONTRACT_PER_DAY' ? 1 : 100)
+        : null,
+      theta_source_unit: contract.greekUnits?.theta ?? 'PREMIUM_DOLLARS_PER_SHARE_PER_DAY',
       implied_volatility: iv,
       bid,
       ask,

@@ -484,9 +484,11 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
     const unrealized = openingCredit !== null && finite(position.marketValue) !== null
       ? openingCredit + position.marketValue : null;
     const analytics = optionAnalytics.get(position.symbol) ?? {};
-    // Schwab theta is the long-contract theta. A short position and a negative
-    // long theta therefore produce positive daily theta exposure.
-    const thetaPerDay = finite(analytics.theta) !== null ? Number(position.quantity) * multiplier * analytics.theta : null;
+    // Schwab theta is already dollars per option contract per day. Quantity
+    // supplies the position sign and contract count; the 100-share multiplier
+    // must not be applied a second time.
+    const thetaPerDay = finite(analytics.theta) !== null
+      ? Number(position.quantity) * analytics.theta : null;
     const right = String(position.right ?? '').toLowerCase();
     const spot = finite(analytics.spot) ?? finite(inventory.find(
       (row) => row.symbol === (position.underlying ?? position.symbol),
@@ -548,9 +550,8 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
     ? harvest.reduce((sum, row) => sum + row.theta_per_day, 0) : null;
   const netThetaValues = options.map((position) => {
     const theta = finite(optionAnalytics.get(position.symbol)?.theta);
-    const multiplier = finite(position.multiplier) ?? 100;
     return theta === null || finite(position.quantity) === null
-      ? null : Number(position.quantity) * multiplier * theta;
+      ? null : Number(position.quantity) * theta;
   });
   const netTheta = netThetaValues.every((value) => value !== null)
     ? netThetaValues.reduce((sum, value) => sum + value, 0) : null;
