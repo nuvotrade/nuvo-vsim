@@ -194,6 +194,13 @@ describe('protected live dashboard', () => {
     assert.ok(!source.includes('const best = rows.find(item => item.admissible)'));
     assert.match(source, /function activateView\(id\)/u);
     assert.match(source, /incremental_nev_vs_holding/u);
+    assert.match(source, /rejection_codes/u);
+    assert.match(workerSource, /rights: \['call'\]/u);
+    assert.match(workerSource, /summarizeCoveredCallPortfolioState\(snapshot, DEFAULT_LIMITS\)/u);
+    assert.match(workerSource, /portfolio_context: portfolioContext/u);
+    assert.doesNotMatch(workerSource, /if \(!portfolioContext/u);
+    assert.doesNotMatch(workerSource, /PORTFOLIO\/(?:DEPLOYED_CAP|CASH_RESERVE|SINGLE_UNDERLYING)/u);
+    assert.match(workerSource, /SCHWAB_COVERED_CALL_COSTS/u);
     assert.doesNotMatch(source, /setValue\('withdrawable-cash'/u);
     assert.match(source, /positions\.every\(position => present\(position\.marketValue\)\)/u);
     assert.doesNotMatch(source, /Math\.abs\(Number\(position\.marketValue\)/u);
@@ -292,6 +299,37 @@ describe('Massive production provider', () => {
     assert.deepEqual(events.value, []);
     assert.equal(state.value.status, 'OPEN');
     assert.ok(Number.isFinite(state.value.drawdown));
+  });
+
+  test('covered-call reads can require complete call slices without depending on put availability', async () => {
+    const requestedRights = [];
+    const base = marketFetcher();
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      fetcher: async (request) => {
+        const url = new URL(request.url);
+        if (url.pathname === '/v1/chain') {
+          requestedRights.push(url.searchParams.get('type'));
+          if (url.searchParams.get('type') === 'put') {
+            return Response.json({ spot: 526.8, contracts: [] });
+          }
+        }
+        return base(request);
+      },
+    });
+    const chain = await provider.optionChain('SPY', { expirations: [14, 30], rights: ['call'] });
+    assert.equal(chain.error, undefined);
+    assert.equal(chain.value.contracts.length, 2);
+    assert.ok(chain.value.contracts.every((contract) => contract.right === 'call'));
+    assert.deepEqual(requestedRights, ['call', 'call']);
+  });
+
+  test('option-chain right selection rejects empty or unknown rights', async () => {
+    const provider = new MassiveProvider({ fetcher: marketFetcher(), now: () => NOW });
+    assert.equal((await provider.optionChain('SPY', { expirations: [14], rights: [] })).error,
+      'MASSIVE_OPTION_RIGHTS_INVALID');
+    assert.equal((await provider.optionChain('SPY', { expirations: [14], rights: ['banana'] })).error,
+      'MASSIVE_OPTION_RIGHTS_INVALID');
   });
 
   test('removes authority when every executable option quote is stale', async () => {

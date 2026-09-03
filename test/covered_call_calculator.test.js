@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  calculateCoveredCallCandidates, configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS,
+  calculateCoveredCallCandidates,
+  configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS, SCHWAB_COVERED_CALL_COSTS,
+  summarizeCoveredCallPortfolioState,
 } from '../cloudflare/covered-call-calculator.js';
 
 function call({ dte, strike, bid, ask = bid + 0.1, delta = 0.25, oi = 500 } = {}) {
@@ -41,15 +43,18 @@ test('covered-call calculator evaluates the 7, 14, and 21 DTE targets and ranks 
   assert.equal(result.selected.rank, 1);
   assert.equal(result.selected.contracts, 3);
   assert.equal(result.selected.covered_shares, 300);
-  assert.equal(result.selected.entry_fees, 2.40,
-    '3 contracts must charge ($0.65 commission + $0.15 exchange fee) exactly once at entry');
-  assert.ok(Math.abs((result.selected.gross_premium - result.selected.net_premium) - 2.40) < 1e-9);
-  assert.equal(result.selected.cost_model_version, 'execution-cost-v2');
+  assert.equal(result.selected.entry_fees, 1.95,
+    '3 contracts must charge the observed $0.65 Schwab commission exactly once at entry');
+  assert.ok(Math.abs((result.selected.gross_premium - result.selected.net_premium) - 1.95) < 1e-9);
+  assert.equal(result.selected.expected_assignment_fee, 0);
+  assert.equal(result.selected.cost_model_version, SCHWAB_COVERED_CALL_COSTS.version);
   assert.ok(result.selected.incremental_nev_vs_holding > 0);
   assert.ok(result.selected.incremental_nev_per_day > 0);
   assert.equal(result.objective, 'MAX_INCREMENTAL_NEV_PER_DAY_VS_HOLDING_SHARES');
   assert.equal(result.forecast.status, 'VERIFIED_NO_FALLBACK');
   assert.equal(result.method.credit, 'SCHWAB_EXECUTABLE_BID');
+  assert.equal(result.method.rejection_codes.illiquid,
+    'CONSTITUTION/OPTION_LIQUIDITY_GATE_FAILED');
 });
 
 test('covered-call tenor targets are configurable while 7/14/21 remains the unratified default', () => {
@@ -138,6 +143,8 @@ test('holding shares wins when executable premium does not pay for modeled surre
   assert.equal(result.ok, false);
   assert.equal(result.reason_code, 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES');
   assert.equal(result.rejected.no_incremental_edge, 1);
+  assert.equal(result.rejection_codes['UNDERWRITE/INCREMENTAL_NEV_HURDLE_FAILED'], 1);
+  assert.equal(result.method.score, 'INCREMENTAL_NEV_VS_HOLDING_SHARES_PER_CALENDAR_DAY');
 });
 
 test('short history is blocked instead of using a fallback volatility', () => {
@@ -148,4 +155,52 @@ test('short history is blocked instead of using a fallback volatility', () => {
   assert.equal(result.ok, false);
   assert.equal(result.reason_code, 'FORECAST_HISTORY_OR_VOLATILITY_ENSEMBLE_UNAVAILABLE');
   assert.equal(result.history_sessions, 60);
+});
+
+test('portfolio context reports current utilization without blocking RUN', () => {
+  const result = summarizeCoveredCallPortfolioState({
+    nav: 100_000,
+    cash: 2_900,
+    positions: [
+      { type: 'EQUITY', symbol: 'CBRS', marketValue: 55_200 },
+      { type: 'EQUITY', symbol: 'SPCX', marketValue: 43_000 },
+      { type: 'OPTION', symbol: 'CBRS-CALL', marketValue: -300 },
+    ],
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.deployed_pct, 0.971);
+  assert.equal(result.cash_reserve_pct, 0.029);
+  assert.deepEqual(result.observations.map((row) => row.name), [
+    'DEPLOYED_ABOVE_REFERENCE',
+    'CASH_BELOW_REFERENCE',
+    'SINGLE_UNDERLYING_ABOVE_REFERENCE',
+    'SINGLE_UNDERLYING_ABOVE_REFERENCE',
+  ]);
+  assert.deepEqual(result.observations.slice(2).map((row) => row.symbol), ['CBRS', 'SPCX']);
+  assert.equal(result.policy_effect, 'INFORMATIONAL_ONLY_NEVER_BLOCKS_RUN');
+});
+
+test('incomplete portfolio context remains informational and names missing fields', () => {
+  const result = summarizeCoveredCallPortfolioState({
+    nav: 100_000,
+    cash: 25_000,
+    positions: [{ type: 'EQUITY', symbol: 'ABC', marketValue: null }],
+  });
+  assert.equal(result.complete, false);
+  assert.deepEqual(result.unavailable, ['EQUITY_MARKET_VALUES']);
+  assert.deepEqual(result.missing_market_value_symbols, ['ABC']);
+  assert.equal(result.policy_effect, 'INFORMATIONAL_ONLY_NEVER_BLOCKS_RUN');
+});
+
+test('portfolio context shows no reference observations for a book inside them', () => {
+  const result = summarizeCoveredCallPortfolioState({
+    nav: 100_000,
+    cash: 40_000,
+    positions: [
+      { type: 'EQUITY', symbol: 'ABC', marketValue: 18_000 },
+      { type: 'EQUITY', symbol: 'XYZ', marketValue: 15_000 },
+    ],
+  });
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.observations, []);
 });

@@ -3,9 +3,19 @@ import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
 import { logReturns, mean } from '../src/math/stats.js';
 import { volatilityProfile } from '../src/market/realized_vol.js';
 import { buildDistribution } from '../src/pipeline/cycle.js';
-import { DEFAULT_COSTS } from '../src/underwriter/costs.js';
 
 export const COVERED_CALL_DTE_TARGETS = Object.freeze([7, 14, 21]);
+
+// Account-observed Schwab equity-option charges. Keep this scanner-specific:
+// changing the global structure cost model would silently reprice unrelated
+// strategies. The covered-call lifecycle ledger remains the source of truth
+// for fees after a real fill.
+export const SCHWAB_COVERED_CALL_COSTS = Object.freeze({
+  version: 'schwab-covered-call-observed-2026-09-02',
+  commissionPerContract: 0.65,
+  exchangeFeePerContract: 0,
+  assignmentFee: 0,
+});
 
 export function configuredCoveredCallDteTargets(value) {
   if (value === null || value === undefined || value === '') return [...COVERED_CALL_DTE_TARGETS];
@@ -21,6 +31,95 @@ const finite = (value) => value !== null && value !== undefined && value !== ''
   && Number.isFinite(Number(value)) ? Number(value) : null;
 const clampProbability = (value) => Number.isFinite(value)
   ? Math.min(1, Math.max(0, value)) : null;
+
+const REJECTION_CODES = Object.freeze({
+  incomplete_quote: 'TRUTH/OPTION_QUOTE_INCOMPLETE',
+  at_or_below_cost_basis: 'UNDERWRITE/STRIKE_AT_OR_BELOW_COST_BASIS',
+  at_or_below_market: 'UNDERWRITE/STRIKE_AT_OR_BELOW_MARKET',
+  dte_outside_limits: 'CONSTITUTION/DTE_OUTSIDE_LIMITS',
+  event_in_window: 'TRUTH/EVENT_IN_TENOR',
+  illiquid: 'CONSTITUTION/OPTION_LIQUIDITY_GATE_FAILED',
+  no_incremental_edge: 'UNDERWRITE/INCREMENTAL_NEV_HURDLE_FAILED',
+});
+
+function namedRejections(rejected) {
+  return Object.fromEntries(Object.entries(REJECTION_CODES)
+    .map(([counter, code]) => [code, rejected[counter] ?? 0]));
+}
+
+/**
+ * Describe current portfolio utilization for the dashboard. These figures are
+ * informational only: the Principal explicitly declined book-level admission
+ * gates on the covered-call RUN route.
+ */
+export function summarizeCoveredCallPortfolioState(snapshot, limits = DEFAULT_LIMITS) {
+  const nav = finite(snapshot?.nav ?? snapshot?.account?.nav);
+  const cash = finite(snapshot?.cash ?? snapshot?.account?.cash);
+  const positions = Array.isArray(snapshot?.positions) ? snapshot.positions : null;
+  const unavailable = [];
+  if (!(nav > 0)) unavailable.push('NAV');
+  if (!Number.isFinite(cash)) unavailable.push('SETTLED_CASH');
+  if (!positions) unavailable.push('POSITIONS');
+  const equities = positions?.filter((position) => position?.type === 'EQUITY') ?? [];
+  const missingMarketValues = equities.filter((position) => !Number.isFinite(finite(position?.marketValue)))
+    .map((position) => String(position?.symbol ?? 'UNKNOWN').toUpperCase());
+  if (missingMarketValues.length) unavailable.push('EQUITY_MARKET_VALUES');
+  if (unavailable.length) return {
+    complete: false,
+    unavailable,
+    nav,
+    settled_cash: cash,
+    missing_market_value_symbols: missingMarketValues,
+    limits_version: limits?.version ?? null,
+    policy_effect: 'INFORMATIONAL_ONLY_NEVER_BLOCKS_RUN',
+  };
+
+  const positiveCash = Math.max(0, cash);
+  const cashReservePct = positiveCash / nav;
+  const deployedPct = Math.max(0, 1 - cashReservePct);
+  const observations = [];
+  if (Number.isFinite(finite(limits?.maxDeployedPct)) && deployedPct > limits.maxDeployedPct) {
+    observations.push({
+      name: 'DEPLOYED_ABOVE_REFERENCE',
+      actual: deployedPct,
+      reference: limits.maxDeployedPct,
+    });
+  }
+  if (Number.isFinite(finite(limits?.minReservePct)) && cashReservePct < limits.minReservePct) {
+    observations.push({
+      name: 'CASH_BELOW_REFERENCE',
+      actual: cashReservePct,
+      reference: limits.minReservePct,
+    });
+  }
+
+  const underlyingExposure = equities.map((position) => ({
+    symbol: String(position.symbol ?? '').toUpperCase(),
+    market_value: Math.abs(finite(position.marketValue)),
+    pct_nav: Math.abs(finite(position.marketValue)) / nav,
+  }));
+  if (Number.isFinite(finite(limits?.maxSingleUnderlyingPct))) {
+    for (const exposure of underlyingExposure) {
+      if (exposure.pct_nav > limits.maxSingleUnderlyingPct) observations.push({
+        name: 'SINGLE_UNDERLYING_ABOVE_REFERENCE',
+        symbol: exposure.symbol,
+        actual: exposure.pct_nav,
+        reference: limits.maxSingleUnderlyingPct,
+      });
+    }
+  }
+  return {
+    complete: true,
+    observations,
+    nav,
+    settled_cash: cash,
+    cash_reserve_pct: cashReservePct,
+    deployed_pct: deployedPct,
+    underlying_exposure: underlyingExposure,
+    limits_version: limits?.version ?? null,
+    policy_effect: 'INFORMATIONAL_ONLY_NEVER_BLOCKS_RUN',
+  };
+}
 
 function nearestTarget(dte, targets) {
   return targets.slice().sort((a, b) => Math.abs(a - dte) - Math.abs(b - dte) || a - b)[0];
@@ -46,7 +145,7 @@ export function calculateCoveredCallCandidates({
   samples = 8_000,
   seed = 'covered-call-entry',
   targets = COVERED_CALL_DTE_TARGETS,
-  costs = DEFAULT_COSTS,
+  costs = SCHWAB_COVERED_CALL_COSTS,
   limits = DEFAULT_LIMITS,
 } = {}) {
   const ticker = String(symbol ?? '').trim().toUpperCase();
@@ -255,6 +354,19 @@ export function calculateCoveredCallCandidates({
       status: rows.length ? 'EVALUATED' : 'NO_ELIGIBLE_STRIKE',
     };
   });
+  const method = {
+    cost_model_version: costs?.version ?? 'UNVERSIONED_EXECUTION_COST',
+    credit: 'SCHWAB_EXECUTABLE_BID',
+    assignment_probability: 'MARKET_IMPLIED_FROM_SCHWAB_IV',
+    independent_forecast: 'ZERO_DRIFT_REALIZED_VOLATILITY_ENSEMBLE_WITH_GARCH_AND_BOOTSTRAP',
+    score: 'INCREMENTAL_NEV_VS_HOLDING_SHARES_PER_CALENDAR_DAY',
+    no_trade_competitor: 'REQUIRED; INCREMENTAL_NEV_MUST_CLEAR_COST_HURDLE',
+    liquidity_gate: `CONSTITUTION_V5: SPREAD≤${limits.maxSpreadPctOfMid}; OI≥${limits.minOpenInterest}; VOLUME≥${limits.minDailyOptionVolume}; POSITION≤${limits.maxPositionPctOfOi}_OF_OI`,
+    event_gate: `NO_VERIFIED_EVENT_INSIDE_OPTION_LIFE; ${limits.eventBlackoutDays}_DAY_BLACKOUT`,
+    cost_basis_rule: 'STRIKE_MUST_BE_STRICTLY_ABOVE_AVERAGE_SHARE_PRICE',
+    market_rule: 'STRIKE_MUST_BE_STRICTLY_ABOVE_CURRENT_MARK',
+    rejection_codes: REJECTION_CODES,
+  };
   if (!ranked.length) return {
     ok: false,
     outcome: 'NO_ELIGIBLE_COVERED_CALL',
@@ -269,11 +381,13 @@ export function calculateCoveredCallCandidates({
     minimum_strike_exclusive: minimumStrikeExclusive,
     targets: tenors,
     rejected,
+    rejection_codes: namedRejections(rejected),
     forecast: {
       status: 'VERIFIED_NO_FALLBACK', history_sessions: usableBars.length,
       realized_volatility: volProfile.realized, estimator_spread: volProfile.estimatorSpread,
       garch: true, drift: 0, models: 'LOGNORMAL_JUMP_DIFFUSION_STUDENT_T_BLOCK_BOOTSTRAP',
     },
+    method,
   };
   return {
     ok: true,
@@ -289,22 +403,12 @@ export function calculateCoveredCallCandidates({
     selected: ranked[0],
     candidates: ranked,
     rejected,
+    rejection_codes: namedRejections(rejected),
     forecast: {
       status: 'VERIFIED_NO_FALLBACK', history_sessions: usableBars.length,
       realized_volatility: volProfile.realized, estimator_spread: volProfile.estimatorSpread,
       garch: true, drift: 0, models: 'LOGNORMAL_JUMP_DIFFUSION_STUDENT_T_BLOCK_BOOTSTRAP',
     },
-    method: {
-      cost_model_version: costs?.version ?? 'UNVERSIONED_EXECUTION_COST',
-      credit: 'SCHWAB_EXECUTABLE_BID',
-      assignment_probability: 'MARKET_IMPLIED_FROM_SCHWAB_IV',
-      independent_forecast: 'ZERO_DRIFT_REALIZED_VOLATILITY_ENSEMBLE_WITH_GARCH_AND_BOOTSTRAP',
-      score: 'INCREMENTAL_NEV_VS_HOLDING_SHARES_PER_CALENDAR_DAY',
-      no_trade_competitor: 'REQUIRED; INCREMENTAL_NEV_MUST_CLEAR_COST_HURDLE',
-      liquidity_gate: `CONSTITUTION_V5: SPREAD≤${limits.maxSpreadPctOfMid}; OI≥${limits.minOpenInterest}; VOLUME≥${limits.minDailyOptionVolume}; POSITION≤${limits.maxPositionPctOfOi}_OF_OI`,
-      event_gate: `NO_VERIFIED_EVENT_INSIDE_OPTION_LIFE; ${limits.eventBlackoutDays}_DAY_BLACKOUT`,
-      cost_basis_rule: 'STRIKE_MUST_BE_STRICTLY_ABOVE_AVERAGE_SHARE_PRICE',
-      market_rule: 'STRIKE_MUST_BE_STRICTLY_ABOVE_CURRENT_MARK',
-    },
+    method,
   };
 }

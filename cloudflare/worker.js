@@ -36,7 +36,9 @@ import {
   portfolioFromCustody, realizedPnlCalendar,
 } from './portfolio-report.js';
 import {
-  calculateCoveredCallCandidates, configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS,
+  calculateCoveredCallCandidates,
+  configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS, SCHWAB_COVERED_CALL_COSTS,
+  summarizeCoveredCallPortfolioState,
 } from './covered-call-calculator.js';
 import {
   BUNDLED_DESIGN_APP, BUNDLED_DESIGN_HTML, BUNDLED_DESIGN_STYLES,
@@ -1304,6 +1306,8 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     'CUSTODY/AVERAGE_SHARE_PRICE_UNAVAILABLE',
     'Average share price is required because a covered-call strike may never be at or below cost basis.');
 
+  const portfolioContext = summarizeCoveredCallPortfolioState(snapshot, DEFAULT_LIMITS);
+
   const provider = marketProvider(env, ownerId);
   const session = await provider.marketState();
   if (session.error) return blocked(symbol, 'TRUTH/MARKET_SESSION_UNVERIFIED',
@@ -1313,7 +1317,7 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     'TRUTH/SESSION_NOT_RTH',
     `The options market is ${String(session.value?.status ?? 'closed').toLowerCase()}. Recalculation becomes available automatically during regular trading hours.`);
   const [chain, events, history] = await Promise.all([
-    provider.optionChain(symbol, { expirations: targetDtes }),
+    provider.optionChain(symbol, { expirations: targetDtes, rights: ['call'] }),
     provider.events(symbol),
     provider.history(symbol, { lookback: 400, minBars: 121 }),
   ]);
@@ -1339,6 +1343,7 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     now: Date.now(),
     seed: `covered-call-entry:${symbol}:${chain.asOf}`,
     targets: targetDtes,
+    costs: SCHWAB_COVERED_CALL_COSTS,
   });
   return {
     ...calculation,
@@ -1357,6 +1362,7 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     source: chain.source,
     diagnostics: {
       reconciliation: reconciliation.status,
+      portfolio_context: portfolioContext,
       market_session: session.value.status,
       existing_short_calls: shortCallContracts,
       chain_contracts_evaluated: chain.value?.contracts?.length ?? 0,
@@ -2881,7 +2887,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       symbol: result && result.symbol, target_dtes: result && result.target_dtes,
       average_price: result && result.average_price, current_mark: result && result.spot,
       minimum_strike_exclusive: result && result.minimum_strike_exclusive,
-      rejected: result && result.rejected, forecast: result && result.forecast, method: result && result.method,
+      rejected: result && result.rejected, rejection_codes: result && result.rejection_codes,
+      forecast: result && result.forecast, method: result && result.method,
       diagnostics: result && result.diagnostics, source: result && result.source,
       execution: result && result.execution,
     }, null, 2));

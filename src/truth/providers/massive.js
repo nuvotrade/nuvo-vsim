@@ -224,10 +224,15 @@ export class MassiveProvider extends DataProvider {
     }
   }
 
-  async optionChain(symbol, { expirations = this.dteTargets } = {}) {
+  async optionChain(symbol, { expirations = this.dteTargets, rights = RIGHTS } = {}) {
     try {
+      const requestedRights = [...new Set((Array.isArray(rights) ? rights : [])
+        .map((right) => String(right).toLowerCase()))];
+      if (!requestedRights.length || requestedRights.some((right) => !RIGHTS.includes(right))) {
+        return { error: 'MASSIVE_OPTION_RIGHTS_INVALID' };
+      }
       const [packets, liveUnderlying] = await Promise.all([
-        Promise.all(expirations.flatMap((dte) => RIGHTS.map(async (right) => {
+        Promise.all(expirations.flatMap((dte) => requestedRights.map(async (right) => {
           const path = `/v1/chain?ticker=${encodeURIComponent(symbol)}&dte=${dte}`
             + `&deltaTarget=0.25&type=${right}&strict=1`;
           return { targetDte: dte, right, body: await this._get(path, { cache: false }) };
@@ -260,7 +265,7 @@ export class MassiveProvider extends DataProvider {
         && row.quoteAsOf <= now + 10_000
         && now - row.quoteAsOf <= this.maxChainAgeMs));
       const contracts = [...new Map(groups.flat().map((row) => [row.symbol, row])).values()];
-      const requested = expirations.length * RIGHTS.length;
+      const requested = expirations.length * requestedRights.length;
       if (packets.length !== requested || groups.some((group) => group.length === 0)) {
         return { error: 'MASSIVE_EXECUTABLE_CHAIN_UNAVAILABLE' };
       }
