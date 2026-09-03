@@ -2217,6 +2217,11 @@ export function armLaneContract(state = {}) {
     return { permitted: false, faultCode: 'LANE_1_ARM_FILL_PENDING',
       text: `ARM REFUSED · ${state.state ?? 'FILL_PENDING'}` };
   }
+  if (state.state === 'FAULT' && state.positionSide === 'FLAT'
+    && state.faultCode === 'LANE_1_EXIT_PENDING_STATE_REQUIRED') {
+    return { permitted: true, transition: 'RESOLVE_COMPLETED_EXIT_AND_ARM',
+      text: 'ARM · FLAT · verify completed exit, clear stale fault, and arm' };
+  }
   if (state.faultCode || state.state === 'FAULT') {
     return { permitted: false, faultCode: 'LANE_1_ARM_FAULT_PRESENT',
       text: 'ARM REFUSED · FAULT' };
@@ -3405,7 +3410,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       setLaneState(summary.arm.value === 'ON');
     }
     const renderedArmContract = armLaneContract({ state: summary.arm?.stage,
-      positionSide: summary.arm?.positionSide });
+      positionSide: summary.arm?.positionSide,
+      faultCode: summary.blocking === 'LANE_1_EXIT_PENDING_STATE_REQUIRED'
+        ? summary.blocking : null });
     text(q('[data-vsim="bot-arm-contract"]'), renderedArmContract.text);
     const position = summary.position || {};
     const compactPosition = position.value === 'POSITION_DRIFT'

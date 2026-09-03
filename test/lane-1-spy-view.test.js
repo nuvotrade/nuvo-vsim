@@ -159,6 +159,11 @@ test('ARM panel contract follows live coordinator stage and names illegal states
   });
   assert.equal(armLaneContract({ state: 'FLAT', positionSide: 'FLAT' }).transition,
     'FLAT_ONLY');
+  assert.deepEqual(armLaneContract({ state: 'FAULT', positionSide: 'FLAT',
+    faultCode: 'LANE_1_EXIT_PENDING_STATE_REQUIRED' }), {
+    permitted: true, transition: 'RESOLVE_COMPLETED_EXIT_AND_ARM',
+    text: 'ARM · FLAT · verify completed exit, clear stale fault, and arm',
+  });
   assert.equal(armLaneContract({ state: 'FAULT', positionSide: 'SHORT',
     faultCode: 'TEST' }).faultCode, 'LANE_1_ARM_FAULT_PRESENT');
   assert.equal(armLaneContract({ state: 'FILL_PENDING_FEE', positionSide: 'SHORT',
