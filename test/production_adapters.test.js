@@ -88,7 +88,9 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /data-vsim="deployed-gauge"/u);
     assert.match(rewriteSource, /data-vsim="reserve-gauge"/u);
     assert.match(rewriteSource, /data-vsim="concentration-cap"/u);
-    assert.match(rewriteSource, /Distance to strike/u);
+    assert.match(rewriteSource, /<h3>Position book<\/h3>/u);
+    assert.match(rewriteSource, /<h3>Covered-call lifecycle<\/h3>/u);
+    assert.match(rewriteSource, /LIMIT BREACHES · INFORMATION ONLY/u);
     assert.match(rewriteSource, /performance-unrealized-note/u);
     assert.doesNotMatch(rewriteSource, /<span>Withdrawable cash<\/span>/u);
     assert.ok(rewriteSource.indexOf('<h3>Expiration ladder<\/h3>')
@@ -125,7 +127,7 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /data-jump-system-history/u);
     assert.match(rewriteSource, /7 \/ 14 \/ 21 DTE comparison/u);
     assert.match(rewriteSource, /Strike must exceed your average share price/u);
-    assert.match(rewriteSource, />Directive<\/th>/u);
+    assert.match(rewriteSource, /CALCULATE CC opens read-only Underwrite math/u);
     assert.match(rewriteSource, /<th>NEV \/ day<\/th><th>vs hold<\/th>/u);
     assert.match(rewriteSource, /calculator-results\[hidden\]/u);
     assert.doesNotMatch(rewriteSource, /<th>Annualized ROC<\/th>/u);
@@ -160,8 +162,8 @@ describe('protected live dashboard', () => {
     assert.match(source, /equities and options/u);
     assert.match(source, /risk_instrumentation/u);
     assert.match(source, /expiration_ladder/u);
-    assert.match(source, /quoteValue\(item, item\.mark, true\)/u);
-    assert.match(source, /distance_to_strike_sigma/u);
+    assert.match(source, /quoteValue\(item, present\(item\.market_value\) \? Math\.abs\(Number\(item\.market_value\)\) : null, true\)/u);
+    assert.match(source, /distance\.risk_neutral_sigma/u);
     assert.match(source, /LAST_MARKET_QUOTE/u);
     assert.match(source, /stale-badge/u);
     assert.match(source, /performance-unrealized-note/u);
@@ -170,7 +172,7 @@ describe('protected live dashboard', () => {
     assert.match(source, /share_open_pnl/u);
     assert.match(source, /market\?\.color === 'GREEN'/u);
     assert.match(source, /\/api\/covered-call\/calculate\?symbol=/u);
-    assert.match(source, /SELL CC/u);
+    assert.match(source, /CALCULATE CC/u);
     assert.match(source, /covered_call_actionable/u);
     assert.match(source, /function renderCoveredCall\(result\)/u);
     assert.match(source, /function renderCashSecuredPuts\(result\)/u);

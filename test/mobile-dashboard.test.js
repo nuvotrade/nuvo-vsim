@@ -12,7 +12,7 @@ test('phone monitoring layout reaches every live tab and uses dedicated BOT and 
   assert.match(html, /grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/u);
   assert.match(html, /#bot>\.bot-status-card\{display:block\}/u);
   assert.match(html, /#system>\.mobile-system-brief\{display:block\}/u);
-  assert.match(html, /Principal-confirmed alert configuration; not runtime evidence\./u);
+  assert.match(html, /Principal-confirmed TradingView configuration; not runtime fill evidence\./u);
   assert.doesNotMatch(html, /Evidence and measurement notes|lane-summary-details|lane-summary-source/u);
 });
 
@@ -58,6 +58,24 @@ test('phone portfolio tables become labeled cards instead of clipped or horizont
   const script = liveDashboardScript();
   assert.match(script, /cell\.dataset\.label = labels\[index\] \|\| ''/u);
   assert.match(script, /cell\.dataset\.label = labels\[index\]/u);
+});
+
+test('Overview cleanup keeps one hierarchical book, one clock stack, and wide Operations', async () => {
+  const html = await (await fullDashboard()).text();
+  const overviewStart = html.indexOf('<section class="view active" id="overview"');
+  const underwriteStart = html.indexOf('<section class="view" id="underwrite"');
+  const overview = html.slice(overviewStart, underwriteStart);
+  assert.match(overview, /Portfolio overview/u);
+  assert.match(overview, /data-vsim="breach-strip"/u);
+  assert.match(overview, /data-vsim="clock-custody"/u);
+  assert.match(overview, /data-vsim="clock-option"/u);
+  assert.match(overview, /data-vsim="clock-calculation"/u);
+  assert.match(overview, /<h3>Position book<\/h3>/u);
+  assert.match(overview, /<h3>Covered-call lifecycle<\/h3>/u);
+  assert.match(overview, /<h3 id="overview-operations-title">Operations<\/h3>/u);
+  assert.doesNotMatch(overview, /<h3>Open positions<\/h3>|LAYER 8/u);
+  assert.ok(overview.indexOf('Position book') < overview.indexOf('Covered-call lifecycle'));
+  assert.ok(overview.indexOf('Covered-call lifecycle') < overview.indexOf('Operations'));
 });
 
 test('BOT card uses the shared broker-first projection and a genuine debounced refresh', () => {

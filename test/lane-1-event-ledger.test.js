@@ -106,7 +106,10 @@ test('BOT tab projects Phase 1 evidence and uses only existing coordinator contr
   assert.match(html, /LANE_1 · SPY 1 SHARE/u);
   assert.match(html, /BOT summary/u);
   assert.doesNotMatch(html, /Evidence and measurement notes|lane-summary-details|lane-summary-source/u);
-  assert.match(html, /title="Principal-confirmed alert configuration; not runtime evidence\."/u);
+  assert.match(html, /title="Principal-confirmed TradingView configuration; not runtime fill evidence\."/u);
+  assert.match(html, /<span role="columnheader"[^>]*>TV<\/span>/u);
+  assert.match(html, /<span role="columnheader">Disposition<\/span>/u);
+  assert.match(html, /<span role="columnheader">Schwab<\/span>/u);
   assert.doesNotMatch(html, /Five scoreboards|1 \/ 5/u);
   assert.match(html, /P&amp;L · <span data-vsim="bot-pnl-status">NOT_MEASURED/u);
   assert.match(html, /data-vsim="bot-order-reason">NEVER ARMED/u);

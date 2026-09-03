@@ -46,7 +46,7 @@ function exactFillInstructions(events) {
     if (event.event !== 'FILL' || event.qualifiedStage0Fill !== true
       || !LANE_1_INSTRUCTIONS.includes(event.instruction) || !event.fillId) continue;
     result.set(event.instruction, { status: 'FILLED', fillId: event.fillId,
-      source: event.sourceEventType });
+      timestamp: event.timestamp, source: event.sourceEventType });
   }
   return result;
 }

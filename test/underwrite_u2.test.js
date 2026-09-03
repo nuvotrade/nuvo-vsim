@@ -40,8 +40,10 @@ test('U2 initial Overview cannot crash on the removed legacy opportunity table',
     'an absent optional table must not block live custody rendering');
   assert.doesNotMatch(renderOverview, /top-opportunities-panel/u,
     'Overview must not target the U2-removed legacy opportunity table');
-  assert.match(renderOverview, /positions\.length \+ ' open'/u,
-    'the same initial render still builds the live-position panel');
+  assert.match(source, /function renderPortfolio[\s\S]*data-vsim="position-book"/u,
+    'the portfolio render still builds the consolidated live Position Book');
+  assert.doesNotMatch(renderOverview, /positions-empty|Open positions/u,
+    'Overview no longer renders the redundant raw custody table');
   assert.match(source, /function removeLegacyOverviewOpportunities\(\)/u);
   assert.match(source, /heading\?\.textContent\.trim\(\) === 'Top opportunities'/u);
   assert.match(source, /relocateTopOpportunities\(\);\s+removeLegacyOverviewOpportunities\(\);/u,

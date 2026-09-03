@@ -10,7 +10,7 @@ const calculatorSource = readFileSync(
 
 test('U4 glass is an explicit read-only comparison and never presents a recommendation', () => {
   const source = liveDashboardScript();
-  assert.match(source, /COMPARE LIVE CHOICES/u);
+  assert.match(source, /COMPARE IN UNDERWRITE/u);
   assert.match(source, /COMMON-CLOCK CHOICE TABLE · READ ONLY/u);
   assert.match(source, /snapshot skew/u);
   assert.match(source, /Path NEV₀ ± SE/u);
