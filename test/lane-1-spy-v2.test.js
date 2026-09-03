@@ -78,8 +78,13 @@ function makeHarness({ armed = true, configArmed = armed,
       return structuredClone(state);
     },
     async recordFault(detail) {
+      if (state.stage === 'FAULT' && state.fault?.faultCode === detail.faultCode
+        && state.fault?.detail === detail.detail
+        && (state.fault?.brokerOrderId ?? null) === (detail.brokerOrderId ?? null)) {
+        return { ...structuredClone(state), changed: false };
+      }
       state = { ...state, armed: false, stage: 'FAULT', fault: detail };
-      return structuredClone(state);
+      return { ...structuredClone(state), changed: true };
     },
     async disarm() {
       state = { ...state, armed: false, stage: 'DISARMED' }; return structuredClone(state);
@@ -287,6 +292,16 @@ test('custody drift blocks before either market order', async () => {
   assert.equal(h.calls.some((entry) => entry.startsWith('market:')), false);
 });
 
+test('an unchanged position fault is edge-triggered across repeated maintenance passes', async () => {
+  const h = makeHarness({ positionSide: 'LONG', custodySide: 'FLAT' });
+  const first = await h.controller.reconcile();
+  const second = await h.controller.reconcile();
+  assert.equal(first.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
+  assert.equal(second.body.faultCode, 'LANE_1_POSITION_STATE_DRIFT');
+  assert.equal(h.notices.filter((notice) => notice.type === 'FAULT').length, 1);
+  assert.equal(h.state().stage, 'FAULT');
+});
+
 test('durable Principal ARM enables BUY and SELL while environment stays OFF', async () => {
   const h = makeHarness({ armed: true, configArmed: false });
   const opened = await h.controller.signal(signal('BUY'));
@@ -347,6 +362,18 @@ test('reconciliation reports unknown broker state instead of calling it an exter
   assert.equal(h.state().fault.detail, 'LANE_1_POSITION_STATE_DRIFT:BROKER_POSITION_UNKNOWN');
   assert.equal(result.body.sent, false);
   assert.equal(h.state().armed, false);
+});
+
+test('maintenance reconciliation is inert while accepted fill finalization owns the lane', async () => {
+  const h = makeHarness();
+  const pending = await h.controller.signal(signal('BUY'));
+  assert.equal(pending.body.state, 'FILL_PENDING_EXECUTION');
+  const before = h.calls.length;
+  const result = await h.controller.reconcile();
+  assert.equal(result.body.disposition, 'reconciliation-in-flight');
+  assert.equal(h.calls.length, before, 'no broker read, fault write, or alert during fill ownership');
+  assert.equal(h.state().stage, 'FILL_PENDING_EXECUTION');
+  assert.equal(h.notices.length, 0);
 });
 
 // These are synthetic contract/guard tests, not TradingView deliveries or fills.

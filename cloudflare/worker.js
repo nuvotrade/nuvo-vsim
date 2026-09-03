@@ -5335,7 +5335,7 @@ async function route(request, env, ctx) {
       loadLatestCustody(env, owner.id), lane1Status(env, owner.id),
       latestLane1ReplayIngress(env, owner.id),
       positionStub?.laneV2PositionProjection
-        ? positionStub.laneV2PositionProjection({ ownerId: owner.id, refresh: false,
+        ? positionStub.laneV2PositionProjection({ ownerId: owner.id, refresh: true,
           maxAgeMs: 60_000 }) : null,
     ]);
     return json(buildE3SpineTab({ cycleSnapshot, laneUnit, lanePreviewSource,
@@ -5344,7 +5344,9 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/lane-1-spy/ledger' && request.method === 'GET') {
     return json(await lane1EventLedger(env, owner.id, {
       limit: Number(url.searchParams.get('limit') ?? 250),
-      refreshPosition: url.searchParams.get('refresh') === '1',
+      // Never let a historical broker cache make a live lane look FLAT.
+      // Callers may opt out only for bounded forensic reads.
+      refreshPosition: url.searchParams.get('refresh') !== '0',
     }));
   }
   if (url.pathname === '/api/lane-1-spy/disarm' && request.method === 'POST') {

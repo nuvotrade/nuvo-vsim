@@ -401,6 +401,7 @@ function coordinatorV2Adapter(env, ownerId) {
     principalArm: (value) => stub.laneV2PrincipalArm(value),
     principalArmExisting: (value) => stub.laneV2PrincipalArmExisting(value),
     resolveCompletedExitFault: (value) => stub.laneV2ResolveCompletedExitFault(value),
+    resolvePositionDrift: (value) => stub.laneV2ResolvePositionDrift(value),
     recoverOpen: (value) => stub.laneV2RecoverOpen(value),
     disarm: (value) => stub.laneV2Disarm(value),
     status: () => stub.laneV2Status(),
@@ -578,8 +579,10 @@ export async function resumeLane1PendingFill({ env, ownerId, coordinator,
     const fault = await coordinator.recordFault({ faultCode: 'FILL_ECONOMICS_TIMEOUT',
       detail: 'FILL_ECONOMICS_TIMEOUT:120_SECONDS', brokerOrderId: pending.brokerOrderId,
       at: new Date(Number.isFinite(instant) ? instant : Date.now()).toISOString() });
-    try { await (dependencies.notifier ?? notifier(env, ownerId)).send({ type: 'FAULT',
-      faultCode: 'FILL_ECONOMICS_TIMEOUT', brokerOrderId: pending.brokerOrderId }); } catch { /* DO history is authoritative. */ }
+    if (fault.changed !== false) {
+      try { await (dependencies.notifier ?? notifier(env, ownerId)).send({ type: 'FAULT',
+        faultCode: 'FILL_ECONOMICS_TIMEOUT', brokerOrderId: pending.brokerOrderId }); } catch { /* DO history is authoritative. */ }
+    }
     return { status: fault.stage, terminal: true, faultCode: 'FILL_ECONOMICS_TIMEOUT' };
   }
   const client = dependencies.client ?? new SchwabD1Client(env);
@@ -759,7 +762,7 @@ export async function resolveLane1CompletedExitFault({ env, ownerId,
 }
 
 export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
-  principalConfirmation, dependencies = {} }) {
+  principalConfirmation, notifyRecovery = true, dependencies = {} }) {
   if (principalConfirmation !== 'RECONCILE_BROKER_LEDGER_OPEN') {
     return { status: 400, body: { state: 'REFUSED',
       faultCode: 'LANE_1_RECOVERY_CONFIRMATION_REQUIRED' } };
@@ -777,7 +780,7 @@ export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
       faultCode: 'BROKER_UNREACHABLE', detail: String(error?.message ?? error) } };
   }
   const state = await coordinator.status();
-  if (state.pendingFill) {
+  if (state.pendingFill && state.stage !== 'FAULT') {
     return { status: 409, body: { state: state.stage,
       faultCode: 'LANE_1_RECONCILIATION_FILL_PENDING',
       coordinatorPositionSide: state.positionSide ?? 'UNKNOWN',
@@ -790,8 +793,11 @@ export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
     return { status: 200, body: { state: state.stage, disposition: 'already-reconciled',
       positionSide: state.positionSide, acquiredAt: brokerSnapshot.acquiredAt } };
   }
-  if (state.armed || !['FLAT', 'SHORT'].includes(state.positionSide)
-    || brokerSnapshot.positionSide !== 'SHORT'
+  const recoveredSide = brokerSnapshot.positionSide;
+  const recoveredInstruction = recoveredSide === 'LONG' ? 'BUY'
+    : recoveredSide === 'SHORT' ? 'SELL_SHORT' : null;
+  if (state.armed || !recoveredInstruction
+    || !['FLAT', recoveredSide].includes(state.positionSide)
     || !state.open?.seal?.clientOrderId || !state.open?.brokerOrderId) {
     return { status: 409, body: { state: 'POSITION_DRIFT',
       faultCode: 'LANE_1_RECOVERY_CONTEXT_MISSING',
@@ -805,19 +811,19 @@ export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
     if (state.entryIdentity?.evidenceOrigin === 'BROKER_LEDGER_RECONSTRUCTION') {
       const candidate = await client.lane1V2RecoverableStoredFill(ownerId, {
         brokerOrderId: state.open.brokerOrderId, clientOrderId: seal.clientOrderId,
-        side: 'SELL_SHORT', accountHash: brokerSnapshot.accountHash, capture: false,
+        side: recoveredInstruction, accountHash: brokerSnapshot.accountHash, capture: false,
       });
       const candidateIdentity = lane1FillIdentity({ fill: candidate,
         tvBodyBindingSha256: seal.tvBodyBindingSha256 });
       if (sameLane1FillIdentity(state.entryIdentity.identity, candidateIdentity)) {
         if (state.stage === 'FAULT') {
-          const restored = await coordinator.recoverOpen({ signal: 'SHORT',
+          const restored = await coordinator.recoverOpen({ signal: recoveredSide,
             unit: state.latestUnit, identity: state.entryIdentity.identity,
             evidenceOrigin: state.entryIdentity.evidenceOrigin,
             captureEvidence: state.entryIdentity.captureEvidence,
             receiptId: state.entryIdentity.receiptId, brokerSnapshot,
             principalConfirmation });
-          if (restored.stage !== 'OPEN_SHORT' || restored.positionSide !== 'SHORT'
+          if (restored.stage !== `OPEN_${recoveredSide}` || restored.positionSide !== recoveredSide
             || restored.fault) {
             return { status: 409, body: { state: restored.stage,
               faultCode: 'LANE_1_RECOVERY_FAULT_NOT_CLEARED',
@@ -841,7 +847,7 @@ export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
     }
     const fill = await client.lane1V2RecoverableStoredFill(ownerId, {
       brokerOrderId: state.open.brokerOrderId, clientOrderId: seal.clientOrderId,
-      side: 'SELL_SHORT', accountHash: brokerSnapshot.accountHash,
+      side: recoveredInstruction, accountHash: brokerSnapshot.accountHash,
     });
     const evidenceOrigin = 'BROKER_LEDGER_RECONSTRUCTION';
     assertLane1FillEvidence(fill.captureEvidence, evidenceOrigin);
@@ -853,19 +859,22 @@ export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
     const unit = await materializeLane1V2Unit({ events, fill, stop: null,
       bundleStore: dependencies.bundleStore ?? bundleStore(env, ownerId) });
     const receipt = await (dependencies.receiptStore ?? fillReceiptStore(env, ownerId)).write({
-      type: 'OPEN_FILLED', signal: 'SHORT', identity, evidenceOrigin,
+      type: 'OPEN_FILLED', signal: recoveredSide, identity, evidenceOrigin,
       captureEvidence: fill.captureEvidence, manifestHash: unit.manifestHash,
       resolvedUnitId: unit.resolvedUnitId, qualifiedStage0Fill: false,
       recordedAt: fill.acquiredAt,
     });
-    const recovered = await coordinator.recoverOpen({ signal: 'SHORT', unit, identity,
+    const recovered = await coordinator.recoverOpen({ signal: recoveredSide, unit, identity,
       evidenceOrigin, captureEvidence: fill.captureEvidence, receiptId: receipt.id,
       brokerSnapshot, principalConfirmation });
-    await (dependencies.notifier ?? notifier(env, ownerId)).send({ type: 'OPENED', side: 'SHORT', symbol: 'SPY', quantity: 1,
-      fillId: unit.openingFillId, manifestHash: unit.manifestHash,
-      priceUsdPerShare: unit.openingPriceUsdPerShare, feesCents: unit.openingFeeCents,
-      netCents: unit.netCashMovementCents, brokerOrderId: identity.brokerOrderId,
-      tvBodyBindingSha256: identity.tvBodyBindingSha256, evidenceOrigin });
+    if (notifyRecovery) {
+      await (dependencies.notifier ?? notifier(env, ownerId)).send({ type: 'OPENED',
+        side: recoveredSide, symbol: 'SPY', quantity: 1,
+        fillId: unit.openingFillId, manifestHash: unit.manifestHash,
+        priceUsdPerShare: unit.openingPriceUsdPerShare, feesCents: unit.openingFeeCents,
+        netCents: unit.netCashMovementCents, brokerOrderId: identity.brokerOrderId,
+        tvBodyBindingSha256: identity.tvBodyBindingSha256, evidenceOrigin });
+    }
     return { status: 200, body: { state: recovered.stage,
       disposition: 'BROKER_LEDGER_RECONSTRUCTION', positionSide: recovered.positionSide,
       receiptId: receipt.id, manifestHash: unit.manifestHash,
@@ -1151,8 +1160,10 @@ export async function flattenLane1ByPrincipal({ body, env, ownerId,
       faultCode: code, detail: String(error?.message ?? error),
       brokerOrderId: acceptedOrderId, at: new Date(now()).toISOString(),
     });
-    try { await notices.send({ type: 'FAULT', faultCode: code,
-      brokerOrderId: acceptedOrderId, state: faultState.stage }); } catch { /* diary is authoritative */ }
+    if (faultState.changed !== false) {
+      try { await notices.send({ type: 'FAULT', faultCode: code,
+        brokerOrderId: acceptedOrderId, state: faultState.stage }); } catch { /* diary is authoritative */ }
+    }
     return { status: 422, body: { state: faultState.stage, faultCode: code,
       brokerOrderId: acceptedOrderId } };
   }
@@ -1194,9 +1205,22 @@ export async function lane1Status(env, ownerId) {
   return coordinatorV2Adapter(env, ownerId).status();
 }
 
-export async function expireLane1(env, ownerId) {
+export async function expireLane1(env, ownerId, dependencies = {}) {
   try {
-    const runtime = createLane1Runtime(env, ownerId);
+    const status = dependencies.status ?? (() => lane1Status(env, ownerId));
+    const recover = dependencies.recover ?? ((options) =>
+      reconcileLane1OpenFromBrokerLedger(options));
+    const state = await status();
+    const staleAcceptedFill = state?.stage === 'FAULT'
+      && state?.fault?.faultCode === 'LANE_1_POSITION_STATE_DRIFT'
+      && state?.armed === false && Boolean(state?.pendingFill)
+      && Boolean(state?.open?.seal?.clientOrderId) && Boolean(state?.open?.brokerOrderId);
+    if (staleAcceptedFill) {
+      const recovered = await recover({ env, ownerId,
+        principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN', notifyRecovery: false });
+      if (recovered?.status === 200) return recovered;
+    }
+    const runtime = dependencies.runtime ?? createLane1Runtime(env, ownerId);
     const reconciled = await runtime.reconcile();
     return reconciled ?? await runtime.expire();
   }

@@ -221,6 +221,50 @@ test('a terminal fault remains disarmed and preserves pending identity for an in
   assert.equal(state.result.pendingFill.brokerOrderId, 'ORDER-1');
 });
 
+test('same active fault is one durable edge across retries and restarts', async () => {
+  const owner = 'FAULT-DEDUPE-OWNER';
+  const now = Date.now();
+  await rpc(owner, 'laneV2PrincipalArm', { reason: 'PRINCIPAL_DASHBOARD_ARM',
+    armedAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString() });
+  const fault = { faultCode: 'LANE_1_POSITION_STATE_DRIFT',
+    detail: 'LANE_1_POSITION_STATE_DRIFT:COORDINATOR_FLAT_BROKER_LONG',
+    brokerOrderId: null, at: new Date(now + 1).toISOString() };
+  const first = await rpc(owner, 'laneV2RecordFault', fault);
+  const repeated = await rpc(owner, 'laneV2RecordFault', { ...fault,
+    at: new Date(now + 60_001).toISOString() });
+  assert.equal(first.result.changed, true);
+  assert.equal(repeated.result.changed, false);
+  const history = await rpc(owner, 'laneV2History', { limit: 50 });
+  assert.equal(history.result.events.filter((row) => row.event_type === 'FAULT').length, 1);
+  assert.equal(history.result.events.filter((row) => row.event_type === 'AUTO_DISARMED').length, 1);
+});
+
+test('fresh full FLAT reconciliation clears only the matching drift fault', async () => {
+  const owner = 'FLAT-DRIFT-OWNER';
+  const now = Date.now();
+  await rpc(owner, 'laneV2PrincipalArm', { reason: 'PRINCIPAL_DASHBOARD_ARM',
+    armedAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString() });
+  await rpc(owner, 'laneV2RecordFault', { faultCode: 'LANE_1_POSITION_STATE_DRIFT',
+    detail: 'LANE_1_POSITION_STATE_DRIFT:BROKER_POSITION_UNKNOWN', at: new Date(now + 1).toISOString() });
+  const resolved = await rpc(owner, 'laneV2ResolvePositionDrift', {
+    brokerSnapshot: snapshot('FLAT') });
+  assert.equal(resolved.status, 200, JSON.stringify(resolved));
+  assert.equal(resolved.result.stage, 'FLAT');
+  assert.equal(resolved.result.positionSide, 'FLAT');
+  assert.equal(resolved.result.armed, false);
+  assert.equal(resolved.result.fault, null);
+
+  const unrelated = 'UNRELATED-FLAT-FAULT';
+  await rpc(unrelated, 'laneV2PrincipalArm', { reason: 'PRINCIPAL_DASHBOARD_ARM',
+    armedAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString() });
+  await rpc(unrelated, 'laneV2RecordFault', { faultCode: 'BROKER_UNREACHABLE',
+    detail: 'BROKER_UNREACHABLE', at: new Date(now + 1).toISOString() });
+  const refused = await rpc(unrelated, 'laneV2ResolvePositionDrift', {
+    brokerSnapshot: snapshot('FLAT') });
+  assert.equal(refused.status, 422);
+  assert.match(refused.error, /LANE_1_POSITION_DRIFT_RESOLUTION_REFUSED/u);
+});
+
 test('arm-existing preserves recovered SHORT and the coordinator admits only BUY_TO_COVER', async () => {
   const timing = await faultedShortDispatch('ARM-EXISTING-OWNER');
   const recovered = await rpc('ARM-EXISTING-OWNER', 'laneV2RecoverOpen', {

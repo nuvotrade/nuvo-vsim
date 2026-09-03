@@ -244,7 +244,10 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
     const state = await coordinator.recordFault({ faultCode: code,
       detail: String(error?.message ?? error), brokerOrderId: accepted?.brokerOrderId ?? null,
       at: new Date(now()).toISOString() });
-    await notify({ type: 'FAULT', faultCode: code, brokerOrderId: accepted?.brokerOrderId ?? null });
+    if (state.changed !== false) {
+      await notify({ type: 'FAULT', faultCode: code,
+        brokerOrderId: accepted?.brokerOrderId ?? null });
+    }
     return response(200, { state: state.stage, faultCode: code, sent: Boolean(accepted) });
   }
   async function recordPendingFill(error, { signal, seal, accepted }) {
@@ -366,12 +369,27 @@ export function createLane1SpyV2Controller({ config, coordinator, broker, bundle
     },
     async reconcile() {
       try {
-        const custody = await broker.position();
-        const state = await coordinator.status();
+        let state = await coordinator.status();
+        const inFlight = (value) => Boolean(value?.pendingFill)
+          || ['LONG_SENDING', 'SHORT_SENDING', 'EXIT_SENDING',
+            'FILL_PENDING_EXECUTION', 'FILL_PENDING_FEE'].includes(value?.stage);
+        // Broker can legitimately move before fill economics are materialized
+        // into the coordinator. The fill alarm is the sole writer in that
+        // window, so the maintenance reconciler must stay inert.
+        if (inFlight(state)) return noSend('reconciliation-in-flight', state);
+        const custody = broker.sendSnapshot ? await broker.sendSnapshot() : await broker.position();
+        state = await coordinator.status();
+        if (inFlight(state)) return noSend('reconciliation-in-flight', state);
         if (!['FLAT', 'LONG', 'SHORT'].includes(state?.positionSide)) {
           throw new Error('LANE_1_POSITION_STATE_DRIFT:COORDINATOR_POSITION_UNKNOWN');
         }
-        assertLane1PositionAgreement(custody?.positionSide, custody);
+        assertLane1PositionAgreement(state.positionSide, custody);
+        if (state.stage === 'FAULT'
+          && state.fault?.faultCode === 'LANE_1_POSITION_STATE_DRIFT'
+          && typeof coordinator.resolvePositionDrift === 'function') {
+          const resolved = await coordinator.resolvePositionDrift({ brokerSnapshot: custody });
+          return noSend('position-drift-resolved', resolved, { faultCleared: true });
+        }
         if (custody.positionSide === state.positionSide) return null;
         throw new Error(`LANE_1_POSITION_STATE_DRIFT:COORDINATOR_${state.positionSide}_BROKER_${custody.positionSide}`);
       } catch (error) { return recordFault(error); }

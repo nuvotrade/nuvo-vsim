@@ -775,6 +775,12 @@ export class VsimAccountCoordinator extends DurableObject {
 
   async laneV2RecordFault(detail) {
     const at = String(detail?.at ?? new Date().toISOString());
+    const existing = this.#laneV2State();
+    const sameActiveFault = existing.stage === 'FAULT'
+      && existing.fault?.faultCode === detail?.faultCode
+      && String(existing.fault?.brokerOrderId ?? '') === String(detail?.brokerOrderId ?? '')
+      && String(existing.fault?.detail ?? '') === String(detail?.detail ?? '');
+    if (sameActiveFault) return { ...existing, changed: false };
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(`UPDATE lane_1_spy_v2_state SET armed=0,stage='FAULT',fault_json=?,updated_at=?
         WHERE singleton=1`, JSON.stringify(detail), at);
@@ -782,7 +788,40 @@ export class VsimAccountCoordinator extends DurableObject {
       this.#laneV2Record('AUTO_DISARMED', { reason: detail?.faultCode
         ?? 'LANE_1_SYSTEM_FAULT', brokerOrderId: detail?.brokerOrderId ?? null }, at);
     });
-    return this.#laneV2State();
+    return this.#laneV2State({ changed: true });
+  }
+
+  async laneV2ResolvePositionDrift({ brokerSnapshot }) {
+    const state = this.#laneV2State();
+    assertLane1SendSnapshot(brokerSnapshot);
+    const age = Date.now() - Date.parse(brokerSnapshot.acquiredAt);
+    const side = state.positionSide;
+    const expectedStage = side === 'FLAT' ? 'FLAT' : `OPEN_${side}`;
+    const flatEvidenceClean = side !== 'FLAT'
+      || (!state.open && !state.exit && !state.pendingFill);
+    const openEvidenceComplete = side === 'FLAT'
+      || (state.latestUnit?.positionSide === side && state.latestUnit?.symbol === 'SPY'
+        && state.latestUnit?.quantity === 1 && state.entryIdentity?.identity
+        && state.open?.brokerOrderId);
+    if (state.armed || state.stage !== 'FAULT'
+      || state.fault?.faultCode !== 'LANE_1_POSITION_STATE_DRIFT'
+      || !['FLAT', 'LONG', 'SHORT'].includes(side)
+      || brokerSnapshot.positionSide !== side || state.pendingFill
+      || !Number.isFinite(age) || age < 0 || age > 5_000
+      || !flatEvidenceClean || !openEvidenceComplete) {
+      throw new Error('LANE_1_POSITION_DRIFT_RESOLUTION_REFUSED');
+    }
+    const at = new Date().toISOString();
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`UPDATE lane_1_spy_v2_state SET armed=0,stage=?,fault_json=NULL,
+        updated_at=? WHERE singleton=1`, expectedStage, at);
+      this.#laneV2Record('POSITION_DRIFT_RESOLVED', {
+        priorFaultCode: state.fault.faultCode, positionSide: side,
+        brokerAcquiredAt: brokerSnapshot.acquiredAt,
+        reason: 'FRESH_BROKER_POSITION_AND_ORDER_STATE_AGREEMENT',
+      }, at);
+    });
+    return this.#laneV2State({ changed: true });
   }
 
   async laneV2Disarm({ reason, at = new Date().toISOString() }) {

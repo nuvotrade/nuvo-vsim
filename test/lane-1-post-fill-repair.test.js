@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  armExistingLane1FromDashboard, reconcileLane1OpenFromBrokerLedger,
+  armExistingLane1FromDashboard, expireLane1, reconcileLane1OpenFromBrokerLedger,
   resumeLane1PendingFill,
 } from '../cloudflare/lane-1-runtime.js';
 import { appendLane1V2BrokerEvents, lane1V2ProposalSeal,
@@ -121,6 +121,70 @@ test('broker-ledger reconstruction reads broker first, creates a strict recovere
   assert.equal(unrelated.body.faultCode, 'LANE_1_RECOVERY_FAULT_NOT_CLEARED');
   assert.equal(unrelated.body.state, 'FAULT');
   assert.deepEqual(calls, ['broker', 'coordinator', 'candidate', 'transition']);
+});
+
+test('restart deterministically recovers the accepted BUY fill race without trading or notifying', async () => {
+  const seal = await lane1V2ProposalSeal({ signal: 'LONG', rawSignalSide: 'BUY',
+    tvBodyBindingSha256: hash('d'), positionSide: 'FLAT',
+    now: Date.parse('2026-09-03T13:35:00.000Z'), uuid: () => 'BUY-RACE-CLIENT' });
+  seal.clientOrderId = 'CLIENT-LONG-RACE';
+  let state = { armed: false, stage: 'FAULT', positionSide: 'FLAT',
+    open: { seal, brokerOrderId: 'ORDER-LONG-RACE',
+      acceptedAt: '2026-09-03T13:35:03.000Z' },
+    pendingFill: { signal: 'LONG', side: 'BUY', brokerOrderId: 'ORDER-LONG-RACE',
+      clientOrderId: seal.clientOrderId },
+    latestUnit: null, entryIdentity: null,
+    fault: { faultCode: 'LANE_1_POSITION_STATE_DRIFT' } };
+  const recoveryCapture = (id) => ({ ...reconstructedCapture(id),
+    brokerOrderId: 'ORDER-LONG-RACE', clientOrderId: seal.clientOrderId,
+    instruction: 'BUY' });
+  const fill = reconstructedFill({ fillId: 'FILL-LONG-RACE',
+    executionActivityId: 'FILL-LONG-RACE', transactionActivityId: 'TX-LONG-RACE',
+    brokerOrderId: 'ORDER-LONG-RACE', clientOrderId: seal.clientOrderId,
+    side: 'BUY', executionPriceUsdPerShare: 768.8746,
+    captureEvidence: { order: recoveryCapture('RECOVERY-LONG-ORDER'),
+      transaction: recoveryCapture('RECOVERY-LONG-TRANSACTION') } });
+  let brokerReads = 0; let recoveredWrites = 0; let notified = 0; let runtimeTouched = 0;
+  const recoveryDependencies = {
+    client: {
+      async lane1V21SendSnapshot() { brokerReads += 1;
+        return syntheticSnapshot('LONG', Date.now()); },
+      async lane1V2RecoverableStoredFill() { return fill; },
+    },
+    coordinator: {
+      async status() { return state; },
+      async recoverOpen(payload) {
+        recoveredWrites += 1;
+        assert.equal(payload.signal, 'LONG');
+        assert.equal(payload.identity.instruction, 'BUY');
+        state = { ...state, armed: false, stage: 'OPEN_LONG', positionSide: 'LONG',
+          latestUnit: payload.unit, entryIdentity: { identity: payload.identity,
+            evidenceOrigin: payload.evidenceOrigin, captureEvidence: payload.captureEvidence,
+            receiptId: payload.receiptId }, pendingFill: null, fault: null };
+        return state;
+      },
+    },
+    bundleStore: { async write() { return { objectPrefix: 'r2/recovered-long' }; } },
+    receiptStore: { async write(receipt) {
+      assert.equal(receipt.signal, 'LONG'); return { id: 'RECEIPT-LONG-RACE' }; } },
+    notifier: { async send() { notified += 1; } },
+  };
+  const result = await expireLane1({}, 'OWNER', {
+    status: async () => state,
+    recover: (options) => reconcileLane1OpenFromBrokerLedger({ ...options,
+      dependencies: recoveryDependencies }),
+    runtime: { async reconcile() { runtimeTouched += 1; },
+      async expire() { runtimeTouched += 1; } },
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.state, 'OPEN_LONG');
+  assert.equal(state.positionSide, 'LONG');
+  assert.equal(state.fault, null);
+  assert.equal(state.pendingFill, null);
+  assert.equal(brokerReads, 1);
+  assert.equal(recoveredWrites, 1);
+  assert.equal(notified, 0, 'scheduled restart recovery must not emit a new Discord message');
+  assert.equal(runtimeTouched, 0);
 });
 
 test('broker failure makes no reconstruction or coordinator correction', async () => {

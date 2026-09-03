@@ -161,16 +161,17 @@ export function buildSystemHealth({
   const tvTapeFresh = tradingViewTape?.source === 'TRADINGVIEW'
     && Number.isFinite(tradingViewTape.spy) && Number.isFinite(tradingViewTape.vix)
     && fresh(tradingViewTape.asOf, nowMs, SYSTEM_HEALTH.TAPE_STALE_MS);
-  const tvBroken = ingressBroken || (signalProven && marketOpen && !tvTapeFresh);
+  // TradingView is the authenticated order-alert ingress, not the market-data
+  // authority. A missing optional TAPE diagnostic must never turn a proven
+  // webhook route into a false outage; MARKET owns quote freshness.
+  const tvBroken = ingressBroken;
   const tvColor = tvBroken ? 'RED' : ingressProven ? 'GREEN' : 'AMBER';
   const tvStatus = tvBroken ? 'DOWN' : ingressProven ? 'LIVE' : 'UNPROVEN';
   const evidenceIdentity = tvIngress?.ingressId
     ? ` · ingress ${tvIngress.ingressId}` : '';
   const tvDetail = ingressBroken
     ? (tvIngress?.error ?? 'TV_AUTHENTICATED_INGRESS_FAILED')
-    : signalProven && marketOpen && !tvTapeFresh
-      ? 'AUTHENTICATED INGRESS PROVEN · TRADINGVIEW TAPE STALE'
-      : signalProven
+    : signalProven
         ? `HEALTHY · ${tvIngress.recent ? 'RECENT SIGNAL' : 'NO NEW SIGNAL'} · ${tvIngress.instruction}${evidenceIdentity}`
         : routeProven
           ? `HEALTHY · PUBLIC INGRESS ROUTE REACHABLE · NO SIGNAL REQUIRED${evidenceIdentity}`
@@ -192,11 +193,14 @@ export function buildSystemHealth({
   const armed = laneState?.armed === true;
   const laneFault = laneState?.configurationFault ?? laneState?.fault?.faultCode ?? null;
   const botReady = armed && connectorsOk && !laneFault;
-  const bot = row('BOT', botReady ? 'GREEN' : 'RED', botReady ? 'READY' : armed ? 'BLOCKED' : 'OFF',
+  const botHealthyOff = !armed && !laneFault;
+  const botColor = botReady || botHealthyOff ? 'GREEN' : 'RED';
+  const botStatus = laneFault ? 'FAULT' : botReady ? 'READY' : armed ? 'BLOCKED' : 'OFF';
+  const bot = row('BOT', botColor, botStatus,
     laneState?.updatedAt ?? schwabAuth?.at,
     botReady ? (tv.status === 'UNPROVEN' ? 'ARMED · WAITING FOR FIRST SIGNAL PROOF'
       : marketOpen ? 'ARMED · READY FOR VALID TV SIGNAL' : 'WAITING · MARKET CLOSED')
-      : (!armed ? 'DISARMED' : (laneFault ?? 'CONNECTOR GATE FAILED')),
+      : laneFault ?? (!armed ? 'DISARMED · HEALTHY OFF' : 'CONNECTOR GATE FAILED'),
     'DURABLE_ARM_AND_FAIL_CLOSED_GATES');
 
   const rows = Object.freeze([d1, schwab, market, tv, discord, bot]);

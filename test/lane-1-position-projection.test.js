@@ -54,6 +54,15 @@ test('broker failure labels coordinator belief unverified and coordinator FAULT 
   assert.notEqual(fault.positionSide, 'FLAT');
 });
 
+test('a fresh broker LONG never renders the stale coordinator FLAT claim', () => {
+  const result = buildLane1PositionProjection({ coordinatorState: coordinator('FLAT', 'FAULT'),
+    brokerSnapshot: broker('LONG'), brokerRead: { ok: true } });
+  assert.equal(result.status, 'POSITION_DRIFT');
+  assert.equal(result.positionSide, 'UNKNOWN');
+  assert.equal(result.coordinator.positionSide, 'FLAT');
+  assert.equal(result.broker.positionSide, 'LONG');
+});
+
 test('ten simultaneous refreshes make one broker call and the gate releases after failure', async () => {
   const gate = new Lane1PositionRefreshGate();
   let calls = 0;

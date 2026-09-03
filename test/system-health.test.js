@@ -71,7 +71,7 @@ test('market close does not paint reachable services red or call stale close dat
   assert.equal(model.tape.source, 'MASSIVE');
 });
 
-test('open-session stale market and TradingView tape fail closed', () => {
+test('open-session stale market fails closed without falsely declaring the TV ingress down', () => {
   const stale = at(-10 * 60 * 1000);
   const model = healthy({
     tradingViewTape: { source: 'TRADINGVIEW', spy: 1, vix: 2, asOf: stale },
@@ -80,9 +80,25 @@ test('open-session stale market and TradingView tape fail closed', () => {
   });
   const rows = byLabel(model);
   assert.equal(rows.MARKET.color, 'RED');
-  assert.equal(rows.TV.color, 'RED');
+  assert.equal(rows.TV.color, 'GREEN');
+  assert.equal(rows.TV.status, 'LIVE');
   assert.equal(rows.BOT.color, 'RED');
   assert.match(rows.MARKET.detail, /SPY_QUOTE_STALE_600S/u);
+});
+
+test('healthy intentional BOT off is distinct from a disarmed lane fault', () => {
+  const off = byLabel(healthy({ laneState: { armed: false, stage: 'DISARMED',
+    positionSide: 'FLAT', fault: null, updatedAt: at(-500) } })).BOT;
+  assert.equal(off.color, 'GREEN');
+  assert.equal(off.status, 'OFF');
+  assert.equal(off.detail, 'DISARMED · HEALTHY OFF');
+
+  const fault = byLabel(healthy({ laneState: { armed: false, stage: 'FAULT',
+    positionSide: 'FLAT', fault: { faultCode: 'LANE_1_POSITION_STATE_DRIFT' },
+    updatedAt: at(-500) } })).BOT;
+  assert.equal(fault.color, 'RED');
+  assert.equal(fault.status, 'FAULT');
+  assert.equal(fault.detail, 'LANE_1_POSITION_STATE_DRIFT');
 });
 
 test('market health uses authoritative Schwab real-time quotes and verifies master reachability', async () => {
