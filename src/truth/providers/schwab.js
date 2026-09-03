@@ -178,8 +178,15 @@ export class SchwabMarketProvider extends DataProvider {
     }
   }
 
-  async optionChain(symbol, { expirations = this.dteTargets, strikes = [] } = {}) {
+  async optionChain(symbol, {
+    expirations = this.dteTargets, strikes = [], rights = RIGHTS, includePartial = false,
+  } = {}) {
     try {
+      const requestedRights = [...new Set((Array.isArray(rights) ? rights : [])
+        .map((right) => String(right).toLowerCase()))];
+      if (!requestedRights.length || requestedRights.some((right) => !RIGHTS.includes(right))) {
+        return { error: 'SCHWAB_OPTION_RIGHTS_INVALID' };
+      }
       const start = Math.max(0, Math.min(...expirations) - 5);
       const end = Math.max(...expirations) + 8;
       const [packet, underlying] = await Promise.all([
@@ -222,24 +229,30 @@ export class SchwabMarketProvider extends DataProvider {
             delta: 'PER_SHARE_EQUIVALENT',
             gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
             vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
-            theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+            theta: 'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY',
           },
           openInterest: numeric(row.openInterest, 0),
           volume: numeric(row.totalVolume, 0),
           multiplier: numeric(row.multiplier, 100),
           quoteAsOf,
         };
-      }).filter((row) => row.symbol && RIGHTS.includes(row.right) && selectedDtes.has(row.dte)
-        && [row.strike, row.dte, row.bid, row.ask, row.iv, row.delta, row.quoteAsOf]
-          .every(Number.isFinite)
-        && row.strike > 0 && row.iv > 0 && Math.abs(row.delta) <= 1
-        && (row.right === 'put' ? row.delta <= 0 : row.delta >= 0)
-        && row.bid > 0 && row.ask >= row.bid
-        && row.quoteAsOf <= now + 10_000 && now - row.quoteAsOf <= this.maxChainAgeMs);
+      }).filter((row) => {
+        const core = row.symbol && requestedRights.includes(row.right) && selectedDtes.has(row.dte)
+          && [row.strike, row.dte, row.bid, row.quoteAsOf].every(Number.isFinite)
+          && row.strike > 0 && row.bid >= 0
+          && row.quoteAsOf <= now + 10_000 && now - row.quoteAsOf <= this.maxChainAgeMs;
+        if (!core || includePartial) return core;
+        return [row.ask, row.iv, row.delta].every(Number.isFinite)
+          && row.iv > 0 && Math.abs(row.delta) <= 1
+          && (row.right === 'put' ? row.delta <= 0 : row.delta >= 0)
+          && row.bid > 0 && row.ask >= row.bid;
+      });
       const contracts = [...new Map(rows.map((row) => [row.symbol, row])).values()];
-      const complete = [...selectedDtes].every((dte) => RIGHTS.every((right) =>
+      const complete = [...selectedDtes].every((dte) => requestedRights.every((right) =>
         contracts.some((contract) => contract.dte === dte && contract.right === right)));
-      if (!complete || contracts.length === 0) return { error: 'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE' };
+      if ((!includePartial && !complete) || contracts.length === 0) {
+        return { error: 'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE' };
+      }
       const asOf = Math.min(...contracts.map((row) => row.quoteAsOf));
       return {
         value: {

@@ -1,0 +1,60 @@
+{
+  "packet": "UNDERWRITE_U3_LOCAL_REVIEW_PACKET_2026-09-02",
+  "scope": "U3_IMMUTABLE_FORECAST_OUTCOMES_VERSION_ISOLATED_CALIBRATION_AND_THETA_UNIT_CORRECTION",
+  "deployment": "AUTHORIZED_NOT_YET_UPLOADED",
+  "live_change": "NONE_AT_SEAL_TIME",
+  "mutation_eligible": false,
+  "scheduler_required": false,
+  "config_absolute": "/Users/nuvo/.codex/.chatgpt-projects/g-p-6a8f887336308191a81e7bbda9e1bdd8/work/nuvo-vsim-post-fill-repair/cloudflare/wrangler.jsonc",
+  "tests": {
+    "passed": 791,
+    "total": 791,
+    "failed": 0,
+    "u3_fixtures": 15
+  },
+  "dry_build": {
+    "result": "PASS",
+    "entry_bytes": 2192292,
+    "predicted_worker_bundle_sha256": "76eb4ee2dee0b5f6a7927f072cf4a8b0d8c9c8cd6ffea49093f53db1b7609dbb"
+  },
+  "surface_model_locks": {
+    "CSP_SINGLE_TICKER": "53ffab7835da0b87fa72514698e09622dd351474b41892f339e30c7cd4acc5e8",
+    "COVERED_CALL_SINGLE_TICKER": "079c54a3ebed3616e2de20e82602ad2606f373f5e3fdaab7ebd97b189bd66f3d",
+    "PORTFOLIO_REVIEW": "cb60d3ae00a9c086343c8a4bf9000e10b6829175a1dd46be204c1ec6b6a809b6"
+  },
+  "files": {
+    "cloudflare/worker.js": "c43e79995eb5e40df186875fc0c4ac4768cedf6caf09785e79bb37c488f4407c",
+    "cloudflare/covered-call-calculator.js": "a9c67376ae5550c056f5426676ef622a5c231b4b0c275801dafb4c8d8d029bf2",
+    "cloudflare/cash-secured-put-calculator.js": "a3e6d7dfb2d2b604dee18a2610758de7da0b864ccbda8916c09a2731030dbfd8",
+    "cloudflare/portfolio-review.js": "1acbba01bd2407af48be2f70910a8219839011133266d9d08144b8b27507cf24",
+    "cloudflare/underwrite-model-engine.js": "3e5e720b9e39339023b9290576dce515bb8f05fc8967f41e4bd45522663ed9e0",
+    "cloudflare/underwrite-calibration.js": "2ab988b252047b8e6f51f505bc7a60f3dbe64fea199a1e262849bc2b4ccbbac5",
+    "cloudflare/underwrite-model-version-lock.js": "58e578d7d7c10c36b44c9239dd797c57f82b2fdabad1842b317f93b163180ec7",
+    "cloudflare/schwab-client.js": "7a354ab0d9c26d42a6bc311d4a6fbd655dd0ffe504040b37fe096caf55474303",
+    "cloudflare/portfolio-report.js": "b4c88abc53552eeffdab056af021e11538061194f2c69eff9fad2d1187fe2d8c",
+    "cloudflare/custody-risk.js": "9ca6bcba595e04824f63426dc03da47aa91a77f0d19b4c4a27dd59956d06a689",
+    "cloudflare/migrations/0017_underwrite_forecast_outcomes.sql": "6075e03ea16ebd6c68ba4fe77396335c421a53492a8a541402873e0b06e6365a",
+    "src/lifecycle/covered_call_analysis.js": "eebf18ac8fb5726efc7e7146e422bcc7a9a584f84baa91a481f26ee2842f6c69",
+    "src/truth/providers/schwab.js": "d22c09897eb4de2b58b64e2467e09903df2dde9d1997e5a88c9dd53c592d30e4",
+    "src/portfolio/governor.js": "a2f72ad5d6838a442b753f21eab3359f6c2e57f79bf0110902ec9d7553df70e4",
+    "src/structures/structure.js": "28057aef7f16db23d0bcaf21d322ececf25995befec6b11652ab604e6941aa90",
+    "src/math/distribution.js": "43b9affd8005948ec5dcb8cac770e5720ce6f7c05e7a4829d24e14dd385564f9",
+    "src/math/stats.js": "5bc3bbda0645eb6353bd76658e71d1cfe81f0e47838f5a6720bbe54795b59275",
+    "test/underwrite_u3.test.js": "00004305284f7eb71e4f11b962497255a4da3741f2dce24fe83190f693a5aa53",
+    "test/covered_call_analysis.test.js": "095dafbf22e9c160718277b711434c5a7507d8e876916c67a40e59c1d506c754",
+    "test/covered_call_calculator.test.js": "c3533469cf26b5a1be12c4aa92cfed7e93be292190671a6cc01f4cefec36f540",
+    "test/portfolio_report.test.js": "9eacb7da9cfc23f56768b09c1a2546cfdc45ef521e38aefc0a1fab7bf861cc7a",
+    "test/correctness.test.js": "ff0840849f2a32b099d3bec82d1b153a7795c873e5e2eff9c285067d54aa3f55",
+    "test/production_adapters.test.js": "ef0602d5455bad9a863a0f20d50c6ec1ce958c93c1865dabbe40ccd3f407c131"
+  },
+  "continuity": {
+    "primary": "UNCHANGED_PROVISIONAL_CENTERED_5_SESSION_BLOCK_BOOTSTRAP",
+    "rank": "UNCHANGED",
+    "trade_send": "ABSENT",
+    "lane_1": "UNCHANGED",
+    "broker_state": "NOT_TOUCHED",
+    "theta": "SCHWAB_PER_SHARE_PER_CALENDAR_DAY_X_ONE_EQUITY_MULTIPLIER_X_CONTRACTS",
+    "delta_gamma_vega": "UNCHANGED",
+    "d1_migration_0017": "LOCAL_SQL_VALIDATED_NOT_APPLIED_LIVE"
+  }
+}

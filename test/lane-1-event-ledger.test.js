@@ -217,6 +217,7 @@ test('duplicate delivery of one fill cannot double fills or realized P&L', () =>
 });
 
 test('projected ledger renders one row when legacy audit contains duplicate receipts', async () => {
+  const fillAt = new Date(Date.now() - 1_000).toISOString();
   const detail = { type: 'EXIT_FILLED', qualifiedStage0Fill: true,
     realizedPnlCents: -324, evidenceOrigin: 'SCHWAB_WIRE_CAPTURE', identity: {
       executionActivityId: '129766132555', brokerOrderId: '1007804693875',
@@ -224,8 +225,8 @@ test('projected ledger renders one row when legacy audit contains duplicate rece
     } };
   const state = { armed: false, stage: 'FLAT', positionSide: 'FLAT', fault: null,
     latestUnit: { symbol: 'SPY', quantity: 1, positionSide: 'FLAT' } };
-  const audit = [row('LANE_1_FILL_RECEIPT', detail, '2026-09-02T18:00:07.571Z', 'a'),
-    row('LANE_1_FILL_RECEIPT', detail, '2026-09-02T18:00:07.572Z', 'b')];
+  const audit = [row('LANE_1_FILL_RECEIPT', detail, fillAt, 'a'),
+    row('LANE_1_FILL_RECEIPT', detail, fillAt, 'b')];
   const ledger = await lane1EventLedger(environment(audit, [], state).env, 'owner-1');
   assert.equal(ledger.events.filter((event) => event.event === 'FILL').length, 1);
   assert.equal(ledger.counts.FILL, 1);

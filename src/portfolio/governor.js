@@ -31,14 +31,11 @@ export function positionGreeks(pos) {
     }, { contracts: pos.contracts ?? 1 });
   }
   const units = (pos.quantity ?? 0) * (pos.multiplier ?? 100);
-  const thetaUnits = pos.thetaUnit === 'DOLLARS_PER_CONTRACT_PER_DAY'
-    || pos.greekUnits?.theta === 'DOLLARS_PER_CONTRACT_PER_DAY'
-    ? (pos.quantity ?? 0) : units;
   return {
     delta: (pos.delta ?? 0) * units,
     gamma: (pos.gamma ?? 0) * units,
     vega: (pos.vega ?? 0) * units,
-    theta: (pos.theta ?? 0) * thetaUnits,
+    theta: (pos.theta ?? 0) * units,
   };
 }
 

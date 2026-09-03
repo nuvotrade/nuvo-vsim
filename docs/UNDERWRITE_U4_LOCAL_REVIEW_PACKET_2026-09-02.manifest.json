@@ -1,0 +1,49 @@
+{
+  "packet": "UNDERWRITE_U4_LOCAL_REVIEW_PACKET_2026-09-02",
+  "scope": "LOCAL_READ_ONLY_COVERED_CALL_LIFECYCLE_CHOICE_COMPARISON",
+  "live_worker_unchanged": {
+    "version_id": "310aefde-9fe9-4a0c-ab65-2e15807da601",
+    "bundle_sha256": "76eb4ee2dee0b5f6a7927f072cf4a8b0d8c9c8cd6ffea49093f53db1b7609dbb"
+  },
+  "mutation_eligible": false,
+  "deployment_authorized": false,
+  "migration_required": false,
+  "verification": {
+    "tests": "805/805",
+    "wrangler_version": "4.125.0",
+    "dry_config": "/Users/nuvo/.codex/.chatgpt-projects/g-p-6a8f887336308191a81e7bbda9e1bdd8/work/nuvo-vsim-post-fill-repair/cloudflare/wrangler.jsonc",
+    "predicted_worker_bundle_sha256": "68e5686c7ad0ec14e072a366c706baad64c6b6618f28bb54ae3472184e92edf5",
+    "predicted_worker_bundle_bytes": 2224124
+  },
+  "touched_files": {
+    "cloudflare/worker.js": "ca34240ff23853ddb455a172f059f0f303fe293a8a15092683bee18f4ecb2ebd",
+    "cloudflare/covered-call-lifecycle-choices.js": "7778887760696c853e852b920027b089ed04f7cab31f9d597631670e96cd68af",
+    "test/covered_call_lifecycle_choices.test.js": "945ed22ff79bc189de81e57ef4e4553557300768559d8df5f406097657e96447",
+    "test/underwrite_u4.test.js": "f8b32e35f11222fef991a01931b2fa7b128dbd3405c9d8f6207225b49b4108e9"
+  },
+  "continuity_files": {
+    "cloudflare/underwrite-model-engine.js": "3e5e720b9e39339023b9290576dce515bb8f05fc8967f41e4bd45522663ed9e0",
+    "cloudflare/cash-secured-put-calculator.js": "a3e6d7dfb2d2b604dee18a2610758de7da0b864ccbda8916c09a2731030dbfd8",
+    "cloudflare/covered-call-calculator.js": "a9c67376ae5550c056f5426676ef622a5c231b4b0c275801dafb4c8d8d029bf2",
+    "cloudflare/underwrite-calibration.js": "2ab988b252047b8e6f51f505bc7a60f3dbe64fea199a1e262849bc2b4ccbbac5",
+    "cloudflare/underwrite-model-version-lock.js": "58e578d7d7c10c36b44c9239dd797c57f82b2fdabad1842b317f93b163180ec7",
+    "cloudflare/wrangler.jsonc": "081eeae7ad365c1a54628dac6bc6d415d590c0b62a1fcaa42e1bf150824c3bd9"
+  },
+  "locks": {
+    "paths": ["HOLD", "CLOSE", "ROLL"],
+    "present_value_origin": "ONE_CALCULATION_TIMESTAMP",
+    "close_price": "CURRENT_EXECUTABLE_ASK",
+    "roll_open_price": "CURRENT_EXECUTABLE_BID",
+    "primary": "CENTERED_5_SESSION_BLOCK_BOOTSTRAP_ZERO_ARITHMETIC_DRIFT",
+    "samples": 8000,
+    "garch": "REQUIRED_NO_FALLBACK",
+    "max": "REMOVED",
+    "mixture": "NONE",
+    "governor": "NOT_CONSULTED",
+    "ranking": "NONE",
+    "recommendation": "NONE",
+    "order_route": "NONE",
+    "early_exercise": "NOT_MODELED_LABELED",
+    "taxes": "OMITTED_NO_VERIFIED_INPUT"
+  }
+}

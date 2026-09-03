@@ -144,15 +144,29 @@ describe('the machine fails closed (§18)', () => {
     assert.equal(r.outcome, OUTCOME.REFUSED);
   });
 
-  test('an unverified event calendar on any scan symbol refuses the cycle', async () => {
+  test('an unverified event calendar refuses that symbol without aborting verified peers', async () => {
     const { eng, provider } = build({ ivMult: 1.45 });
     const real = provider.events.bind(provider);
     provider.events = async (symbol) => symbol === 'XOM'
       ? { error: 'event feed unavailable' }
       : real(symbol);
     const r = await eng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
-    assert.equal(r.outcome, OUTCOME.REFUSED);
-    assert.equal(r.trace.find((entry) => entry.name === 'truth')?.detail?.symbol, 'XOM');
+    assert.notEqual(r.outcome, OUTCOME.REFUSED);
+    assert.equal(r.symbolOutcomes.XOM.state, 'REFUSED');
+    assert.equal(r.symbolOutcomes.XOM.stage, 'TRUTH');
+    assert.ok(r.symbolOutcomes.XOM.reason_codes.length > 0);
+    assert.ok(Object.values(r.symbolOutcomes).some((row) => row.state === 'CALCULATED'));
+    const { eng: historyEng, provider: historyProvider } = build({ ivMult: 1.45 });
+    const realHistory = historyProvider.history.bind(historyProvider);
+    historyProvider.history = async (symbol, options) => symbol === 'XOM'
+      ? { error: 'SCHWAB_HISTORY_SHORT:76' }
+      : realHistory(symbol, options);
+    const historyResult = await historyEng.cycle({ indexExtras: STRESSED_INDEX, ...FAST });
+    assert.notEqual(historyResult.outcome, OUTCOME.REFUSED);
+    assert.equal(historyResult.symbolOutcomes.XOM.state, 'REFUSED');
+    assert.equal(historyResult.symbolOutcomes.XOM.stage, 'HISTORY');
+    assert.deepEqual(historyResult.symbolOutcomes.XOM.reason_codes, ['SCHWAB_HISTORY_SHORT']);
+    assert.ok(Object.values(historyResult.symbolOutcomes).some((row) => row.state === 'CALCULATED'));
   });
 
   test('an unconfident regime call blocks new exposure', async () => {

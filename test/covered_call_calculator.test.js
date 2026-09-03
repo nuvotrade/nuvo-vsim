@@ -50,9 +50,19 @@ test('covered-call calculator evaluates the 7, 14, and 21 DTE targets and ranks 
   assert.equal(result.selected.cost_model_version, SCHWAB_COVERED_CALL_COSTS.version);
   assert.ok(result.selected.incremental_nev_vs_holding > 0);
   assert.ok(result.selected.incremental_nev_per_day > 0);
-  assert.equal(result.objective, 'MAX_INCREMENTAL_NEV_PER_DAY_VS_HOLDING_SHARES');
+  assert.equal(result.objective, 'MAX_PRIMARY_RAW_NEV0_PER_DAY_VS_HOLDING_SHARES');
   assert.equal(result.forecast.status, 'VERIFIED_NO_FALLBACK');
   assert.equal(result.method.credit, 'SCHWAB_EXECUTABLE_BID');
+  assert.equal(result.method.primary_model, 'bootstrap');
+  assert.equal(result.method.max_of_models, 'REMOVED');
+  assert.equal(result.method.mixture, 'NONE');
+  assert.equal(result.method.cash_carry,
+    'NOT_APPLICABLE_COVERED_CALL_INCREMENTAL_VALUE_IS_RAW_ONLY');
+  assert.equal(result.selected.calculation_unit_contracts, 1);
+  assert.equal('cash_carry_cost_0' in result.selected, false);
+  assert.equal('cash_adj_nev_0' in result.selected, false);
+  assert.equal(result.selected.headline_models.primary_raw_nev_0,
+    result.selected.one_contract_models.bootstrap.raw_nev_0);
   assert.equal(result.method.rejection_codes.illiquid,
     'CONSTITUTION/OPTION_LIQUIDITY_GATE_FAILED');
 });
@@ -144,7 +154,7 @@ test('holding shares wins when executable premium does not pay for modeled surre
   assert.equal(result.reason_code, 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES');
   assert.equal(result.rejected.no_incremental_edge, 1);
   assert.equal(result.rejection_codes['UNDERWRITE/INCREMENTAL_NEV_HURDLE_FAILED'], 1);
-  assert.equal(result.method.score, 'INCREMENTAL_NEV_VS_HOLDING_SHARES_PER_CALENDAR_DAY');
+  assert.equal(result.method.score, 'PRIMARY_RAW_NEV0_VS_HOLDING_SHARES_PER_CALENDAR_DAY');
 });
 
 test('short history is blocked instead of using a fallback volatility', () => {
@@ -226,17 +236,18 @@ test('a candidate still appears when all portfolio reference figures are breache
   assert.equal(calculation.selected.symbol, 'ABC14C118');
 });
 
-test('RUN proposal theta honors Schwab per-contract units without a second 100x scale', () => {
+test('RUN proposal theta converts Schwab per-share premium theta to position dollars once', () => {
   const schwabCall = {
     ...call({ dte: 14, strike: 118, bid: 2.1, delta: 0.22 }),
-    theta: -0.5733,
-    greekUnits: { theta: 'DOLLARS_PER_CONTRACT_PER_DAY' },
+    theta: -0.57309031,
+    greekUnits: { theta: 'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY' },
   };
   const result = calculateCoveredCallCandidates({
     symbol: 'ABC', shares: 600, averagePrice: 90, availableContracts: 6, spot: 100,
     historyBars: history(), samples: 1_500, contracts: [schwabCall],
   });
   assert.equal(result.ok, true);
-  assert.equal(result.selected.theta_income_per_day, 3.4398);
-  assert.equal(result.selected.theta_source_unit, 'DOLLARS_PER_CONTRACT_PER_DAY');
+  assert.ok(Math.abs(result.selected.theta_income_per_day - 343.854186) < 1e-9);
+  assert.equal(result.selected.theta_source_unit,
+    'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY');
 });

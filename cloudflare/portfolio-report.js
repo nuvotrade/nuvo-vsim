@@ -484,11 +484,11 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
     const unrealized = openingCredit !== null && finite(position.marketValue) !== null
       ? openingCredit + position.marketValue : null;
     const analytics = optionAnalytics.get(position.symbol) ?? {};
-    // Schwab theta is already dollars per option contract per day. Quantity
-    // supplies the position sign and contract count; the 100-share multiplier
-    // must not be applied a second time.
+    // Schwab theta is a per-share option-premium change per calendar day.
+    // Quantity supplies position sign/lots; multiplier converts quote scale to
+    // position dollars exactly once.
     const thetaPerDay = finite(analytics.theta) !== null
-      ? Number(position.quantity) * analytics.theta : null;
+      ? Number(position.quantity) * multiplier * analytics.theta : null;
     const right = String(position.right ?? '').toLowerCase();
     const spot = finite(analytics.spot) ?? finite(inventory.find(
       (row) => row.symbol === (position.underlying ?? position.symbol),
@@ -510,6 +510,10 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
       strike, expiration: position.expiration ?? null, dte,
       quantity: qty, entry_credit: openingCredit, mark, market_value: finite(position.marketValue),
       unrealized_pnl: unrealized, theta_per_day: thetaPerDay,
+      theta_per_share_per_calendar_day: finite(analytics.theta),
+      theta_equity_multiplier: multiplier,
+      theta_source_unit: analytics.greekUnits?.theta
+        ?? 'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY',
       capital_committed: right === 'put' && finite(position.strike) !== null
         ? position.strike * qty * multiplier : null,
       probability_otm: finite(analytics.probability_otm),
@@ -550,8 +554,9 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
     ? harvest.reduce((sum, row) => sum + row.theta_per_day, 0) : null;
   const netThetaValues = options.map((position) => {
     const theta = finite(optionAnalytics.get(position.symbol)?.theta);
+    const multiplier = finite(position.multiplier) ?? 100;
     return theta === null || finite(position.quantity) === null
-      ? null : Number(position.quantity) * theta;
+      ? null : Number(position.quantity) * multiplier * theta;
   });
   const netTheta = netThetaValues.every((value) => value !== null)
     ? netThetaValues.reduce((sum, value) => sum + value, 0) : null;

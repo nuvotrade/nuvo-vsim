@@ -1,8 +1,11 @@
 import { dteToT, probItm, probTouch } from '../src/math/black_scholes.js';
 import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
-import { logReturns, mean } from '../src/math/stats.js';
+import { logReturns } from '../src/math/stats.js';
 import { volatilityProfile } from '../src/market/realized_vol.js';
-import { buildDistribution } from '../src/pipeline/cycle.js';
+import {
+  buildUnderwriteModelSet, evaluateShortOptionModel,
+  UNDERWRITE_MODEL_DEFINITIONS, UNDERWRITE_PRIMARY_MODEL, UNDERWRITE_STRESS_MODEL,
+} from './underwrite-model-engine.js';
 
 export const COVERED_CALL_DTE_TARGETS = Object.freeze([7, 14, 21]);
 
@@ -147,6 +150,8 @@ export function calculateCoveredCallCandidates({
   targets = COVERED_CALL_DTE_TARGETS,
   costs = SCHWAB_COVERED_CALL_COSTS,
   limits = DEFAULT_LIMITS,
+  rate = DEFAULT_LIMITS.riskFreeRate,
+  dividendYield = 0,
 } = {}) {
   const ticker = String(symbol ?? '').trim().toUpperCase();
   const ownedShares = finite(shares);
@@ -189,15 +194,16 @@ export function calculateCoveredCallCandidates({
   };
   const distributions = new Map();
   const forecastFor = (dte) => {
-    if (!distributions.has(dte)) distributions.set(dte, buildDistribution({
-      spot: underlying,
-      vol: volProfile.garch?.forecast(dte) ?? volProfile.realized,
-      dte,
-      returns,
-      seed: `${seed}:${ticker}:${dte}`,
-      drift: 0,
-      n: samples,
-    }));
+    if (!distributions.has(dte)) {
+      const forecastVol = finite(volProfile.garch?.forecast(dte));
+      distributions.set(dte, {
+        forecastVol,
+        models: buildUnderwriteModelSet({
+          spot: underlying, dte, forecastVol, returns, samples,
+          seed: `${seed}:${ticker}`,
+        }),
+      });
+    }
     return distributions.get(dte);
   };
 
@@ -249,8 +255,12 @@ export function calculateCoveredCallCandidates({
     }
 
     const t = dteToT(dte);
+    const rateUsed = finite(rate) ?? 0;
+    const yieldUsed = finite(dividendYield) ?? 0;
+    const discount = Math.exp(-rateUsed * t);
     const assignmentProbability = clampProbability(probItm({
       type: 'call', spot: underlying, strike, vol: iv, t,
+      rate: rateUsed, yield: yieldUsed,
     }));
     const touchProbability = clampProbability(probTouch({
       spot: underlying, strike, vol: iv, t,
@@ -259,8 +269,11 @@ export function calculateCoveredCallCandidates({
       rejected.incomplete_quote += 1;
       continue;
     }
-    const grossPremium = bid * 100 * contractCount;
-    const netPremium = grossPremium - entryFees;
+    const grossPremiumPerContract = bid * 100;
+    const entryFeesPerContract = entryFees / contractCount;
+    const netPremiumPerContract = grossPremiumPerContract - entryFeesPerContract;
+    const grossPremium = grossPremiumPerContract * contractCount;
+    const netPremium = netPremiumPerContract * contractCount;
     const premiumRoc = netPremium / economicCapital;
     const annualizedPremiumRoc = premiumRoc * 365 / dte;
     const weeklyPremiumRoc = premiumRoc * 7 / dte;
@@ -274,14 +287,23 @@ export function calculateCoveredCallCandidates({
     const expectedMove = underlying * iv * Math.sqrt(t);
     const expectedMoveBuffer = expectedMove > 0 ? (strike - underlying) / expectedMove : null;
     const forecast = forecastFor(dte);
-    const expectedIntrinsicByModel = forecast.dist.members.map((member) => mean(
-      member.dist.samples.map((terminal) => Math.max(terminal - strike, 0)),
-    ));
-    const conservativeExpectedIntrinsic = Math.max(...expectedIntrinsicByModel);
-    const modelAssignmentProbability = clampProbability(forecast.dist.probAbove(strike));
-    const expectedSurrenderedUpside = conservativeExpectedIntrinsic * 100 * contractCount;
-    const expectedAssignmentFee = modelAssignmentProbability * (finite(costs?.assignmentFee) ?? 0);
-    const incrementalNev = netPremium - expectedSurrenderedUpside - expectedAssignmentFee;
+    const modelResults = Object.fromEntries(Object.entries(forecast.models).map(([name, dist]) => [
+      name, evaluateShortOptionModel(dist, {
+        right: 'call', strike, netCredit: netPremiumPerContract,
+        discount, capital: underlying * 100,
+      }),
+    ]));
+    const primary = modelResults[UNDERWRITE_PRIMARY_MODEL];
+    if (!primary) {
+      rejected.no_incremental_edge += 1;
+      continue;
+    }
+    const modelAssignmentProbability = clampProbability(primary.p_finish_itm);
+    const expectedSurrenderedUpside = (netPremiumPerContract - primary.raw_nev_0)
+      * contractCount;
+    const expectedAssignmentFee = modelAssignmentProbability
+      * (finite(costs?.assignmentFee) ?? 0) * contractCount;
+    const incrementalNev = primary.raw_nev_0 * contractCount - expectedAssignmentFee;
     const edgeHurdle = Math.max(finite(limits.minNev) ?? 0,
       entryFees * (finite(limits.minEdgeOverCosts) ?? 1));
     if (!(incrementalNev > edgeHurdle)) {
@@ -326,11 +348,29 @@ export function calculateCoveredCallCandidates({
       model_assignment: modelAssignmentProbability,
       expected_move: expectedMove,
       expected_move_buffer: expectedMoveBuffer,
+      calculation_unit_contracts: 1,
+      one_contract_gross_premium: grossPremiumPerContract,
+      one_contract_entry_fees: entryFeesPerContract,
+      one_contract_net_premium: netPremiumPerContract,
+      one_contract_models: modelResults,
+      headline_models: {
+        primary: UNDERWRITE_PRIMARY_MODEL,
+        primary_raw_nev_0: primary.raw_nev_0,
+        primary_monte_carlo_standard_error: primary.monte_carlo_standard_error,
+        stress: UNDERWRITE_STRESS_MODEL,
+        stress_raw_nev_0: modelResults[UNDERWRITE_STRESS_MODEL]?.raw_nev_0 ?? null,
+        stress_monte_carlo_standard_error:
+          modelResults[UNDERWRITE_STRESS_MODEL]?.monte_carlo_standard_error ?? null,
+        stress_veto: 'NOT_REGISTERED_DISPLAY_ONLY',
+      },
+      expiry_level_forecast_vol: forecast.forecastVol,
+      model_time_to_expiry_years: t,
       delta,
       theta_income_per_day: Number.isFinite(theta)
-        ? -theta * contractCount * (contract.greekUnits?.theta === 'DOLLARS_PER_CONTRACT_PER_DAY' ? 1 : 100)
+        ? -theta * contractCount * (finite(contract.multiplier) ?? 100)
         : null,
-      theta_source_unit: contract.greekUnits?.theta ?? 'PREMIUM_DOLLARS_PER_SHARE_PER_DAY',
+      theta_source_unit: contract.greekUnits?.theta
+        ?? 'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY',
       implied_volatility: iv,
       bid,
       ask,
@@ -361,8 +401,16 @@ export function calculateCoveredCallCandidates({
     cost_model_version: costs?.version ?? 'UNVERSIONED_EXECUTION_COST',
     credit: 'SCHWAB_EXECUTABLE_BID',
     assignment_probability: 'MARKET_IMPLIED_FROM_SCHWAB_IV',
-    independent_forecast: 'ZERO_DRIFT_REALIZED_VOLATILITY_ENSEMBLE_WITH_GARCH_AND_BOOTSTRAP',
-    score: 'INCREMENTAL_NEV_VS_HOLDING_SHARES_PER_CALENDAR_DAY',
+    independent_forecast: 'PRIMARY_CENTERED_5_SESSION_BLOCK_BOOTSTRAP_WITH_SEPARATE_CHALLENGERS',
+    primary_model: UNDERWRITE_PRIMARY_MODEL,
+    models: UNDERWRITE_MODEL_DEFINITIONS,
+    score: 'PRIMARY_RAW_NEV0_VS_HOLDING_SHARES_PER_CALENDAR_DAY',
+    max_of_models: 'REMOVED',
+    mixture: 'NONE',
+    time_basis: 'TODAY_DOLLARS_PREMIUM_TODAY_MINUS_DISCOUNTED_TERMINAL_CALL_LIABILITY',
+    rate: finite(rate) ?? 0,
+    dividend_yield: finite(dividendYield) ?? 0,
+    cash_carry: 'NOT_APPLICABLE_COVERED_CALL_INCREMENTAL_VALUE_IS_RAW_ONLY',
     no_trade_competitor: 'REQUIRED; INCREMENTAL_NEV_MUST_CLEAR_COST_HURDLE',
     liquidity_gate: `CONSTITUTION_V5: SPREAD≤${limits.maxSpreadPctOfMid}; OI≥${limits.minOpenInterest}; VOLUME≥${limits.minDailyOptionVolume}; POSITION≤${limits.maxPositionPctOfOi}_OF_OI`,
     event_gate: `NO_VERIFIED_EVENT_INSIDE_OPTION_LIFE; ${limits.eventBlackoutDays}_DAY_BLACKOUT`,
@@ -388,14 +436,17 @@ export function calculateCoveredCallCandidates({
     forecast: {
       status: 'VERIFIED_NO_FALLBACK', history_sessions: usableBars.length,
       realized_volatility: volProfile.realized, estimator_spread: volProfile.estimatorSpread,
-      garch: true, drift: 0, models: 'LOGNORMAL_JUMP_DIFFUSION_STUDENT_T_BLOCK_BOOTSTRAP',
+      garch: true, drift: 0,
+      primary_model: UNDERWRITE_PRIMARY_MODEL,
+      models: UNDERWRITE_MODEL_DEFINITIONS,
+      max_of_models: 'REMOVED', mixture: 'NONE',
     },
     method,
   };
   return {
     ok: true,
     outcome: 'COVERED_CALL_CANDIDATE_IDENTIFIED',
-    objective: 'MAX_INCREMENTAL_NEV_PER_DAY_VS_HOLDING_SHARES',
+    objective: 'MAX_PRIMARY_RAW_NEV0_PER_DAY_VS_HOLDING_SHARES',
     symbol: ticker,
     shares: ownedShares,
     available_contracts: contractCount,
@@ -410,7 +461,10 @@ export function calculateCoveredCallCandidates({
     forecast: {
       status: 'VERIFIED_NO_FALLBACK', history_sessions: usableBars.length,
       realized_volatility: volProfile.realized, estimator_spread: volProfile.estimatorSpread,
-      garch: true, drift: 0, models: 'LOGNORMAL_JUMP_DIFFUSION_STUDENT_T_BLOCK_BOOTSTRAP',
+      garch: true, drift: 0,
+      primary_model: UNDERWRITE_PRIMARY_MODEL,
+      models: UNDERWRITE_MODEL_DEFINITIONS,
+      max_of_models: 'REMOVED', mixture: 'NONE',
     },
     method,
   };

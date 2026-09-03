@@ -1503,7 +1503,7 @@ export class SchwabD1Client {
         delta: 'PER_SHARE_EQUIVALENT',
         gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
         vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
-        theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+        theta: 'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY',
       },
       underlyingPrice: finite(quote.underlyingPrice ?? record.underlyingPrice),
       openInterest: finite(quote.openInterest ?? record.openInterest, 0),

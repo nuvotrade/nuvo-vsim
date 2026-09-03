@@ -1,0 +1,70 @@
+{
+  "packet": "UNDERWRITE_U0_PREDEPLOY_PACKET_2026-09-02",
+  "prepared_at": "2026-09-02T20:53:32-07:00",
+  "baseline_commit": "9944a4bdeaeb848913c5b38c1915e5c9724b72f9",
+  "branch": "codex/post-fill-reconciliation",
+  "deployment": "NONE",
+  "mutation_eligible": false,
+  "verification": {
+    "tests_passed": 764,
+    "tests_total": 764,
+    "suites": 66,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "todo": 0,
+    "dry_build": "PASS",
+    "wrangler_version": "4.125.0",
+    "upload_kib": 2122.26,
+    "gzip_kib": 442.28
+  },
+  "predicted_bundle": {
+    "path": "entry.js",
+    "sha256": "53779147009d9ba61b9999727101ef1288c6732a2b017768ab5e0bd7a92e9a09",
+    "bytes": 2173197,
+    "reproduced_twice": true
+  },
+  "sealed_csp_reference": {
+    "path": "cloudflare/cash-secured-put-calculator.js",
+    "sealed_packet_sha256": "e16e4e02e4ca2a34cb26fcaaff4fc4aab27575ee966d21a42e6fe1f15ae571da",
+    "current_sha256": "e16e4e02e4ca2a34cb26fcaaff4fc4aab27575ee966d21a42e6fe1f15ae571da",
+    "unchanged": true
+  },
+  "files": [
+    {
+      "path": "cloudflare/worker.js",
+      "sha256": "ff03e0bf65507a6e0c8af6b00f2cb2e373ff3eed984d3277a49675b75cea4cf0",
+      "bytes": 325579
+    },
+    {
+      "path": "cloudflare/migrations/0016_underwrite_forecasts.sql",
+      "sha256": "5351f6b6fcac98a1036e05991015649c45863c9a622dbe1f1a112153c67d3966",
+      "bytes": 712
+    },
+    {
+      "path": "src/pipeline/cycle.js",
+      "sha256": "934708a2b7ff07bb1fc5c540588d5432b5667372e1bb7833a8dbb94d76720983",
+      "bytes": 30198
+    },
+    {
+      "path": "src/lifecycle/covered_call_analysis.js",
+      "sha256": "c6d95c6b12ebe992a4cb2f32be6cbf8cf4090d8097fd505e6cf8a0a5fd10a0fc",
+      "bytes": 17634
+    },
+    {
+      "path": "test/integration.test.js",
+      "sha256": "c240d235c463a881d55932f415723b228bbd99eff5beb58017184af41493fc7a",
+      "bytes": 25824
+    },
+    {
+      "path": "test/covered_call_analysis.test.js",
+      "sha256": "589ed62da7106b0683d50bb78522eaf3c4053d31a0810999afe1bb072bc521bf",
+      "bytes": 9210
+    },
+    {
+      "path": "test/underwrite_u0.test.js",
+      "sha256": "03e2ff70a5dc4f4aed2c0214951a9bcce5fb49470eaaa6c2dc7a2553ad311546",
+      "bytes": 2923
+    }
+  ]
+}

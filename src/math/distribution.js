@@ -112,13 +112,32 @@ export function lognormalTerminal({ spot, vol, t, drift = 0, n = 20000, seed = '
  * Student-t terminal — fatter tails at the same variance.
  * `nu` around 4–6 reproduces the excess kurtosis of daily equity returns.
  */
-export function studentTTerminal({ spot, vol, t, nu = 5, drift = 0, n = 20000, seed = 'studentt' }) {
+export function studentTTerminal({
+  spot, vol, t, nu = 5, drift = 0, n = 20000, seed = 'studentt',
+  varianceNormalized = false, normalizeArithmeticGrowth = false,
+}) {
   const rng = new Rng(seed);
   const mu = (drift - (vol * vol) / 2) * t;
   const sd = vol * Math.sqrt(t);
   const samples = new Array(n);
-  for (let i = 0; i < n; i += 1) samples[i] = spot * Math.exp(mu + sd * rng.studentT(nu));
-  return new TerminalDistribution({ samples, spot, t, model: 'student-t', params: { vol, nu, drift }, seed });
+  const varianceScale = varianceNormalized && nu > 2 ? Math.sqrt((nu - 2) / nu) : 1;
+  for (let i = 0; i < n; i += 1) {
+    samples[i] = spot * Math.exp(mu + sd * rng.studentT(nu) * varianceScale);
+  }
+  const rawMean = mean(samples);
+  const targetMean = spot * Math.exp(drift * t);
+  const arithmeticScale = normalizeArithmeticGrowth && rawMean > 0 ? targetMean / rawMean : 1;
+  if (arithmeticScale !== 1) {
+    for (let i = 0; i < samples.length; i += 1) samples[i] *= arithmeticScale;
+  }
+  return new TerminalDistribution({
+    samples, spot, t, model: 'student-t',
+    params: {
+      vol, nu, drift, varianceNormalized, varianceScale,
+      normalizeArithmeticGrowth, rawMean, targetMean, arithmeticScale,
+    },
+    seed,
+  });
 }
 
 /**

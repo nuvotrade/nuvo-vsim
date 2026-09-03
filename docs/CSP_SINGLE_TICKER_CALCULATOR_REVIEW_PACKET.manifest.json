@@ -1,0 +1,54 @@
+{
+  "packet": "CSP_SINGLE_TICKER_CALCULATOR_REVIEW_PACKET",
+  "prepared_at": "2026-09-02T18:49:48-07:00",
+  "baseline_commit": "9944a4bdeaeb848913c5b38c1915e5c9724b72f9",
+  "deployment": "NONE",
+  "mutation_eligible": false,
+  "verification": {
+    "tests_passed": 758,
+    "tests_total": 758,
+    "dry_build": "PASS",
+    "wrangler_version": "4.125.0"
+  },
+  "predicted_bundle": {
+    "sha256": "7a9d8076bd08ce1bfb0fa3c11fa211d0ce2a5728254555caf5c405351ecc533c",
+    "bytes": 2160233
+  },
+  "files": [
+    {
+      "path": "docs/CSP_SINGLE_TICKER_CALCULATOR_REVIEW_PACKET.md",
+      "sha256": "a1d8d1f87ec6800474e2b8f141bc693087c0a3a667c5bad673027d5463e7fae7",
+      "bytes": 9843
+    },
+    {
+      "path": "cloudflare/cash-secured-put-calculator.js",
+      "sha256": "e16e4e02e4ca2a34cb26fcaaff4fc4aab27575ee966d21a42e6fe1f15ae571da",
+      "bytes": 16053
+    },
+    {
+      "path": "cloudflare/worker.js",
+      "sha256": "5c849f22ac604346a452b2964d04b74e110d8d2bd5f61c6fa787475f237fc3f1",
+      "bytes": 318751
+    },
+    {
+      "path": "src/math/distribution.js",
+      "sha256": "43b9affd8005948ec5dcb8cac770e5720ce6f7c05e7a4829d24e14dd385564f9",
+      "bytes": 9637
+    },
+    {
+      "path": "src/truth/providers/schwab.js",
+      "sha256": "62dd137fb6d3b738146eebb186ea06afbe0080dc59273df6908fd731cadf6974",
+      "bytes": 12350
+    },
+    {
+      "path": "test/cash_secured_put_calculator.test.js",
+      "sha256": "1ec892aa11a6a415a0522b725350615fd42ab13758d92793bc47d3697749ef09",
+      "bytes": 5964
+    },
+    {
+      "path": "test/production_adapters.test.js",
+      "sha256": "92014489fb8260e37d60e6fac1b4cf08489a9148e8ece00136b466b6a8565652",
+      "bytes": 62583
+    }
+  ]
+}

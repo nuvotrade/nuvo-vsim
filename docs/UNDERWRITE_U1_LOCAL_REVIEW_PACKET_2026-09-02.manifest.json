@@ -1,0 +1,33 @@
+{
+  "packet": "UNDERWRITE_U1_LOCAL_REVIEW_PACKET_2026-09-02",
+  "scope": "U1_LOCAL_ONLY_SHARED_MODEL_AND_RATE_CONTRACT",
+  "mutation_eligible": false,
+  "deployment": "NOT_UPLOADED",
+  "config": "cloudflare/wrangler.jsonc",
+  "tests": {
+    "passed": 765,
+    "total": 765,
+    "failed": 0
+  },
+  "dry_build": {
+    "result": "PASS",
+    "entry_bytes": 2179606,
+    "predicted_worker_bundle_sha256": "7e430e77394240a61f104e53cccf7c1fe25de0439102da6ebe0d09b7ac58d05e"
+  },
+  "sealed_csp_transition": {
+    "u0_sha256": "e16e4e02e4ca2a34cb26fcaaff4fc4aab27575ee966d21a42e6fe1f15ae571da",
+    "u1_sha256": "746b5413460a621679383adf36981966ab14a9558cba79a83fa99c867e05f895",
+    "expected_change": "U1_RATE_CONTRACT_ONLY_WITH_SEVEN_MODEL_LOCKS_PRESERVED"
+  },
+  "files": {
+    "cloudflare/underwrite-model-engine.js": "3e5e720b9e39339023b9290576dce515bb8f05fc8967f41e4bd45522663ed9e0",
+    "cloudflare/cash-secured-put-calculator.js": "746b5413460a621679383adf36981966ab14a9558cba79a83fa99c867e05f895",
+    "cloudflare/covered-call-calculator.js": "8568c7a9d620314160e12c67e40cbe451b87bd50eb723f14aa734e5ab23224e4",
+    "cloudflare/worker.js": "fa265bb1b27c713522f59dce98259ff7dbf053fcaf0388dac81220bb175cdcd4",
+    "test/cash_secured_put_calculator.test.js": "9305ad92cae274caa7d72e69c31f91df75f511eeade8d05a3f6fbf3ac3ebcc46",
+    "test/covered_call_calculator.test.js": "3154bdff3a601bf3aec2cf259d8d917559eff88a745eb4ecebe982ee6846bc74",
+    "test/production_adapters.test.js": "de3683e9bba136f5b5950c3d4f4e13c0ec9fa75f0a3a71dea070ecfc9e8ff517",
+    "test/lane-1-event-ledger.test.js": "e1836e405c8bc2aeb17104881c732047c293b471908cfa8cee2fccf74f2d2eda"
+  },
+  "u2_portfolio_review_economics": "UNTOUCHED"
+}

@@ -105,11 +105,17 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /Options calculators/u);
     assert.match(rewriteSource, /data-calculator="covered-call"/u);
     assert.match(rewriteSource, /data-calculator="cash-secured-put"/u);
-    assert.match(rewriteSource, /Wheel-ready paths/u);
+    assert.match(rewriteSource, /One-ticker cash-secured-put calculator/u);
+    assert.match(rewriteSource, /data-csp-symbol/u);
+    assert.match(rewriteSource, /No universe, ranking, Governor, portfolio gate, recommendation, or order route/u);
+    assert.match(rewriteSource, /All computable put rows/u);
+    assert.match(rewriteSource, /PRIMARY RAW ± SE/u);
+    assert.match(rewriteSource, /PRIMARY cash-adjusted/u);
+    assert.match(rewriteSource, /Warnings never hide a row/u);
     assert.match(rewriteSource, /NEV \/ day/u);
     assert.doesNotMatch(rewriteSource, /data-vsim="csp-raroc"/u);
     assert.match(rewriteSource, /\.calculator-pane\[hidden\]\{display:none\}/u);
-    assert.match(rewriteSource, /Ready for a fresh calculation/u);
+    assert.match(rewriteSource, /Enter one ticker for transparent put math/u);
     assert.match(html, /data-view="underwrite">Underwrite/u);
     assert.doesNotMatch(html, /data-view="opportunities">Opportunities/u);
     assert.doesNotMatch(html, /data-view="evidence">Evidence/u);
@@ -167,7 +173,8 @@ describe('protected live dashboard', () => {
     assert.match(source, /SELL CC/u);
     assert.match(source, /covered_call_actionable/u);
     assert.match(source, /function renderCoveredCall\(result\)/u);
-    assert.match(source, /function renderCashSecuredPuts\(cycle\)/u);
+    assert.match(source, /function renderCashSecuredPuts\(result\)/u);
+    assert.match(source, /MODELED · UNCALIBRATED · n\(symbol×expiry\)=0/u);
     assert.match(source, /function runCashSecuredPut\(button\)/u);
     assert.doesNotMatch(source, /Run a fresh protected cash-secured-put calculation/u,
       'the primary read-only calculator action must not require a habitual confirmation');
@@ -181,18 +188,20 @@ describe('protected live dashboard', () => {
     assert.match(source, /activateView\('underwrite'\)/u);
     assert.match(source, /setUnderwriteMode\('manual'\)/u);
     assert.match(source, /data-csp-calculate/u);
-    assert.match(source, /cspOpportunities/u);
-    assert.match(runShadowCycle.toString(), /source === 'CSP_CALCULATOR'/u);
     const workerSource = readFileSync(new URL('../cloudflare/worker.js', import.meta.url), 'utf8');
-    assert.match(workerSource, /cspShadowLog/u);
-    assert.match(workerSource, /underwritingEligibleBeforeCapital/u);
-    assert.match(workerSource, /capitalConstraintAppliedAfterUnderwriting/u);
-    assert.match(source, /governorApproved/u);
-    assert.match(source, /NO CAPITAL/u);
-    assert.match(source, /NO EDGE/u);
-    assert.match(source, /NO DATA/u);
+    assert.doesNotMatch(workerSource, /data-csp-cash-rate|data-csp-target-basis/u);
+    assert.match(workerSource, /GARCH σ/u);
+    assert.match(workerSource, /may double-count historical jump variance already present in GARCH/u);
+    assert.doesNotMatch(workerSource, /probTouch/u);
+    assert.doesNotMatch(runShadowCycle.toString(), /source === 'CSP_CALCULATOR'/u);
+    assert.match(workerSource, /cashSecuredPutDashboard/u);
+    assert.match(workerSource, /rights: \['put'\], includePartial: true/u);
+    assert.match(workerSource, /request\.method === 'GET'/u);
+    assert.doesNotMatch(workerSource, /triggerShadowCycle\(env, owner\.id, \{ source: 'CSP_CALCULATOR'/u);
+    assert.match(source, /No account or Governor state is being read/u);
+    assert.doesNotMatch(source, /ELIGIBLE CSP CANDIDATE|NO CAPITAL|NO EDGE/u);
     assert.ok(source.includes('/api/cash-secured-put/calculate'));
-    assert.ok(!source.includes('const best = rows.find(item => item.admissible)'));
+    assert.ok(!source.includes('const best = rows.find'));
     assert.match(source, /function activateView\(id\)/u);
     assert.match(source, /incremental_nev_vs_holding/u);
     assert.match(source, /rejection_codes/u);
@@ -218,11 +227,11 @@ describe('protected live dashboard', () => {
     assert.doesNotMatch(source, /Broker transaction ledger/u);
     assert.match(source, /function renderGuardian\(guardianPayload\)/u);
     assert.match(source, /#decisions \.chain-valid/u);
-    assert.match(source, /Current shadow result/u);
+    assert.match(source, /Run fresh portfolio review/u);
     assert.match(source, /function relocateTopOpportunities\(\)/u);
-    assert.match(source, /opportunitiesView\.insertBefore\(panel, detailed\)/u);
-    assert.match(source, /#underwrite \[data-underwrite-pane="scan"\] \.top-opportunities-panel tbody/u);
-    assert.match(source, /#underwrite \[data-underwrite-pane="scan"\] \.top-opportunities-panel \.panel-note/u);
+    assert.match(source, /candidateBody\.dataset\.reviewRows/u);
+    assert.match(source, /symbolBody\.dataset\.reviewSymbols/u);
+    assert.match(source, /Truth failures stay local to each ticker/u);
     assert.doesNotMatch(source, /#overview \.table-panel tbody/u);
     assert.doesNotMatch(source, /relocateOverviewEvidencePanels/u);
     assert.doesNotMatch(source, /#decisions \.environment-panel/u);
@@ -744,6 +753,33 @@ describe('Schwab-only production market provider', () => {
     assert.equal((await provider.optionChain('SPY', { expirations: [14, 30] })).error,
       'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE');
   });
+
+  test('single-ticker calculator can read put-only partial rows without weakening strict scans', async () => {
+    const provider = new SchwabMarketProvider({
+      client: schwabMarketClient({ incomplete: true }), ownerId: 'owner', now: () => NOW,
+      dteTargets: [14, 30], eventProvider: { async events() { return { value: [], asOf: NOW }; } },
+    });
+    const chain = await provider.optionChain('SPY', {
+      expirations: [14, 30], rights: ['put'], includePartial: true,
+    });
+    assert.equal(chain.error, undefined);
+    assert.equal(chain.value.contracts.length, 2);
+    assert.ok(chain.value.contracts.every((contract) => contract.right === 'put'));
+    assert.ok(chain.value.contracts.every((contract) => contract.delta === null));
+    assert.equal((await provider.optionChain('SPY', {
+      expirations: [14, 30], rights: ['put'], includePartial: false,
+    })).error, 'SCHWAB_EXECUTABLE_CHAIN_UNAVAILABLE');
+  });
+
+  test('Schwab option-chain right selection rejects empty or unknown rights', async () => {
+    const provider = new SchwabMarketProvider({
+      client: schwabMarketClient(), ownerId: 'owner', now: () => NOW,
+    });
+    assert.equal((await provider.optionChain('SPY', { expirations: [14], rights: [] })).error,
+      'SCHWAB_OPTION_RIGHTS_INVALID');
+    assert.equal((await provider.optionChain('SPY', { expirations: [14], rights: ['banana'] })).error,
+      'SCHWAB_OPTION_RIGHTS_INVALID');
+  });
 });
 
 describe('evidence replay boundaries', () => {
@@ -936,7 +972,7 @@ describe('Schwab production broker boundary', () => {
       delta: 'PER_SHARE_EQUIVALENT',
       gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
       vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
-      theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+      theta: 'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY',
     });
     assert.equal(quote.value.underlyingPrice, 7705);
     assert.equal(quote.source, 'SCHWAB_MARKET_DATA_OPTION_QUOTE_REALTIME');
@@ -1202,12 +1238,13 @@ describe('custody risk mapping', () => {
     assert.equal(mapped.positions[0].economicCapital, 10_000);
     assert.equal(mapped.positions[1].economicCapital, 9_000);
     assert.equal(mapped.positions[1].quantity, -1);
-    assert.equal(mapped.positions[1].thetaUnit, 'PREMIUM_DOLLARS_PER_SHARE_PER_DAY');
+    assert.equal(mapped.positions[1].thetaUnit,
+      'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY');
     assert.ok(mapped.returnsBySymbol.SPY.length >= 120);
     assert.equal(mapped.sectors.SPY, 'CUSTODY_UNCLASSIFIED');
   });
 
-  test('carries Schwab per-contract theta units into the Governor position', async () => {
+  test('carries Schwab per-share theta units into the Governor position', async () => {
     const schwabUnitProvider = {
       ...provider,
       async optionChain(symbol) {
@@ -1222,7 +1259,7 @@ describe('custody risk mapping', () => {
                 delta: 'PER_SHARE_EQUIVALENT',
                 gamma: 'PER_SHARE_EQUIVALENT_PER_UNDERLYING_DOLLAR',
                 vega: 'PREMIUM_DOLLARS_PER_SHARE_PER_VOL_POINT',
-                theta: 'DOLLARS_PER_CONTRACT_PER_DAY',
+                theta: 'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY',
               },
             })),
           },
@@ -1234,8 +1271,9 @@ describe('custody risk mapping', () => {
         expiration, quantity: -6, multiplier: 100, marketValue: -720 },
     ] });
     assert.equal(mapped.ok, true);
-    assert.equal(mapped.positions[0].thetaUnit, 'DOLLARS_PER_CONTRACT_PER_DAY');
-    assert.equal(positionGreeks(mapped.positions[0]).theta, 0.18);
+    assert.equal(mapped.positions[0].thetaUnit,
+      'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY');
+    assert.equal(positionGreeks(mapped.positions[0]).theta, 18);
   });
 
   test('refuses an uncovered short call instead of assigning finite safe-looking risk', async () => {

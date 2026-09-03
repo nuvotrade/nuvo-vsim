@@ -1,0 +1,52 @@
+{
+  "packet": "UNDERWRITE_U2_REPAIR_PREDEPLOY_PACKET_2026-09-02",
+  "scope": "U2_NULL_APPEND_STARTUP_REPAIR",
+  "live": {
+    "status": "U1_AT_100_PERCENT",
+    "worker_version": "4aae00e8-31b2-40aa-ab77-38e5a3573f47",
+    "bundle_sha256": "7e430e77394240a61f104e53cccf7c1fe25de0439102da6ebe0d09b7ac58d05e"
+  },
+  "failed_u2": {
+    "worker_version": "cb573b19-7e7d-4c01-a828-b66ca89618b4",
+    "bundle_sha256": "2284ccb8d38c17e49964c0a0f372337316422ae517f164710de20c08a088d43a",
+    "symptom": "Overview fail-closed: Cannot read properties of null (reading append)"
+  },
+  "root_cause": "U2 removed the legacy top-opportunities table, while renderOverview still passed its now-null tbody to renderRows; the empty-row branch called tbody.append before custody positions rendered.",
+  "repair": [
+    "remove obsolete legacy top-opportunities rendering from renderOverview",
+    "make renderRows return when an optional tbody is absent",
+    "add an initial-Overview regression fixture proving the live-position panel remains on the same render path"
+  ],
+  "mutation_eligible": false,
+  "deployment": "HOLD_NOT_UPLOADED",
+  "config_absolute": "/Users/nuvo/.codex/.chatgpt-projects/g-p-6a8f887336308191a81e7bbda9e1bdd8/work/nuvo-vsim-post-fill-repair/cloudflare/wrangler.jsonc",
+  "tests": {
+    "passed": 775,
+    "total": 775,
+    "failed": 0,
+    "new_regression": "U2 initial Overview cannot crash on the removed legacy opportunity table"
+  },
+  "dry_build": {
+    "result": "PASS",
+    "entry_bytes": 2164223,
+    "predicted_worker_bundle_sha256": "1f7f39cc2ea837faba28a26b8c26c3a62a98d77da81f11131e4d912593231fd4"
+  },
+  "files": {
+    "cloudflare/underwrite-model-engine.js": "3e5e720b9e39339023b9290576dce515bb8f05fc8967f41e4bd45522663ed9e0",
+    "cloudflare/cash-secured-put-calculator.js": "cc3c03c8a203a199db6ca984bc5563248f61c8d37b439797e61e7f210478fba2",
+    "cloudflare/covered-call-calculator.js": "8568c7a9d620314160e12c67e40cbe451b87bd50eb723f14aa734e5ab23224e4",
+    "cloudflare/portfolio-review.js": "d72787f9afaa3721d6a829a07ad22293b3839f2a00682fb0abb6f747a9f92ae5",
+    "cloudflare/worker.js": "a77b45b81a07b8add031313c64ebe39d0b4e49489dd990a364fe8a667dad6705",
+    "test/portfolio_review.test.js": "eb5b51d1effc29cf85f5634a3ddff02764039d84f78b38094ad6b9cfc9570ad6",
+    "test/underwrite_u2.test.js": "2d1d2279c4871caa431665ca7f3769e5f31bff33297689a00566f5d195c46ada",
+    "test/underwrite_u0.test.js": "245d7f11cca3eebfd91f4ebbd85d8613bc1d635796a9dbf82fbdc8b9405d4f15",
+    "test/production_adapters.test.js": "59bd7ea136390e38927420175a8938b2bffcda93f4211acb1ac63c7b8d341896"
+  },
+  "continuity": {
+    "u2_economics": "UNCHANGED_FROM_FAILED_U2",
+    "lane_1": "UNCHANGED",
+    "broker_send": "UNCHANGED",
+    "coordinator": "UNCHANGED",
+    "u3": "UNOPENED"
+  }
+}

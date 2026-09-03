@@ -125,6 +125,9 @@ export async function runCycle(ctx) {
   // legitimately has nothing raw to record, and says so.
   let capturedRaw = null;
   const screenedOutAll = [];
+  const symbolOutcomes = Object.fromEntries((symbols ?? []).map((symbol) => [symbol, {
+    symbol, state: 'PENDING', stage: 'TRUTH', reason_codes: [], reasons: [], candidate_count: 0,
+  }]));
 
   const refuse = (violations, extra = {}) => {
     const tier = governingTier(violations);
@@ -135,6 +138,7 @@ export async function runCycle(ctx) {
       violations,
       reasons: violations.map(String),
       trace,
+      symbolOutcomes,
       ...extra,
       evidence: buildEvidence({
         cycleId, now, decision: OUTCOME.REFUSED, candidates: [],
@@ -255,6 +259,8 @@ export async function runCycle(ctx) {
 
   capturedRaw = rawInputs;
   let truthReport = null;
+  const truthEligibleSymbols = [];
+  const truthViolations = [];
   for (const sym of symbols) {
     const report = verify({
       ...sharedSnapshot,
@@ -263,25 +269,66 @@ export async function runCycle(ctx) {
       greeks: { value: chains[sym]?.value ? true : undefined, asOf: chains[sym]?.asOf, source: 'chain' },
       eventCalendar: events[sym],
     }, { limits, now });
-    truthReport ??= report;
-    if (!report.tradeable) {
-      killSwitches?.trip(SWITCH.DATA_INTEGRITY, `Truth contract not satisfied for ${sym}.`,
-        { symbol: sym, ...report.summary() });
-      step('truth', false, { symbol: sym, ...report.summary() });
-      return refuse(report.violations, { truthReport: report });
+    const historyError = histories[sym]?.error ?? null;
+    if (report.tradeable && historyError) {
+      const historyCode = String(historyError).includes('HISTORY_SHORT')
+        ? 'SCHWAB_HISTORY_SHORT' : 'HISTORY_UNVERIFIED';
+      const problem = violation(TIER.TRUTH, historyCode,
+        `Verified daily history is unavailable for ${sym}: ${historyError}`, {
+          symbol: sym, provider_error: historyError,
+        });
+      truthViolations.push(problem);
+      symbolOutcomes[sym] = {
+        symbol: sym, state: 'REFUSED', stage: 'HISTORY',
+        reason_codes: [problem.code], reasons: [String(problem)], candidate_count: 0,
+      };
+      continue;
     }
+    if (report.tradeable) truthReport ??= report;
+    if (!report.tradeable) {
+      truthViolations.push(...report.violations);
+      symbolOutcomes[sym] = {
+        symbol: sym, state: 'REFUSED', stage: 'TRUTH',
+        reason_codes: report.violations.map((item) => item.code),
+        reasons: report.violations.map(String), candidate_count: 0,
+      };
+      continue;
+    }
+    truthEligibleSymbols.push(sym);
+    symbolOutcomes[sym] = { symbol: sym, state: 'VERIFIED', stage: 'TRUTH', reason_codes: [], reasons: [], candidate_count: 0 };
   }
-  step('truth', true, { verdict: truthReport.verdict, symbols: [...symbols] });
+  if (!truthEligibleSymbols.length) {
+    killSwitches?.trip(SWITCH.DATA_INTEGRITY, 'Truth contract failed for every requested symbol.',
+      { symbols: [...symbols] });
+    step('truth', false, { refused: [...symbols] });
+    return refuse(truthViolations, { truthReport });
+  }
+  step('truth', true, {
+    verdict: truthReport.verdict, verified: truthEligibleSymbols,
+    refused: symbols.filter((symbol) => !truthEligibleSymbols.includes(symbol)),
+  });
 
   // Chain-level structural audit for every symbol, not just the first.
-  for (const sym of symbols) {
+  const activeSymbols = [];
+  const chainViolations = [];
+  for (const sym of truthEligibleSymbols) {
     const problems = auditChain(chains[sym].value, { limits, now });
     if (problems.length) {
-      step('chainAudit', false, { symbol: sym, problems: problems.map(String) });
-      return refuse(problems, { truthReport });
+      chainViolations.push(...problems);
+      symbolOutcomes[sym] = {
+        symbol: sym, state: 'REFUSED', stage: 'CHAIN_AUDIT',
+        reason_codes: problems.map((item) => item.code), reasons: problems.map(String), candidate_count: 0,
+      };
+      continue;
     }
+    activeSymbols.push(sym);
   }
-  step('chainAudit', true, {});
+  if (!activeSymbols.length) {
+    step('chainAudit', false, { refused: truthEligibleSymbols });
+    return refuse(chainViolations, { truthReport });
+  }
+  step('chainAudit', true, { verified: activeSymbols,
+    refused: truthEligibleSymbols.filter((symbol) => !activeSymbols.includes(symbol)) });
 
   // ── 1b. Reconciliation (§16) ─────────────────────────────────────────
   const recon = reconcile({
@@ -308,7 +355,7 @@ export async function runCycle(ctx) {
 
   // ── 2. MARKET STATE + REGIME ─────────────────────────────────────────
   const underlyings = {};
-  for (const sym of symbols) {
+  for (const sym of activeSymbols) {
     underlyings[sym] = buildUnderlyingState({
       symbol: sym,
       bars: histories[sym].value,
@@ -337,12 +384,19 @@ export async function runCycle(ctx) {
       cycleId, now, reason: `Regime determined from only ${(marketState.regime.coverage * 100).toFixed(0)}% of its inputs; `
         + 'insufficient basis for new exposure.',
       trace, marketState, truthReport, strategyId, modelVersion, codeVersion, limits, authorityLevel,
-      rawInputs: capturedRaw, externalizeRaw,
+      rawInputs: capturedRaw, externalizeRaw, symbolOutcomes,
     });
   }
 
   // ── 3. UNIVERSE (§7) ─────────────────────────────────────────────────
   const universe = buildUniverse(underlyings, { limits, approved: new Set(approved ?? []) });
+  for (const entry of universe.prohibited) {
+    symbolOutcomes[entry.symbol] = {
+      symbol: entry.symbol, state: 'REFUSED', stage: 'UNIVERSE',
+      reason_codes: (entry.violations ?? []).map((item) => item.code),
+      reasons: (entry.violations ?? []).map(String), candidate_count: 0,
+    };
+  }
   step('universe', universe.tradeable.length > 0, {
     tierA: universe.tierA.map((c) => c.symbol),
     tierB: universe.tierB.map((c) => c.symbol),
@@ -352,7 +406,7 @@ export async function runCycle(ctx) {
     return noTradeResult({
       cycleId, now, reason: 'No underlying cleared the universe requirements.',
       trace, marketState, truthReport, universe, strategyId, modelVersion, codeVersion, limits, authorityLevel,
-      rawInputs: capturedRaw, externalizeRaw,
+      rawInputs: capturedRaw, externalizeRaw, symbolOutcomes,
     });
   }
 
@@ -368,17 +422,23 @@ export async function runCycle(ctx) {
     const listedDtes = availableContractDtes(chains[sym].value);
     if (!listedDtes.length) {
       trace.push({ name: 'listedExpirations', ok: false, detail: { symbol: sym, reason: 'NO_LISTED_DTE' } });
+      symbolOutcomes[sym] = { symbol: sym, state: 'NO_TRADE', stage: 'LISTED_EXPIRATIONS',
+        reason_codes: ['NO_LISTED_DTE'], reasons: ['No listed positive-DTE option expiration was supplied.'], candidate_count: 0 };
       continue;
     }
     const maxDte = Math.max(...listedDtes);
     const evFails = eventClearance(st, { dte: maxDte, limits, now });
     if (evFails.length) {
       trace.push({ name: 'eventClearance', ok: false, detail: { symbol: sym, reasons: evFails.map(String) } });
+      symbolOutcomes[sym] = { symbol: sym, state: 'REFUSED', stage: 'EVENT_CLEARANCE',
+        reason_codes: evFails.map((item) => item.code), reasons: evFails.map(String), candidate_count: 0 };
       continue;
     }
     // VRP screen (§25 step 2-3).
     if (!st.vrp.assessment.attractive) {
       trace.push({ name: 'vrpScreen', ok: false, detail: { symbol: sym, reasons: st.vrp.assessment.reasons } });
+      symbolOutcomes[sym] = { symbol: sym, state: 'NO_TRADE', stage: 'VRP_SCREEN',
+        reason_codes: ['VRP_NOT_ATTRACTIVE'], reasons: st.vrp.assessment.reasons, candidate_count: 0 };
       continue;
     }
 
@@ -424,6 +484,13 @@ export async function runCycle(ctx) {
           && (c.dte === null || (c.dte >= strategy.dteBand[0] && c.dte <= strategy.dteBand[1])))
         : cands;
       allCandidates.push(...filtered);
+      const previous = symbolOutcomes[sym]?.candidate_count ?? 0;
+      symbolOutcomes[sym] = {
+        symbol: sym, state: filtered.length ? 'CALCULATED' : 'NO_TRADE', stage: 'UNDERWRITING',
+        reason_codes: filtered.length ? [] : ['NO_SURVIVING_CANDIDATE'],
+        reasons: filtered.length ? [] : ['No candidate survived structure and strategy screening.'],
+        candidate_count: previous + filtered.length,
+      };
     }
   }
 
@@ -443,6 +510,7 @@ export async function runCycle(ctx) {
       trace, marketState, truthReport, universe, candidates: allCandidates,
       comparison, strategyId, modelVersion, codeVersion, limits, authorityLevel,
       rawInputs: capturedRaw, externalizeRaw, screenedOut: screenedOutAll, distributions: distributionLog,
+      symbolOutcomes,
     });
   }
   step('ranking', true, {
@@ -530,6 +598,7 @@ export async function runCycle(ctx) {
       governanceAttempts,
       strategyId, modelVersion, codeVersion, limits, authorityLevel,
       rawInputs: capturedRaw, externalizeRaw, screenedOut: screenedOutAll, distributions: distributionLog,
+      symbolOutcomes,
     });
   }
 
@@ -559,6 +628,7 @@ export async function runCycle(ctx) {
       comparison, governance, selected,
       strategyId, modelVersion, codeVersion, limits, authorityLevel,
       rawInputs: capturedRaw, externalizeRaw, screenedOut: screenedOutAll, distributions: distributionLog,
+      symbolOutcomes,
     });
   }
 
@@ -589,6 +659,7 @@ export async function runCycle(ctx) {
     marketState,
     universe,
     candidates: allCandidates,
+    symbolOutcomes,
     trace,
     evidence,
     requiresApproval: !can(authorityLevel, 'submit'),
@@ -601,6 +672,7 @@ function noTradeResult({
   candidates = [], comparison = null, governance = null, selected = null,
   governanceAttempts = null, rawInputs = null, externalizeRaw = false,
   screenedOut = [], distributions = null,
+  symbolOutcomes = {},
   strategyId, modelVersion, codeVersion, limits, authorityLevel,
 }) {
   return {
@@ -611,6 +683,7 @@ function noTradeResult({
     decision: STRUCTURE.NO_TRADE,
     comparison,
     candidates,
+    symbolOutcomes,
     marketState,
     universe,
     governance,

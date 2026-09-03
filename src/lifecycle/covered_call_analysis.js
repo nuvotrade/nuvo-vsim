@@ -7,11 +7,31 @@ function finite(value) {
   return Number.isFinite(Number(value)) ? Number(value) : null;
 }
 
+function newYorkDate(value) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(value));
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
 function calendarDte(expiration, now) {
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = newYorkDate(now);
   const end = Date.parse(`${expiration}T00:00:00.000Z`);
   const start = Date.parse(`${today}T00:00:00.000Z`);
   return Number.isFinite(end) ? Math.max(0, Math.round((end - start) / DAY_MS)) : null;
+}
+
+function newYorkSessionClose(expiration) {
+  const [year, month, day] = String(expiration).split('-').map(Number);
+  const noonUtc = Date.UTC(year, month - 1, day, 12);
+  const zone = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', timeZoneName: 'longOffset',
+  }).formatToParts(new Date(noonUtc)).find((part) => part.type === 'timeZoneName')?.value ?? '';
+  const match = zone.match(/^GMT([+-])(\d{2}):(\d{2})$/u);
+  if (!match) return null;
+  const offsetMinutes = (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3]));
+  return Date.UTC(year, month - 1, day, 16, 0) - offsetMinutes * 60_000;
 }
 
 function cleanSymbol(value) {
@@ -106,6 +126,7 @@ export function analyzeCoveredCallLifecycle({
   entryEvidence,
   events = [],
   eventCoverage = {},
+  quoteFreshness = 'CURRENT',
   now = Date.now(),
   rate = 0,
   dividendYield = 0,
@@ -190,14 +211,17 @@ export function analyzeCoveredCallLifecycle({
   const pOtmRn = 1 - pItmRn;
   const modelGreeks = greeks({ type: 'call', spot, strike, vol: iv, t, rate, yield: dividendYield });
   const brokerLongTheta = finite(optionQuote?.theta);
-  // Schwab reports theta in dollars per option contract per day. The quote
-  // already represents the contract's 100-share deliverable, so multiplying
-  // by the equity multiplier again inflates the position theta by 100x.
-  const shortThetaPerDay = brokerLongTheta === null ? null : -brokerLongTheta * contracts;
+  // Schwab reports theta on the same per-share premium scale as the option
+  // quote. Convert that quoted-price change to position dollars exactly once:
+  // negate the long-option theta, then multiply by the deliverable and lots.
+  const shortThetaPerDay = brokerLongTheta === null
+    ? null : -brokerLongTheta * multiplier * contracts;
   const modelShortThetaPerDay = Number.isFinite(modelGreeks.theta)
     ? -modelGreeks.theta * requiredShares : null;
 
-  const expiryMs = Date.parse(`${expiration}T23:59:59.999Z`);
+  // Listed US equity-option expiration is a New York trading-calendar fact.
+  // The 16:00 cutoff is converted with the actual EST/EDT offset for that day.
+  const expiryMs = newYorkSessionClose(expiration);
   const inTenor = events.filter((event) => {
     const at = eventTime(event);
     return at !== null && at >= Number(now) && at <= expiryMs;
@@ -214,7 +238,7 @@ export function analyzeCoveredCallLifecycle({
   ));
   if (spot >= strike && extrinsicPctOfOriginalCredit <= assignmentExtrinsicThresholdPct) {
     flags.push(lifecycleFlag(
-      'ASSIGNMENT_LIKELY', extrinsicPctOfOriginalCredit,
+      'ITM_THIN_EXTRINSIC', extrinsicPctOfOriginalCredit,
       `ITM and executable extrinsic/original gross credit <= ${assignmentExtrinsicThresholdPct}`,
       `Executable extrinsic is ${(extrinsicPctOfOriginalCredit * 100).toFixed(2)}% of original gross credit.`,
     ));
@@ -236,6 +260,12 @@ export function analyzeCoveredCallLifecycle({
     'NOMINAL', null, 'no deterministic flag fired', 'No deterministic condition is flagged.',
   ));
 
+  const quoteIsCurrent = String(quoteFreshness).toUpperCase() === 'CURRENT';
+  const currentFlags = quoteIsCurrent ? flags : [lifecycleFlag(
+    'QUOTE_STALE', optionQuote?.asof ?? null, 'fresh executable quote required',
+    'Lifecycle economics are retained as historical context, but no current condition is classified.',
+  )];
+
   const dataGaps = [];
   if (brokerLongTheta === null) dataGaps.push('BROKER_THETA_UNAVAILABLE');
   if (eventCoverage.eventsVerified !== true) dataGaps.push('EVENT_CALENDAR_UNVERIFIED');
@@ -252,6 +282,13 @@ export function analyzeCoveredCallLifecycle({
     strike,
     expiration,
     dte,
+    time_basis: {
+      timezone: 'America/New_York',
+      asof_date: newYorkDate(now),
+      expiration_date: expiration,
+      dte_definition: 'NEW_YORK_CALENDAR_DAYS',
+      event_cutoff: '16:00 America/New_York on expiration date',
+    },
     spot,
     share_basis: shareBasis,
     distance_to_strike: {
@@ -300,9 +337,10 @@ export function analyzeCoveredCallLifecycle({
       executable_extrinsic_total: money(executableExtrinsicTotal),
       extrinsic_pct_of_original_gross_credit: extrinsicPctOfOriginalCredit,
       total_liability_pct_of_original_gross_credit: totalLiabilityPctOfOriginalCredit,
-      broker_long_theta_per_contract_per_day: brokerLongTheta,
+      broker_long_theta_per_share_per_calendar_day: brokerLongTheta,
       broker_theta_contracts: contracts,
-      broker_theta_scaling: 'NEGATE_LONG_CONTRACT_THETA_X_CONTRACTS_NO_EQUITY_MULTIPLIER',
+      broker_theta_equity_multiplier: multiplier,
+      broker_theta_scaling: 'NEGATE_LONG_PER_SHARE_THETA_X_EQUITY_MULTIPLIER_X_CONTRACTS',
       broker_short_theta_per_day: money(shortThetaPerDay),
       model_short_theta_per_day: money(modelShortThetaPerDay),
     },
@@ -329,17 +367,21 @@ export function analyzeCoveredCallLifecycle({
         locked_option_pnl: money(lockedOptionPnl),
         crossover_share_price: unitPrice(closeKeepCrossover),
       },
-      sell_shares_wait_on_call: {
+      prohibited_sell_shares_leave_call_open: {
+        status: 'PROHIBITED_CREATES_NAKED_SHORT_CALL',
         crossover_share_price: unitPrice(sellWaitCrossover),
         executable_share_bid: shareExitBid,
         stock_exit_fees: money(stockFees),
       },
     },
     classification: {
-      flags,
+      status: quoteIsCurrent ? 'CURRENT' : 'UNAVAILABLE_STALE_QUOTE',
+      current: quoteIsCurrent,
+      flags: currentFlags,
+      historical_flags: quoteIsCurrent ? [] : flags,
       data_gaps: dataGaps,
       recommendations: {
-        do_nothing: flags.length === 1 && flags[0].code === 'NOMINAL'
+        do_nothing: quoteIsCurrent && flags.length === 1 && flags[0].code === 'NOMINAL'
           ? 'DETERMINISTIC_STATE_ONLY' : 'NOT_RECOMMENDED_BY_FLAGS',
         close: 'NO_TRUTH',
         roll: 'NO_TRUTH',

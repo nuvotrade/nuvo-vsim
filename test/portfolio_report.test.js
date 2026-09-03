@@ -154,13 +154,17 @@ describe('canonical Schwab portfolio and performance reporting', () => {
     assert.equal(report.inventory[0].covered_call_blocker, null);
     assert.equal(report.summary.booked_premium, 800);
     assert.equal(report.account.position_equity, 100800);
-    assert.equal(report.summary.income_theta_per_day, 0.13);
-    assert.equal(report.summary.net_theta_per_day, 0.11);
+    assert.equal(report.summary.income_theta_per_day, 13);
+    assert.equal(report.summary.net_theta_per_day, 11);
     const coveredCall = report.harvest.find(row => row.type === 'COVERED_CALL');
     assert.equal(coveredCall.lifecycle, lifecycle);
     assert.equal(coveredCall.distance_to_strike_sigma, 1.2345);
     assert.equal(coveredCall.distance_source, 'RISK_NEUTRAL_NEGATIVE_D2');
-    assert.equal(coveredCall.theta_per_day, 0.1);
+    assert.equal(coveredCall.theta_per_day, 10);
+    assert.equal(coveredCall.theta_per_share_per_calendar_day, -0.05);
+    assert.equal(coveredCall.theta_equity_multiplier, 100);
+    assert.equal(coveredCall.theta_source_unit,
+      'PREMIUM_DOLLARS_PER_SHARE_PER_CALENDAR_DAY');
     assert.equal(report.harvest.find(row => row.type === 'CASH_SECURED_PUT').capital_committed, 5000);
     assert.ok(!report.capital_committed.some(row => row.symbol === 'CASH'));
   });

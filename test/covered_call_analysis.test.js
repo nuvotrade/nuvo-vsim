@@ -44,7 +44,9 @@ test('SPCX lifecycle regression reproduces all nine locked values with explicit 
   assert.equal(result.paths.exit_now.pnl, -3615.77);
   assert.equal(result.paths.expire_worthless.pnl, -2902.52);
   assert.equal(result.paths.close_call_keep_shares.crossover_share_price, 142.4265);
-  assert.equal(result.paths.sell_shares_wait_on_call.crossover_share_price, 136.3835);
+  assert.equal(result.paths.prohibited_sell_shares_leave_call_open.crossover_share_price, 136.3835);
+  assert.equal(result.paths.prohibited_sell_shares_leave_call_open.status,
+    'PROHIBITED_CREATES_NAKED_SHORT_CALL');
 });
 
 test('opening and stock-exit fees remain explicit and change their dependent economics', () => {
@@ -57,7 +59,7 @@ test('opening and stock-exit fees remain explicit and change their dependent eco
   });
   assert.equal(result.current_trade.adjusted_share_basis, 143.62504);
   assert.equal(result.paths.exit_now.pnl, -3630.77);
-  assert.equal(result.paths.sell_shares_wait_on_call.crossover_share_price, 136.3635);
+  assert.equal(result.paths.prohibited_sell_shares_leave_call_open.crossover_share_price, 136.3635);
 });
 
 test('risk-neutral sigma distance is exactly -d2 and reconciles with N(-d2)', () => {
@@ -68,13 +70,27 @@ test('risk-neutral sigma distance is exactly -d2 and reconciles with N(-d2)', ()
   assert.ok(Math.abs(result.risk_neutral.probability_expire_otm - normCdf(-d2)) < 1e-12);
 });
 
-test('Schwab per-contract theta is scaled by contract count and never by 100 shares', () => {
+test('Schwab per-share theta receives one equity multiplier and the contract count', () => {
   const result = analyzeCoveredCallLifecycle(spcx);
-  assert.equal(result.current_trade.broker_long_theta_per_contract_per_day, -0.18);
+  assert.equal(result.current_trade.broker_long_theta_per_share_per_calendar_day, -0.18);
   assert.equal(result.current_trade.broker_theta_contracts, 5);
-  assert.equal(result.current_trade.broker_short_theta_per_day, 0.9);
+  assert.equal(result.current_trade.broker_theta_equity_multiplier, 100);
+  assert.equal(result.current_trade.broker_short_theta_per_day, 90);
   assert.equal(result.current_trade.broker_theta_scaling,
-    'NEGATE_LONG_CONTRACT_THETA_X_CONTRACTS_NO_EQUITY_MULTIPLIER');
+    'NEGATE_LONG_PER_SHARE_THETA_X_EQUITY_MULTIPLIER_X_CONTRACTS');
+});
+
+test('CBRS theta regression converts -0.57309031 quote theta to $343.854186 for six shorts', () => {
+  const result = analyzeCoveredCallLifecycle({
+    ...spcx,
+    optionPosition: { ...spcx.optionPosition, qty: -6 },
+    sharePosition: { ...spcx.sharePosition, qty: 600 },
+    optionQuote: { ...spcx.optionQuote, theta: -0.57309031 },
+    entryEvidence: {
+      ...spcx.entryEvidence, grossCredit: 1201.968, netCredit: 1201.968,
+    },
+  });
+  assert.equal(result.current_trade.broker_short_theta_per_day, 343.85);
 });
 
 test('risk-neutral rate sources are explicit and carried into the result', () => {
@@ -116,7 +132,7 @@ test('deterministic flags carry their observed values and never become recommend
   });
   const flags = new Map(result.classification.flags.map((flag) => [flag.code, flag]));
   for (const code of [
-    'EXPIRY_PROXIMITY', 'BELOW_BASIS', 'ASSIGNMENT_LIKELY',
+    'EXPIRY_PROXIMITY', 'BELOW_BASIS', 'ITM_THIN_EXTRINSIC',
     'EVENT_IN_TENOR', 'EARLY_ASSIGNMENT_RISK',
   ]) {
     assert.equal(flags.has(code), true, code);
@@ -129,6 +145,28 @@ test('deterministic flags carry their observed values and never become recommend
     roll: 'NO_TRUTH',
     exit: 'NO_TRUTH',
   });
+});
+
+test('stale quotes retain historical arithmetic but emit no current economic classification', () => {
+  const result = analyzeCoveredCallLifecycle({ ...spcx, quoteFreshness: 'LAST_MARKET_QUOTE' });
+  assert.equal(result.ok, true);
+  assert.equal(result.classification.current, false);
+  assert.equal(result.classification.status, 'UNAVAILABLE_STALE_QUOTE');
+  assert.deepEqual(result.classification.flags.map((flag) => flag.code), ['QUOTE_STALE']);
+  assert.ok(result.classification.historical_flags.length > 0);
+  assert.equal(result.classification.recommendations.do_nothing, 'NOT_RECOMMENDED_BY_FLAGS');
+});
+
+test('DTE follows the New York calendar rather than the UTC evening boundary', () => {
+  const result = analyzeCoveredCallLifecycle({
+    ...spcx,
+    optionPosition: { ...spcx.optionPosition, expiration: '2026-09-02' },
+    now: Date.parse('2026-09-02T01:00:00.000Z'),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.dte, 1);
+  assert.equal(result.time_basis.timezone, 'America/New_York');
+  assert.equal(result.time_basis.asof_date, '2026-09-01');
 });
 
 test('NOMINAL is emitted only when no deterministic condition is flagged', () => {

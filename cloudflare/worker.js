@@ -1,7 +1,5 @@
-import { NuvoEngine } from '../src/engine.js';
 import { MassiveProvider } from '../src/truth/providers/massive.js';
 import { SchwabMarketProvider, sessionStatus } from '../src/truth/providers/schwab.js';
-import { SchwabReadOnlyBroker } from '../src/execution/broker/schwab_readonly.js';
 import { EvidenceStore } from '../src/evidence/store.js';
 import { buildEvidence, verifyEvidence, verifyFingerprint } from '../src/evidence/package.js';
 import { replay } from '../src/evidence/replay.js';
@@ -13,7 +11,7 @@ import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
 import {
   analyzeCoveredCallLifecycle, coveredCallEntryEvidenceFromOpenLots,
 } from '../src/lifecycle/covered_call_analysis.js';
-import { contentHash, ORDER_STATE } from '../src/execution/order.js';
+import { contentHash } from '../src/execution/order.js';
 import { reconcile, RECON } from '../src/truth/reconciliation.js';
 import { authenticateAccess } from './access-auth.js';
 import {
@@ -22,7 +20,6 @@ import {
 import { D1R2EvidencePersistence } from './evidence-persistence.js';
 import { handleVsimMcp } from './mcp-server.js';
 import { SchwabD1Client } from './schwab-client.js';
-import { mapCustodyRisk } from './custody-risk.js';
 import {
   evaluateGuardian, guardianDiscordPayload, guardianReport, GUARDIAN_MANDATE_VERSION, GUARDIAN_STATES,
   shouldNotifyGuardian,
@@ -40,6 +37,18 @@ import {
   configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS, SCHWAB_COVERED_CALL_COSTS,
   summarizeCoveredCallPortfolioState,
 } from './covered-call-calculator.js';
+import { compareCoveredCallLifecycleChoices } from './covered-call-lifecycle-choices.js';
+import {
+  calculateCashSecuredPutRows, configuredCashSecuredPutDteTargets,
+} from './cash-secured-put-calculator.js';
+import {
+  compilePortfolioReview, PORTFOLIO_REVIEW_DTE_TARGETS,
+} from './portfolio-review.js';
+import {
+  calibrationStamp, officialExpirationClose, scoreSealedForecast,
+  sealedForecastProjection, UNDERWRITE_FORECAST_EVENT, UNDERWRITE_SCORE_VERSION,
+} from './underwrite-calibration.js';
+import { underwriteSurfaceModelLock } from './underwrite-model-version-lock.js';
 import {
   BUNDLED_DESIGN_APP, BUNDLED_DESIGN_HTML, BUNDLED_DESIGN_STYLES,
 } from './design-assets.js';
@@ -521,6 +530,9 @@ function marketProvider(env, ownerId = null) {
     .split(',').map(Number).filter(Number.isFinite);
   const marketSource = String(env.NUVO_MARKET_SOURCE ?? 'MASSIVE_OPTIONS').toUpperCase();
   const maxChainAgeMs = Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000);
+  if (!Number.isFinite(maxChainAgeMs) || maxChainAgeMs <= 0) return blocked(
+    'CONFIG/MAX_CHAIN_AGE_INVALID', 'The executable-quote snapshot window is invalid.',
+  );
   const maxQuoteAgeMs = Number(env.NUVO_MAX_QUOTE_AGE_MS ?? 60_000);
   const fundSymbols = String(env.NUVO_FUND_SYMBOLS ?? '').split(',')
     .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
@@ -584,8 +596,15 @@ async function verifyLiveMarket(env, ownerId) {
       eventCount: events.value?.length ?? 0,
     };
   }));
+  const verifiedCount = rows.filter((row) => row.ok).length;
   const result = {
-    ok: !marketState.error && rows.every((row) => row.ok),
+    // This proves the provider contract is operational. Individual symbol
+    // failures are owned by the cycle's per-symbol truth gate and cannot
+    // discard verified peers before their economics are evaluated.
+    ok: !marketState.error && verifiedCount > 0,
+    coverage: verifiedCount === rows.length ? 'COMPLETE' : verifiedCount > 0 ? 'PARTIAL' : 'NONE',
+    verifiedCount,
+    requestedCount: rows.length,
     checkedAt: nowIso(),
     source: provider.name === 'schwab'
       ? 'SCHWAB_MARKET_DATA_PRODUCTION' : 'MASSIVE_POLYGON_PRIVATE_SERVICE',
@@ -730,6 +749,7 @@ function summaryOf(result, engine, connector) {
     regimeConfidence: result.marketState?.regime?.coverage ?? null,
     trace: result.trace ?? [],
     opportunities,
+    perSymbol: Object.values(result.symbolOutcomes ?? {}),
     cspOpportunities,
     cspShadowLog,
     selected: result.selected ? opportunities.find((item) => item.underlying === result.selected.underlying
@@ -743,6 +763,292 @@ function summaryOf(result, engine, connector) {
     } : null,
     connectors: connector,
   };
+}
+
+function portfolioReviewHoldings(positions = []) {
+  const shares = new Map();
+  const covered = new Map();
+  for (const position of positions) {
+    const symbol = String(position?.underlying ?? position?.symbol ?? '').trim().toUpperCase();
+    const quantity = Number(position?.quantity);
+    if (!symbol || !Number.isFinite(quantity)) continue;
+    if (position.type === 'EQUITY' && quantity > 0) {
+      shares.set(symbol, (shares.get(symbol) ?? 0) + quantity);
+    } else if (position.type === 'OPTION' && quantity < 0
+      && String(position?.right ?? '').toLowerCase().startsWith('c')) {
+      const multiplier = Number(position?.multiplier ?? 100);
+      covered.set(symbol, (covered.get(symbol) ?? 0) + Math.abs(quantity) * multiplier);
+    }
+  }
+  return Object.fromEntries([...shares].map(([symbol, quantity]) => [symbol, {
+    shares: quantity,
+    encumberedShares: covered.get(symbol) ?? 0,
+    freeCoveredCallContracts: Math.max(0, Math.floor((quantity - (covered.get(symbol) ?? 0)) / 100)),
+  }]));
+}
+
+function portfolioReviewBook(snapshot) {
+  const state = summarizeCoveredCallPortfolioState({
+    nav: snapshot?.nav,
+    cash: snapshot?.cash,
+    positions: snapshot?.positions ?? [],
+  });
+  return {
+    ...state,
+    settled_cash: snapshot?.cash ?? state.settled_cash ?? null,
+    spot_by_symbol: {},
+  };
+}
+
+function portfolioReviewFromCycle(result, snapshot, env) {
+  const raw = result?.evidence?.inputs?.data;
+  if (!raw?.symbols) return null;
+  const symbols = Object.keys(raw.symbols);
+  const session = String(raw.indexState?.status ?? '').toUpperCase() === 'OPEN' ? 'RTH'
+    : String(raw.indexState?.status ?? 'UNVERIFIED').toUpperCase();
+  const packets = Object.fromEntries(symbols.map((symbol) => {
+    const packet = raw.symbols[symbol] ?? {};
+    const outcome = result.symbolOutcomes?.[symbol];
+    const errors = outcome?.state === 'REFUSED' ? outcome.reasons ?? [] : [];
+    return [symbol, {
+      spot: Number(packet.quote?.last ?? packet.chain?.underlyingPrice),
+      contracts: packet.chain?.contracts ?? [],
+      historyBars: packet.history ?? [],
+      events: packet.events ?? [],
+      error: errors.length && outcome?.stage !== 'HISTORY' ? errors.join(' ') : null,
+      error_code: outcome?.reason_codes?.[0] ?? null,
+      stage: outcome?.stage ?? null,
+    }];
+  }));
+  const configuredStructures = String(env.NUVO_PORTFOLIO_REVIEW_STRUCTURES ?? 'CSP,COVERED_CALL')
+    .split(',').map((value) => value.trim().toUpperCase())
+    .filter((value) => ['CSP', 'COVERED_CALL'].includes(value));
+  return compilePortfolioReview({
+    symbols,
+    session,
+    packets,
+    holdings: portfolioReviewHoldings(snapshot?.positions ?? []),
+    structures: configuredStructures.length ? configuredStructures : ['CSP', 'COVERED_CALL'],
+    targets: PORTFOLIO_REVIEW_DTE_TARGETS,
+    now: result.evidence.at,
+    rate: DEFAULT_LIMITS.riskFreeRate,
+    samples: Number(env.NUVO_DECISION_SAMPLES ?? 8000),
+    seed: result.cycleId,
+    book: portfolioReviewBook(snapshot),
+  });
+}
+
+function reviewEvidenceCandidate(row) {
+  const isPut = row.structure === 'CSP';
+  return {
+    underlying: row.underlying,
+    structure: {
+      kind: row.structure,
+      shortStrike: row.strike,
+      longStrike: null,
+      expiration: row.expiration,
+      credit: row.net_credit,
+      buyingPower: isPut ? row.net_tied_cash : null,
+    },
+    dte: row.dte,
+    evaluation: {
+      ev: row.primary_raw_nev_0,
+      nev: row.primary_raw_nev_0,
+      cvar: row.cvar_95,
+      gapRisk: null,
+      liquidityRisk: null,
+      collateralOpportunity: null,
+      costs: {
+        modelVersion: 'SCHWAB_ONE_CONTRACT_EXECUTABLE_BID',
+        commissions: 0.65,
+        embeddedEntrySlippage: 0,
+        exitSlippage: 0,
+        allInSlippage: 0,
+        total: 0.65,
+        allInTotal: 0.65,
+      },
+    },
+    capital: {
+      decisionMetric: 'PRIMARY_RAW_NEV_0',
+      decisionValue: row.primary_raw_nev_0,
+      economicCapital: isPut ? row.gross_assignment_obligation : null,
+      raroc: null,
+      roc: null,
+    },
+    probabilities: {
+      pMarket: row.risk_neutral_finish_itm,
+      pModel: row.primary_p_finish_itm,
+      pCal: null,
+      calibration: 'UNCALIBRATED',
+      edge: null,
+      confidence: null,
+    },
+    success: {
+      p_model: row.primary_p_finish_itm,
+      p_market: row.risk_neutral_finish_itm,
+      breakeven: isPut ? row.assigned_basis : null,
+      direction: isPut ? 'FINISH_ABOVE_STRIKE' : 'FINISH_BELOW_STRIKE',
+    },
+    // A Portfolio Review row is never suppressed by the old admission contract.
+    // Registered policy is retained only as an inspectable reference stamp.
+    admissible: true,
+    violations: [],
+    referencePolicy: row.policy ?? null,
+  };
+}
+
+function reviewPacketError(...results) {
+  const failed = results.find((result) => result?.error);
+  if (!failed) return null;
+  const message = String(failed.error);
+  return {
+    message,
+    code: message.includes('HISTORY_SHORT') ? 'HISTORY_SHORT'
+      : message.split(':')[0] || 'MARKET_DATA_UNAVAILABLE',
+  };
+}
+
+async function runPortfolioReviewCycle(env, ownerId, {
+  cycleId, source, currentSnapshot,
+}) {
+  const settlement = await settleMaturedUnderwriteForecasts(env, ownerId);
+  const provider = marketProvider(env, ownerId);
+  const market = await provider.marketState();
+  if (market.error) return recordBlocked(env, ownerId, cycleId, 'TRUTH/MARKET_STATE_UNAVAILABLE', {
+    message: market.error,
+  });
+  const session = String(market.value?.status ?? '').toUpperCase() === 'OPEN' ? 'RTH'
+    : String(market.value?.status ?? 'UNVERIFIED').toUpperCase();
+  const baseSymbols = String(env.NUVO_SYMBOLS ?? 'SPY,QQQ,IWM').split(',')
+    .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
+  const ownedSymbols = currentSnapshot.positions
+    .filter((position) => position.type === 'EQUITY' && Number(position.quantity) >= 100)
+    .map((position) => String(position.underlying ?? position.symbol ?? '').trim().toUpperCase())
+    .filter(Boolean);
+  const symbols = [...new Set([...baseSymbols, ...ownedSymbols])];
+  const dteTargets = PORTFOLIO_REVIEW_DTE_TARGETS;
+  const packetRows = session === 'RTH' ? await Promise.all(symbols.map(async (symbol) => {
+    const [chain, history, quote, events] = await Promise.all([
+      provider.optionChain(symbol, { expirations: dteTargets }),
+      provider.history(symbol, { lookback: 400 }),
+      provider.quote(symbol),
+      provider.events(symbol),
+    ]);
+    const historyFailure = reviewPacketError(history);
+    const otherFailure = reviewPacketError(quote, chain, events);
+    const failure = otherFailure ?? historyFailure;
+    const historyCountMatch = String(history?.error ?? '').match(/HISTORY_SHORT:(\d+)/u);
+    return [symbol, {
+      spot: Number(quote.value?.last ?? chain.value?.underlyingPrice),
+      contracts: chain.value?.contracts ?? [],
+      historyBars: history.value ?? [],
+      events: events.value ?? [],
+      error: failure?.message ?? null,
+      error_code: failure?.code ?? null,
+      stage: otherFailure ? (quote.error ? 'QUOTE' : chain.error ? 'OPTION_CHAIN' : 'EVENTS')
+        : historyFailure ? 'HISTORY' : null,
+      history_sessions: history.value?.length ?? (historyCountMatch ? Number(historyCountMatch[1]) : null),
+      captured: {
+        quote: quote.value ?? null, quote_asof: quote.asOf ?? null, quote_error: quote.error ?? null,
+        chain: chain.value ?? null, chain_asof: chain.asOf ?? null, chain_error: chain.error ?? null,
+        history: history.value ?? null, history_asof: history.asOf ?? null, history_error: history.error ?? null,
+        events: events.value ?? null, events_asof: events.asOf ?? null, events_error: events.error ?? null,
+      },
+    }];
+  })) : symbols.map((symbol) => [symbol, { captured: {} }]);
+  const packets = Object.fromEntries(packetRows);
+  const review = compilePortfolioReview({
+    symbols, session, packets,
+    holdings: portfolioReviewHoldings(currentSnapshot.positions),
+    structures: ['CSP', 'COVERED_CALL'], targets: dteTargets,
+    now: Date.now(), rate: DEFAULT_LIMITS.riskFreeRate,
+    samples: Number(env.NUVO_DECISION_SAMPLES ?? 8000), seed: cycleId,
+    book: portfolioReviewBook(currentSnapshot),
+  });
+  review.calibration = settlement.calibration;
+  review.settlement = { status: settlement.status, settled: settlement.settled,
+    unavailable: settlement.unavailable };
+  const rawInputs = {
+    capturedAt: review.at,
+    cycleId,
+    account: { nav: currentSnapshot.nav, cash: currentSnapshot.cash,
+      buyingPower: currentSnapshot.buyingPower },
+    accountAsOf: currentSnapshot.asOf,
+    brokerPositions: currentSnapshot.positions,
+    brokerPositionsAsOf: currentSnapshot.asOf,
+    brokerOpenOrders: currentSnapshot.openOrders,
+    brokerOpenOrdersAsOf: currentSnapshot.asOf,
+    indexState: market.value,
+    indexAsOf: market.asOf ?? null,
+    indexError: null,
+    symbols: Object.fromEntries(packetRows.map(([symbol, packet]) => [symbol, packet.captured])),
+    portfolioReview: review,
+  };
+  const evidenceStore = await EvidenceStore.open({
+    persistence: new D1R2EvidencePersistence({ db: env.DB, bucket: env.EVIDENCE, ownerId }),
+    genesis: `NUVO-VSIM-V5-SHADOW:${ownerId}`,
+  });
+  const evidence = buildEvidence({
+    cycleId, now: review.at, decision: 'PORTFOLIO_REVIEW',
+    candidates: review.rows.map(reviewEvidenceCandidate),
+    strategyId: 'VSIM-001', modelVersion: PORTFOLIO_REVIEW_VERSION,
+    codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
+    limits: DEFAULT_LIMITS, authorityLevel: operationalAuthority(env), rawInputs,
+  });
+  const record = evidenceStore.append(evidence);
+  await evidenceStore.flush();
+  if (evidenceStore.persistenceError) throw evidenceStore.persistenceError;
+  const summary = {
+    cycleId, at: review.at, outcome: review.outcome, decision: 'PORTFOLIO_REVIEW',
+    state: 'SHADOW_RECORDED', reasonCode: review.ok ? null : review.outcome,
+    reason: review.outcome === 'NOT_EVALUATED'
+      ? `Market session is ${session}; portfolio review was not evaluated.`
+      : review.ok ? `${review.row_count} read-only option rows calculated.`
+        : 'No symbol supplied the verified inputs required for portfolio-review math.',
+    authority: authorityAtLeast(operationalAuthority(env), AUTHORITY.PROPOSE)
+      ? '2_PROPOSE_HUMAN_EXECUTION' : '1_SHADOW',
+    mutationEligible: false, regime: null, regimeConfidence: null,
+    trace: [{ name: 'portfolioReview', ok: review.ok, detail: review.counts }],
+    opportunities: [], perSymbol: review.per_symbol, selected: null,
+    portfolioReview: review,
+    connectors: { market: 'LIVE_PRIVATE_SERVICE', schwab: 'READ_ONLY', evidence: 'D1_R2', source },
+    evidence: {
+      hash: record.hash, decisionFingerprint: record.decisionFingerprint,
+      inputsHash: record.inputs?.hash, chainValid: evidenceStore.verify().valid,
+      sequence: record.sequence,
+    },
+  };
+  if (review.rows.length) {
+    try {
+      summary.forecastPersistence = await recordUnderwriteForecastRows(env, ownerId, {
+        surface: 'PORTFOLIO_REVIEW', symbol: 'MULTI_SYMBOL',
+        asof: new Date(summary.at).toISOString(),
+        result: { ok: true, candidates: review.rows,
+          calibration: settlement.calibration },
+      });
+    } catch (error) {
+      summary.forecastPersistence = { status: 'FAILED', rows: 0,
+        error: String(error.message ?? error) };
+    }
+  } else summary.forecastPersistence = { status: 'NOT_WRITTEN_NO_ROWS', rows: 0 };
+  await recordCycleSummary(env, ownerId, summary);
+  await recordCycleStates(env, ownerId, cycleId, [
+    { state: 'TRIGGERED', role: 'MASTER_CHIEF_INTERFACE' },
+    ...(session === 'RTH' ? [{ state: 'TRUTH_VERIFIED', role: 'TRUTH_SENTINEL' }] : []),
+    { state: 'UNDERWRITTEN', role: 'VSIM_ENGINE', detail: review.counts },
+    { state: 'EVIDENCE_SEALED', role: 'AUDIT_LOGGER' },
+    { state: 'SHADOW_RECORDED', role: 'AUDIT_LOGGER' },
+  ]);
+  const contextStore = new D1R2CycleContextStore({ db: env.DB, bucket: env.EVIDENCE, ownerId });
+  await contextStore.put(buildCycleContext({
+    result: { evidence: record, trace: summary.trace, governanceAttempts: [] },
+    summary, snapshotHash: currentSnapshot.snapshotHash,
+  }));
+  await audit(env, ownerId, 'PORTFOLIO_REVIEW_RECORDED', {
+    cycleId, outcome: review.outcome, counts: review.counts,
+    mutationEligible: false,
+  });
+  return summary;
 }
 
 async function recordCycleSummary(env, ownerId, summary) {
@@ -934,105 +1240,11 @@ export async function runShadowCycle(env, ownerId, {
       finalStatus = 'QUARANTINED';
       return summary;
     }
-    // Prove the complete provider contract before portfolio mapping can hide
-    // a market-data incompatibility. This is intentionally redundant with
-    // the engine Truth Contract: the preflight gives the operator a precise
-    // feed-capability result while the engine remains the final authority.
-    const marketCompatibility = await verifyLiveMarket(env, ownerId);
-    if (!marketCompatibility.ok) {
-      finalStatus = 'BLOCKED';
-      return await recordBlocked(env, ownerId, cycleId, 'TRUTH/MARKET_DATA_INCOMPATIBLE', {
-        provider: marketCompatibility.provider,
-        marketState: marketCompatibility.marketState,
-        symbols: marketCompatibility.symbols,
-      });
-    }
-
-    const schwabClient = new SchwabD1Client(env);
     const currentSnapshot = await reconciledSnapshot(env, ownerId);
-    const baseline = await loadBaseline(env, ownerId);
-    if (!baseline || baseline.hash !== currentSnapshot.snapshotHash) {
-      finalStatus = 'BLOCKED';
-      return await recordBlocked(env, ownerId, cycleId, 'BROKER_RECONCILIATION_CHECKPOINT_FAILED');
-    }
-    if (baseline.openOrders.length) {
-      finalStatus = 'BLOCKED';
-      return await recordBlocked(env, ownerId, cycleId, 'CUSTODY_OPEN_ORDER_RISK_MAPPING_REQUIRED', {
-        openOrderCount: baseline.openOrders.length,
-      });
-    }
-    const broker = new SchwabReadOnlyBroker({ client: schwabClient, ownerId });
-    broker.snapshotPromise = Promise.resolve(currentSnapshot);
-    const dteTargets = String(env.NUVO_DTE_TARGETS ?? '14,30,45').split(',').map(Number).filter(Number.isFinite);
-    const provider = marketProvider(env, ownerId);
-    const custodyRisk = await mapCustodyRisk({ provider, positions: currentSnapshot.positions });
-    if (!custodyRisk.ok) {
-      finalStatus = 'BLOCKED';
-      return await recordBlocked(env, ownerId, cycleId, 'CUSTODY_RISK_MAPPING_REQUIRED', {
-        reasons: custodyRisk.reasons,
-      });
-    }
-    const persistence = new D1R2EvidencePersistence({ db: env.DB, bucket: env.EVIDENCE, ownerId });
-    const evidenceStore = await EvidenceStore.open({ persistence, genesis: `NUVO-VSIM-V5-SHADOW:${ownerId}` });
-    const baseSymbols = String(env.NUVO_SYMBOLS ?? 'SPY,QQQ,IWM').split(',')
-      .map((symbol) => symbol.trim().toUpperCase()).filter(Boolean);
-    const holdings = Object.fromEntries(baseline.positions
-      .filter((position) => position.type === 'EQUITY' && Number(position.quantity) >= 100)
-      .map((position) => [String(position.symbol).toUpperCase(), {
-        shares: Number(position.quantity), costBasis: Number(position.averagePrice),
-      }]));
-    // Owned whole-lot names are admitted to the covered-call scan only when
-    // Schwab proves a current option chain. An unoptionable holding is skipped
-    // rather than allowed to make the fixed ETF opportunity universe fail.
-    const optionableHoldings = [];
-    for (const symbol of Object.keys(holdings).filter((value) => !baseSymbols.includes(value))) {
-      const probe = await provider.optionChain(symbol, { expirations: dteTargets });
-      if (!probe.error && probe.value?.contracts?.length) optionableHoldings.push(symbol);
-      else await audit(env, ownerId, 'COVERED_CALL_UNIVERSE_EXCLUDED', {
-        symbol, reason: probe.error ?? 'NO_EXECUTABLE_CONTRACTS',
-      });
-    }
-    const symbols = [...new Set([...baseSymbols, ...optionableHoldings])];
-    const engine = new NuvoEngine({
-      provider, broker, nav: currentSnapshot.nav, authorityLevel: operationalAuthority(env),
-      symbols, approved: symbols, evidenceStore,
-      accountMirror: { cash: baseline.account.cash, buyingPower: baseline.account.buyingPower },
-      codeVersion: env.CF_VERSION_METADATA?.id ?? 'nuvo-vsim-v5-shadow',
-      modelVersion: 'nuvo-model-5.0.1-execution-cost-v2',
+    const summary = await runPortfolioReviewCycle(env, ownerId, {
+      cycleId, source, currentSnapshot,
     });
-    engine.positions = custodyRisk.positions.map((position) => structuredClone(position));
-    for (const position of baseline.positions) engine.legPositions.set(position.symbol, structuredClone(position));
-    for (const order of baseline.openOrders) {
-      const id = order.brokerOrderId ?? order.clientOrderId;
-      engine.orders.orders.set(id, { ...structuredClone(order), clientOrderId: id, brokerOrderId: id, state: ORDER_STATE.WORKING });
-    }
-    const strategy = engine.registry.get('VSIM-001');
-    if (strategy?.state === 'RESEARCH') strategy.transition('VALIDATED', 'Architecture and correctness suite passed').transition('SHADOW', 'Real-market shadow observation');
-    const structureAllowlist = source === 'CSP_CALCULATOR'
-      ? ['CSP']
-      : String(env.NUVO_ALLOWED_STRUCTURES ?? 'CSP')
-        .split(',').map((value) => value.trim()).filter(Boolean);
-    const result = await engine.cycle({
-      cycleId,
-      structureAllowlist,
-      holdings,
-      dteTargets,
-      screenSamples: Number(env.NUVO_SCREEN_SAMPLES ?? 1500),
-      decisionSamples: Number(env.NUVO_DECISION_SAMPLES ?? 8000),
-      refineTop: Number(env.NUVO_REFINE_TOP ?? 8),
-      portfolioReturnsBySymbol: custodyRisk.returnsBySymbol,
-      portfolioSectors: custodyRisk.sectors,
-    });
-    const summary = summaryOf(result, engine, {
-      market: 'LIVE_PRIVATE_SERVICE', schwab: 'READ_ONLY', evidence: 'D1_R2', source,
-    });
-    await recordCycleSummary(env, ownerId, summary);
-    await recordCycleStates(env, ownerId, cycleId, statesForResult(result, summary));
-    const contextStore = new D1R2CycleContextStore({ db: env.DB, bucket: env.EVIDENCE, ownerId });
-    await contextStore.put(buildCycleContext({
-      result, summary, snapshotHash: currentSnapshot.snapshotHash,
-    }));
-    finalStatus = result.outcome === 'REFUSED' ? 'REFUSED' : 'COMPLETE';
+    finalStatus = summary.state ?? 'COMPLETE';
     return summary;
   } catch (error) {
     await audit(env, ownerId, 'SHADOW_CYCLE_ERROR', { cycleId, error: error.message, source });
@@ -1206,6 +1418,7 @@ async function portfolioDashboard(env, ownerId) {
               ? new Date(underlyingResult.asOf).toISOString() : null,
           },
           entryEvidence,
+          quoteFreshness: optionQuote.freshness,
           events: eventsResult?.value ?? [],
           eventCoverage: {
             eventsVerified: Boolean(eventsResult?.value),
@@ -1243,9 +1456,11 @@ async function portfolioDashboard(env, ownerId) {
 }
 
 function blockedCoveredCall(symbol, reasonCode, reason, detail = {}) {
+  const sessionNotEvaluated = reasonCode === 'TRUTH/SESSION_NOT_RTH'
+    || reasonCode === 'TRUTH/MARKET_SESSION_UNVERIFIED';
   return {
     ok: false,
-    outcome: 'NO_ELIGIBLE_COVERED_CALL',
+    outcome: sessionNotEvaluated ? 'NOT_EVALUATED' : 'NO_COVERED_CALL_CANDIDATE',
     symbol,
     reason_code: reasonCode,
     reason,
@@ -1254,6 +1469,204 @@ function blockedCoveredCall(symbol, reasonCode, reason, detail = {}) {
     user_action_required: false,
     ...detail,
   };
+}
+
+export async function recordUnderwriteForecastRows(env, ownerId, {
+  surface, symbol, asof, result,
+}) {
+  if (!result?.ok) return { status: 'NOT_WRITTEN_NO_CALCULATION', rows: 0 };
+  const rows = surface === 'CSP_SINGLE_TICKER'
+    ? (result.rows ?? []) : (result.candidates ?? []);
+  const requestId = contentHash({ ownerId, surface, symbol, asof });
+  let written = 0;
+  for (const row of rows) {
+    const right = surface === 'CSP_SINGLE_TICKER' || row.structure === 'CSP' ? 'put' : 'call';
+    const rowSymbol = row.underlying ?? symbol;
+    const forecastAt = asof ?? nowIso();
+    const projection = sealedForecastProjection({ surface, row, result, asof: forecastAt });
+    const modelLock = underwriteSurfaceModelLock(surface);
+    const forecast = {
+      surface, symbol: rowSymbol, right, asof,
+      model_version: modelLock.hash,
+      model_register: modelLock.label,
+      row,
+      projection,
+      calibration: result.calibration ?? { status: 'UNCALIBRATED', n: 0 },
+    };
+    const forecastHash = contentHash(forecast);
+    const forecastId = contentHash({ ownerId, requestId, rowSymbol,
+      contract: row.contract_symbol ?? row.symbol ?? null, forecastHash });
+    await env.DB.prepare(`INSERT INTO underwrite_forecasts
+      (owner_id,forecast_id,request_id,surface,symbol,contract_symbol,option_right,
+       strike,expiration,dte,as_of,model_version,forecast_hash,forecast_json,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,forecast_id) DO NOTHING`).bind(
+      ownerId, forecastId, requestId, surface, rowSymbol,
+      row.contract_symbol ?? row.symbol ?? null, right,
+      Number.isFinite(Number(row.strike)) ? Number(row.strike) : null,
+      row.expiration ?? null, Number.isFinite(Number(row.dte)) ? Number(row.dte) : null,
+      forecastAt, forecast.model_version, forecastHash, JSON.stringify(forecast), nowIso(),
+    ).run();
+    written += 1;
+  }
+  return { status: 'APPEND_ONLY_WRITTEN', rows: written, request_id: requestId };
+}
+
+export async function underwriteCalibrationSummary(env, ownerId, surface, modelVersion) {
+  const modelLock = underwriteSurfaceModelLock(surface);
+  const version = String(modelVersion ?? modelLock.hash);
+  const [forecastCount, outcomeCounts, scoreRows] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(*) AS n FROM underwrite_forecasts
+      WHERE owner_id=? AND surface=? AND model_version=?`).bind(ownerId, surface, version).first(),
+    env.DB.prepare(`SELECT COUNT(*) AS settled_rows,
+      COUNT(DISTINCT COALESCE(f.contract_symbol,'') || '|' || f.expiration) AS unique_contract_expiry,
+      COUNT(DISTINCT f.symbol || '|' || f.expiration) AS unique_symbol_expiry,
+      AVG(json_extract(o.outcome_json,'$.realized_nev_0')) AS mean_realized_nev_0
+      FROM underwrite_forecast_outcomes o JOIN underwrite_forecasts f
+      ON f.owner_id=o.owner_id AND f.forecast_id=o.forecast_id
+      WHERE o.owner_id=? AND f.surface=? AND f.model_version=?`).bind(ownerId, surface, version).first(),
+    env.DB.prepare(`SELECT model_name,COUNT(*) AS n,AVG(brier_score) AS brier,
+      AVG(s.realized_nev_0) AS mean_realized_nev_0
+      FROM underwrite_forecast_scores s JOIN underwrite_forecasts f
+      ON f.owner_id=s.owner_id AND f.forecast_id=s.forecast_id
+      WHERE s.owner_id=? AND f.surface=? AND s.model_version=?
+      GROUP BY model_name ORDER BY model_name`).bind(ownerId, surface, version).all(),
+  ]);
+  const uniqueSymbolExpiry = Number(outcomeCounts?.unique_symbol_expiry ?? 0);
+  return {
+    status: calibrationStamp(uniqueSymbolExpiry),
+    surface,
+    model_version: version,
+    model_register: modelLock.label,
+    primary_model: 'bootstrap',
+    primary_unchanged_by_calibration: true,
+    n: {
+      forecast_rows: Number(outcomeCounts?.settled_rows ?? 0),
+      total_immutable_forecast_rows: Number(forecastCount?.n ?? 0),
+      unique_contract_expiry: Number(outcomeCounts?.unique_contract_expiry ?? 0),
+      unique_symbol_expiry: uniqueSymbolExpiry,
+    },
+    brier: Object.fromEntries((scoreRows.results ?? []).map((row) => [row.model_name, {
+      n: Number(row.n ?? 0), value: Number(row.brier),
+      mean_realized_nev_0: Number(row.mean_realized_nev_0),
+    }])),
+    realized_nev_0: {
+      mean_per_forecast_row: outcomeCounts?.mean_realized_nev_0 === null
+        || outcomeCounts?.mean_realized_nev_0 === undefined
+        ? null : Number(outcomeCounts.mean_realized_nev_0),
+      meaning: 'HYPOTHETICAL_ONE_CONTRACT_FORECAST_MEASUREMENT_NOT_ACCOUNT_PNL',
+    },
+    degraded_label: 'NOT_USED_NO_REGISTERED_DEGRADATION_RULE',
+    score_version: UNDERWRITE_SCORE_VERSION,
+    mutation_eligible: false,
+  };
+}
+
+function settlementUnavailable(error) {
+  return {
+    status: 'OUTCOME_UNAVAILABLE', settled: 0,
+    unavailable: [{ reason_code: 'SETTLEMENT_RUNTIME_UNAVAILABLE', reason: String(error?.message ?? error) }],
+    calibration: { status: 'UNCALIBRATED', primary_model: 'bootstrap',
+      primary_unchanged_by_calibration: true,
+      n: { forecast_rows: 0, total_immutable_forecast_rows: 0,
+        unique_contract_expiry: 0, unique_symbol_expiry: 0 },
+      brier: {}, degraded_label: 'NOT_USED_NO_REGISTERED_DEGRADATION_RULE',
+      mutation_eligible: false },
+    mutation_eligible: false,
+  };
+}
+
+export async function settleMaturedUnderwriteForecasts(env, ownerId, {
+  now = Date.now(), surface = 'PORTFOLIO_REVIEW',
+  modelVersion = underwriteSurfaceModelLock(surface).hash,
+} = {}) {
+  try {
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+      year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
+    const query = await env.DB.prepare(`SELECT f.*,o.outcome_id,o.outcome_hash,o.outcome_json
+      FROM underwrite_forecasts f LEFT JOIN underwrite_forecast_outcomes o
+      ON o.owner_id=f.owner_id AND o.forecast_id=f.forecast_id
+      WHERE f.owner_id=? AND f.expiration IS NOT NULL AND f.expiration<=?
+      ORDER BY f.symbol,f.expiration,f.forecast_id LIMIT 1000`).bind(ownerId, today).all();
+    const records = query.results ?? [];
+    const provider = marketProvider(env, ownerId);
+    const histories = new Map();
+    const unavailable = [];
+    let settled = 0;
+    for (const row of records) {
+      let result;
+      let outcomeId = row.outcome_id;
+      let outcomeHash = row.outcome_hash;
+      if (row.outcome_json) {
+        result = parseJson(row.outcome_json, null);
+      } else {
+        if (!histories.has(row.symbol)) {
+          histories.set(row.symbol, await provider.history(row.symbol, { lookback: 400, minBars: 1 }));
+        }
+        const history = histories.get(row.symbol);
+        const close = history?.error
+          ? { status: 'OUTCOME_UNAVAILABLE', reason_code: String(history.error) }
+          : officialExpirationClose({ expiration: row.expiration, bars: history?.value,
+            source: history?.source, now });
+        const forecast = parseJson(row.forecast_json, null);
+        result = scoreSealedForecast(forecast, close);
+        if (result.status !== 'SETTLED') {
+          if (result.status !== 'NOT_MATURE') unavailable.push({ forecast_id: row.forecast_id,
+            symbol: row.symbol, expiration: row.expiration, reason_code: result.reason_code });
+          continue;
+        }
+        const sourceBarHash = contentHash(close.source_bar);
+        const outcome = { ...result, forecast_id: row.forecast_id,
+          forecast_hash: row.forecast_hash, source_bar_hash: sourceBarHash };
+        outcomeHash = contentHash(outcome);
+        outcomeId = contentHash({ ownerId, forecastId: row.forecast_id,
+          event: UNDERWRITE_FORECAST_EVENT, outcomeHash });
+        result = { ...outcome, outcome_id: outcomeId, outcome_hash: outcomeHash };
+      }
+      if (!result || result.status !== 'SETTLED') continue;
+      const statements = [];
+      if (!row.outcome_id) statements.push(env.DB.prepare(`INSERT INTO underwrite_forecast_outcomes
+        (owner_id,outcome_id,forecast_id,symbol,expiration,event_name,outcome_value,
+         terminal_price,outcome_source,outcome_source_timestamp,outcome_hash,outcome_json,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,forecast_id) DO NOTHING`).bind(
+        ownerId, outcomeId, row.forecast_id, row.symbol, row.expiration,
+        UNDERWRITE_FORECAST_EVENT, result.outcome ? 1 : 0, result.terminal_price,
+        result.source, result.source_timestamp, outcomeHash, JSON.stringify(result), nowIso(),
+      ));
+      for (const score of result.scores ?? []) {
+        const scoreRecord = { ...score, score_version: UNDERWRITE_SCORE_VERSION,
+          forecast_id: row.forecast_id, outcome_id: outcomeId,
+          surface: row.surface, model_version: row.model_version,
+          forecast_hash: row.forecast_hash, outcome_hash: outcomeHash };
+        const scoreHash = contentHash(scoreRecord);
+        const scoreId = contentHash({ ownerId, forecastId: row.forecast_id,
+          surface: row.surface, modelVersion: row.model_version, model: score.model });
+        statements.push(env.DB.prepare(`INSERT INTO underwrite_forecast_scores
+          (owner_id,score_id,forecast_id,outcome_id,surface,model_version,model_name,event_name,
+           probability,outcome_value,brier_score,predicted_raw_nev_0,realized_nev_0,
+           score_version,forecast_hash,outcome_hash,score_hash,score_json,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(owner_id,surface,forecast_id,model_version,model_name) DO NOTHING`).bind(
+          ownerId, scoreId, row.forecast_id, outcomeId, row.surface, row.model_version, score.model,
+          UNDERWRITE_FORECAST_EVENT, score.probability, result.outcome ? 1 : 0,
+          score.brier_score, score.predicted_raw_nev_0, score.realized_nev_0,
+          UNDERWRITE_SCORE_VERSION, row.forecast_hash, outcomeHash, scoreHash,
+          JSON.stringify(scoreRecord), nowIso(),
+        ));
+      }
+      if (statements.length) {
+        if (typeof env.DB.batch === 'function') await env.DB.batch(statements);
+        else for (const statement of statements) await statement.run();
+      }
+      if (!row.outcome_id) settled += 1;
+    }
+    return {
+      status: unavailable.length ? 'PARTIAL' : 'COMPLETE', settled, unavailable,
+      calibration: await underwriteCalibrationSummary(env, ownerId, surface, modelVersion),
+      mutation_eligible: false,
+    };
+  } catch (error) {
+    return settlementUnavailable(error);
+  }
 }
 
 async function coveredCallDashboard(env, ownerId, rawSymbol) {
@@ -1271,6 +1684,9 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
   if (!/^[A-Z][A-Z0-9.]{0,9}$/u.test(symbol)) {
     return blocked(symbol || null, 'SYMBOL_INVALID', 'Choose a ticker from the ownership book.');
   }
+  const settlement = await settleMaturedUnderwriteForecasts(env, ownerId, {
+    surface: 'COVERED_CALL_SINGLE_TICKER',
+  });
   const [snapshot, baseline, controls] = await Promise.all([
     reconciledSnapshot(env, ownerId), loadBaseline(env, ownerId), loadOperatorControls(env, ownerId),
   ]);
@@ -1349,8 +1765,11 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     targets: targetDtes,
     costs: SCHWAB_COVERED_CALL_COSTS,
   });
-  return {
+  const response = {
     ...calculation,
+    calibration: settlement.calibration,
+    settlement: { status: settlement.status, settled: settlement.settled,
+      unavailable: settlement.unavailable },
     reason: calculation.ok
       ? 'Best eligible strike by incremental modeled value per day versus continuing to hold the shares uncovered.'
       : calculation.reason_code === 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES'
@@ -1374,6 +1793,236 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
       history_sessions: history.value?.length ?? 0,
     },
   };
+  try {
+    response.forecast_persistence = await recordUnderwriteForecastRows(env, ownerId, {
+      surface: 'COVERED_CALL_SINGLE_TICKER', symbol, asof: response.asof, result: response,
+    });
+  } catch (error) {
+    response.forecast_persistence = { status: 'FAILED', rows: 0, error: String(error.message ?? error) };
+  }
+  return response;
+}
+
+function blockedLifecycleChoices(optionSymbol, reasonCode, reason, detail = {}) {
+  return {
+    ok: false,
+    outcome: 'NOT_EVALUATED',
+    option_symbol: optionSymbol || null,
+    reason_code: reasonCode,
+    reason,
+    ...detail,
+    execution: 'READ_ONLY_CALCULATION_NO_ORDER_ROUTE',
+    mutation_eligible: false,
+  };
+}
+
+export async function coveredCallLifecycleChoicesDashboard(env, ownerId, rawOptionSymbol) {
+  const optionSymbol = String(rawOptionSymbol ?? '').trim().toUpperCase().replaceAll(' ', '');
+  const blocked = (code, reason, detail = {}) => blockedLifecycleChoices(
+    optionSymbol || null, code, reason, detail,
+  );
+  if (!optionSymbol) return blocked('SYMBOL_INVALID', 'Choose an open covered-call contract.');
+  const targetDtes = configuredCoveredCallDteTargets(env.NUVO_CC_DTE_TARGETS);
+  if (!targetDtes) return blocked('CONFIG/COVERED_CALL_DTE_TARGETS_INVALID',
+    'The configured roll-tenor targets are invalid.');
+
+  const [snapshot, baseline] = await Promise.all([
+    reconciledSnapshot(env, ownerId), loadBaseline(env, ownerId),
+  ]);
+  const reconciliation = accountReconciliation(baseline, snapshot);
+  if (reconciliation.status !== 'CAPTURED') return blocked(`RECON/${reconciliation.status}`,
+    'Current Schwab custody does not match the captured reconciliation checkpoint.', {
+      reconciliation: reconciliation.status,
+    });
+  const currentOption = (snapshot.positions ?? []).find((position) => position.type === 'OPTION'
+    && Number(position.quantity) < 0
+    && String(position.right).toLowerCase() === 'call'
+    && String(position.symbol ?? '').toUpperCase().replaceAll(' ', '') === optionSymbol);
+  if (!currentOption) return blocked('CUSTODY/OPEN_COVERED_CALL_NOT_FOUND',
+    'The requested short call is not present in current Schwab custody.');
+  const underlying = String(currentOption.underlying ?? '').toUpperCase();
+  const shares = (snapshot.positions ?? []).find((position) => position.type === 'EQUITY'
+    && String(position.symbol ?? '').toUpperCase() === underlying
+    && Number(position.quantity) >= Math.abs(Number(currentOption.quantity))
+      * Number(currentOption.multiplier ?? 100));
+  if (!shares) return blocked('CUSTODY/COVERED_SHARES_NOT_VERIFIED',
+    'Current Schwab custody does not prove enough shares to cover this call.');
+  const relatedOrders = (snapshot.openOrders ?? []).filter((order) => {
+    const symbol = String(order?.underlying ?? order?.underlyingSymbol ?? order?.symbol ?? '')
+      .toUpperCase().replaceAll(' ', '');
+    return !symbol || symbol === underlying || symbol === optionSymbol || symbol.startsWith(underlying);
+  });
+  if (relatedOrders.length) return blocked('CUSTODY/ORDER_IN_FLIGHT',
+    'A related Schwab order is still open. Lifecycle choices are not evaluated during a fill.', {
+      open_order_count: relatedOrders.length,
+    });
+
+  const provider = marketProvider(env, ownerId);
+  let marketSession;
+  try {
+    const marketDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const hours = await new SchwabD1Client(env).marketHours(ownerId, {
+      markets: ['option'], date: marketDate,
+    });
+    marketSession = sessionStatus(hours, Date.now());
+  } catch (error) {
+    return blocked('TRUTH/MARKET_SESSION_UNVERIFIED',
+      'The options session could not be verified.', { market_error: String(error.message ?? error) });
+  }
+  if (!marketSession) return blocked('TRUTH/MARKET_SESSION_UNVERIFIED',
+    'The options session could not be verified.');
+  if (marketSession !== 'OPEN') return blocked(
+    'TRUTH/SESSION_NOT_RTH',
+    `The options market is ${marketSession.toLowerCase()}. Fresh executable comparison is available only during regular trading hours.`,
+    { market_session: marketSession },
+  );
+
+  const [currentQuote, underlyingQuote, chain, history, events] = await Promise.all([
+    provider.optionQuote(optionSymbol),
+    provider.markQuote(underlying),
+    provider.optionChain(underlying, { expirations: targetDtes, rights: ['call'], includePartial: true }),
+    provider.history(underlying, { lookback: 400, minBars: 121 }),
+    provider.events(underlying),
+  ]);
+  const failed = [
+    ['TRUTH/CURRENT_CALL_QUOTE_UNAVAILABLE', currentQuote],
+    ['TRUTH/UNDERLYING_QUOTE_UNAVAILABLE', underlyingQuote],
+    ['TRUTH/ROLL_CHAIN_UNAVAILABLE', chain],
+    ['TRUTH/FORECAST_HISTORY_UNAVAILABLE', history],
+  ].find(([, result]) => result?.error);
+  if (failed) return blocked(failed[0], String(failed[1].error));
+
+  const quoteTimes = [currentQuote.asOf, underlyingQuote.asOf, chain.asOf].map(Number);
+  const quoteSkewMs = Math.max(...quoteTimes) - Math.min(...quoteTimes);
+  const maxChainAgeMs = Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000);
+  if (!quoteTimes.every(Number.isFinite) || quoteSkewMs > maxChainAgeMs) return blocked(
+    'TRUTH/QUOTE_SNAPSHOT_SKEW',
+    'The current call, underlying, and roll chain do not form one bounded live snapshot.',
+    { quote_skew_ms: Number.isFinite(quoteSkewMs) ? quoteSkewMs : null,
+      maximum_skew_ms: maxChainAgeMs },
+  );
+  // Quotes are independently timestamped broker observations inside one
+  // bounded snapshot. The PV origin is the single calculation instant after
+  // every observation has arrived, never an invented shared quote timestamp.
+  const valuationAt = Date.now();
+  const result = compareCoveredCallLifecycleChoices({
+    currentOption: { ...currentOption, spot: underlyingQuote.value?.last },
+    currentQuote: {
+      ...currentQuote.value,
+      asof: new Date(currentQuote.asOf).toISOString(),
+      rollChainAsOf: new Date(chain.asOf).toISOString(),
+      underlyingAsOf: new Date(underlyingQuote.asOf).toISOString(),
+    },
+    rollContracts: chain.value?.contracts ?? [],
+    historyBars: history.value,
+    shareBasis: shares.averagePrice,
+    events: events.value ?? [],
+    eventCoverage: {
+      eventsVerified: !events.error,
+      dividendsVerified: events.coverage?.dividends === true,
+    },
+    valuationAt,
+    quotesCurrent: true,
+    samples: Number(env.NUVO_DECISION_SAMPLES ?? 8_000),
+    seed: `covered-call-lifecycle:${optionSymbol}:${valuationAt}`,
+    rate: DEFAULT_LIMITS.riskFreeRate,
+    rateSource: `${DEFAULT_LIMITS.version}:riskFreeRate`,
+    costs: SCHWAB_COVERED_CALL_COSTS,
+  });
+  return {
+    ...result,
+    reason: result.ok
+      ? 'HOLD, CLOSE, and each listed ROLL are option-overlay values at one present-value origin. No row is selected or recommended.'
+      : 'Lifecycle choices were not evaluated because required truth or model inputs were unavailable.',
+    target_dtes: targetDtes,
+    quote_skew_ms: quoteSkewMs,
+    reconciliation: reconciliation.status,
+    market_session: marketSession,
+    execution: 'READ_ONLY_CALCULATION_NO_ORDER_ROUTE',
+    mutation_eligible: false,
+  };
+}
+
+async function cashSecuredPutDashboard(env, ownerId, rawSymbol) {
+  const symbol = String(rawSymbol ?? '').trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9.]{0,9}$/u.test(symbol)) {
+    return {
+      ok: false, outcome: 'CSP_MATH_UNAVAILABLE', reason_code: 'SYMBOL_INVALID',
+      reason: 'Enter one valid ticker symbol.', execution: 'READ_ONLY_MATH_NO_ORDER_ROUTE',
+    };
+  }
+  const targets = configuredCashSecuredPutDteTargets(env.NUVO_CSP_CALCULATOR_DTE_TARGETS);
+  if (!targets) return {
+    ok: false, outcome: 'CSP_MATH_UNAVAILABLE', symbol,
+    reason_code: 'CSP_CALCULATOR_DTE_TARGETS_INVALID',
+    reason: 'The calculator expiry targets are invalid.', execution: 'READ_ONLY_MATH_NO_ORDER_ROUTE',
+  };
+  const settlement = await settleMaturedUnderwriteForecasts(env, ownerId, {
+    surface: 'CSP_SINGLE_TICKER',
+  });
+  const provider = marketProvider(env, ownerId);
+  const [chain, history, events, session] = await Promise.all([
+    provider.optionChain(symbol, { expirations: targets, rights: ['put'], includePartial: true }),
+    provider.history(symbol, { lookback: 400, minBars: 1 }),
+    provider.events(symbol),
+    provider.marketState(),
+  ]);
+  if (chain.error) return {
+    ok: false, outcome: 'CSP_MATH_UNAVAILABLE', symbol,
+    reason_code: 'LIVE_PUT_CHAIN_UNAVAILABLE',
+    reason: 'Fresh put quotes are unavailable. No stale quote or estimate was substituted.',
+    execution: 'READ_ONLY_MATH_NO_ORDER_ROUTE',
+    diagnostics: {
+      chain_error: chain.error, history_error: history.error ?? null,
+      events_error: events.error ?? null, market_session_error: session.error ?? null,
+    },
+  };
+  const calculation = calculateCashSecuredPutRows({
+    symbol,
+    spot: chain.value?.spot,
+    contracts: chain.value?.contracts,
+    historyBars: history.value ?? [],
+    events: events.value ?? [],
+    now: Date.now(),
+    rate: DEFAULT_LIMITS.riskFreeRate,
+    dividendYield: 0,
+    alternativeCashRate: null,
+    collateralCashRate: null,
+    alternativeCashRateVerified: false,
+    collateralCashRateVerified: false,
+    targetBasis: null,
+    seed: `csp-single-ticker:${symbol}:${chain.asOf}`,
+  });
+  const response = {
+    ...calculation,
+    calibration: settlement.calibration,
+    settlement: { status: settlement.status, settled: settlement.settled,
+      unavailable: settlement.unavailable },
+    reason: calculation.ok
+      ? `All ${calculation.row_count} put rows with an executable bid are shown. Nothing is ranked, approved, or suppressed by portfolio policy.`
+      : 'The requested ticker did not provide the core inputs needed for a cash-secured-put row.',
+    target_dtes: targets,
+    asof: chain.asOf ? new Date(chain.asOf).toISOString() : null,
+    source: chain.source,
+    diagnostics: {
+      market_session: session.value?.status ?? null,
+      market_session_error: session.error ?? null,
+      history_error: history.error ?? null,
+      events_error: events.error ?? null,
+      chain_contracts_received: chain.value?.contracts?.length ?? 0,
+      events_received: events.value?.length ?? 0,
+    },
+  };
+  try {
+    response.forecast_persistence = await recordUnderwriteForecastRows(env, ownerId, {
+      surface: 'CSP_SINGLE_TICKER', symbol, asof: response.asof, result: response,
+    });
+  } catch (error) {
+    response.forecast_persistence = { status: 'FAILED', rows: 0, error: String(error.message ?? error) };
+  }
+  return response;
 }
 
 async function performanceDashboard(env, ownerId) {
@@ -1776,8 +2425,7 @@ export async function triggerShadowCycle(env, ownerId, { source = 'MCP', idempot
     }, { code: summary.reasonCode, message: summary.reason });
   }
 
-  const operatorSource = source === 'OPERATOR' || source === 'TELEGRAM_PROPOSAL'
-    || source === 'CSP_CALCULATOR';
+  const operatorSource = source === 'OPERATOR' || source === 'TELEGRAM_PROPOSAL';
   const cycleId = cycleIdFor({
     ownerId,
     source: operatorSource ? 'OPERATOR' : 'SCHEDULED',
@@ -1836,14 +2484,29 @@ export async function triggerShadowCycle(env, ownerId, { source = 'MCP', idempot
     return toolEnvelope(env, { cycle_id: cycleId }, { code: 'WORKFLOW_START_FAILED', message: error.message });
   }
   return toolEnvelope(env, {
-    cycle_id: cycleId, state: 'TRIGGERED', decision: 'REFUSED',
+    cycle_id: cycleId, state: 'TRIGGERED', decision: null,
     reason_code: null, reason: null, evidence_fingerprint: null,
   });
 }
 
 async function getCycleTool(env, ownerId, cycleId) {
   const summary = await cycleSummary(env, ownerId, cycleId);
-  if (!summary) return toolEnvelope(env, { cycle_id: cycleId }, { code: 'NOT_FOUND', message: 'Cycle not found.' });
+  if (!summary) {
+    const lease = await env.DB.prepare(`SELECT status,started_at,expires_at FROM cycle_leases
+      WHERE owner_id=? AND cycle_id=?`).bind(ownerId, cycleId).first().catch(() => null);
+    if (lease) return toolEnvelope(env, {
+      cycle_id: cycleId,
+      state: lease.status === 'RUNNING' ? 'RUNNING' : lease.status,
+      decision: null,
+      reason_code: null,
+      reason: lease.status === 'RUNNING' ? 'The exact requested cycle is still running.' : null,
+      evidence_fingerprint: null,
+      created_at: lease.started_at,
+      expires_at: lease.expires_at,
+      states: [],
+    });
+    return toolEnvelope(env, { cycle_id: cycleId }, { code: 'NOT_FOUND', message: 'Cycle not found.' });
+  }
   const events = await env.DB.prepare(`SELECT sequence,state,role,detail_json,created_at
     FROM cycle_state_events WHERE owner_id=? AND cycle_id=? ORDER BY sequence ASC`).bind(ownerId, cycleId).all();
   return toolEnvelope(env, {
@@ -2146,7 +2809,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Open short options from Schwab custody</p><h3>Income / harvest book</h3></div><span data-vsim="harvest-count" class="count">0 active</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Type</th><th>Strike</th><th>Expiration</th><th>Qty</th><th>Entry credit</th><th>Mark</th><th>Open P&amp;L</th><th>θ / day</th><th>Distance to strike</th><th>Capital committed</th><th>Quote</th></tr></thead><tbody data-vsim="harvest-body"></tbody></table></div><div class="panel-note">Distance is OTM cushion: percent of spot · dollars/share · risk-neutral −d₂ when lifecycle inputs are complete. Stale quote-derived values remain visible but are explicitly muted and badged.</div></article>
     <article class="panel cc-lifecycle-panel"><div class="panel-head"><div><p class="kicker">Shares already owned · calls already open</p><h3>Covered-call lifecycle calculator</h3></div><span class="readonly-tag">DETERMINISTIC · READ ONLY</span></div><div class="cc-lifecycle-cards" data-vsim="cc-lifecycle-cards"></div><div class="panel-note">Flags are observable conditions, not a blended score. Risk-neutral probability is European and excludes early exercise. CLOSE · ROLL · EXIT remain NO_TRUTH until a validated common-horizon decision model exists.</div></article>
   </section>`;
-  const underwrite = `<section class="view" id="underwrite" aria-labelledby="underwrite-title"><div class="page-heading"><div><p class="kicker">One underwriting workspace · read-only</p><h2 id="underwrite-title">Underwrite</h2></div><span class="readonly-tag">NO ORDER ROUTE</span></div><div class="underwrite-tabs" role="tablist" aria-label="Underwriting mode"><button type="button" class="underwrite-tab active" role="tab" aria-selected="true" data-underwrite-mode="scan">Scan opportunities</button><button type="button" class="underwrite-tab" role="tab" aria-selected="false" data-underwrite-mode="manual">Specify manually</button></div><div class="underwrite-pane active" data-underwrite-pane="scan"></div><div class="underwrite-pane" data-underwrite-pane="manual" hidden></div></section>`;
+  const underwrite = `<section class="view" id="underwrite" aria-labelledby="underwrite-title"><div class="page-heading"><div><p class="kicker">One underwriting workspace · read-only</p><h2 id="underwrite-title">Underwrite</h2></div><span class="readonly-tag">NO ORDER ROUTE</span></div><div class="underwrite-tabs" role="tablist" aria-label="Underwriting mode"><button type="button" class="underwrite-tab active" role="tab" aria-selected="true" data-underwrite-mode="scan">Portfolio review</button><button type="button" class="underwrite-tab" role="tab" aria-selected="false" data-underwrite-mode="manual">Specify manually</button></div><div class="underwrite-pane active" data-underwrite-pane="scan"></div><div class="underwrite-pane" data-underwrite-pane="manual" hidden></div></section>`;
   const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Lifetime results and canonical Schwab ledger drill-down</p><h2 id="performance-title">Performance</h2></div><button type="button" class="as-of history-link" data-jump-system-history>History integrity →</button></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L · Lifetime</span><strong data-vsim="performance-realized">—</strong><small data-vsim="performance-realized-note">Lifetime · matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small data-vsim="performance-unrealized-note">latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small data-vsim="performance-total-note">realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small data-vsim="profit-factor-note">Lifetime · gross wins ÷ gross losses</small></div><div><span>Matched trades</span><strong data-vsim="closed-trades">—</strong><small data-vsim="closed-trades-note">Lifetime ledger denominator</small></div></div><article class="panel pnl-calendar-panel"><div class="panel-head pnl-calendar-head"><div><p class="kicker" data-vsim="pnl-calendar-subtitle">Realized daily P&amp;L · all closed lifecycles · Schwab ledger</p><h3>Realized P&amp;L calendar</h3></div><div class="pnl-calendar-tools"><span data-vsim="pnl-calendar-reconciliation" class="readonly-tag">CHECKING</span><div class="pnl-calendar-nav"><button type="button" aria-label="Previous month" data-pnl-calendar-shift="-1">‹</button><strong data-vsim="pnl-calendar-month">—</strong><button type="button" aria-label="Next month" data-pnl-calendar-shift="1">›</button></div></div></div><div class="pnl-calendar-scopes" role="group" aria-label="Realized P&amp;L strategy scope"><button type="button" class="chip active" data-pnl-calendar-scope="ALL">All strategies</button><button type="button" class="chip" data-pnl-calendar-scope="IN_MANDATE">CC + CSP only</button></div><div class="pnl-calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span></div><div class="pnl-calendar-grid" data-vsim="pnl-calendar-grid"></div><div class="pnl-calendar-footer"><div><span>Profit</span><strong data-vsim="pnl-calendar-profit">—</strong></div><div><span>Loss</span><strong data-vsim="pnl-calendar-loss">—</strong></div><div><span data-vsim="pnl-calendar-net-label">MONTH TOTAL</span><strong data-vsim="pnl-calendar-net">—</strong></div></div><p class="panel-note" data-vsim="pnl-calendar-note">New York market date · NYSE full-day closures · early-close sessions count as trading days.</p></article><article class="panel mandate-panel"><div class="panel-head"><div><p class="kicker">Historical strategy-leg view</p><h3>Mandate lens</h3></div><span class="readonly-tag">DRILL DOWN TO VERIFY STRUCTURES</span></div><div class="desk-metrics mandate-metrics"><div><span>Mandate-compatible legs</span><strong data-vsim="mandate-pnl">—</strong><small data-vsim="mandate-trades">—</small></div><div><span>Compatible profit factor</span><strong data-vsim="mandate-profit-factor">—</strong><small>SHARES · SHORT_CALL · SHORT_PUT</small></div><div><span>Structure review</span><strong data-vsim="review-pnl">—</strong><small data-vsim="review-trades">—</small></div><div><span>Review profit factor</span><strong data-vsim="review-profit-factor">—</strong><small>inspect long legs and futures</small></div></div><p class="panel-note" data-vsim="mandate-note">Historical option legs require ledger review before they can be classified as standalone or part of a spread.</p></article><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles · drag to filter ledger dates</p><h3>Cumulative realized P&amp;L</h3></div><span data-vsim="performance-asof" class="as-of">—</span></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss. Drag horizontally to filter the ledger by date."></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><article class="panel table-panel performance-ledger"><div class="panel-head"><div><p class="kicker">Canonical append-only Schwab ledger</p><h3>Closed trade drill-down</h3></div><span data-vsim="filtered-trade-count" class="count">—</span></div><div class="ledger-filters"><span data-vsim="ledger-filter-summary">All matched trades</span><label>From <input type="date" data-performance-from></label><label>To <input type="date" data-performance-to></label><button type="button" class="chip" data-clear-performance-filter>Clear filters</button></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Strategy</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div><div class="panel-note">Click attribution rows or drag the cumulative curve to filter. Raw broker packets remain protected; this table shows FIFO-matched lifecycles.</div></article><details class="panel broker-activity"><summary>Broker activity · imported orders, executions, cash, assignment and transfer events</summary><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div></details><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
   const readinessScorecard = `<article class="panel scorecard"><div class="panel-head"><div><p class="kicker">Five scoreboards</p><h3>Readiness</h3></div><strong class="readiness">1 / 5</strong></div>
             <div class="score-rows"><div><span>Economic</span><i></i><small>Awaiting data</small></div><div><span>Calibration</span><i></i><small>Awaiting data</small></div><div><span>Execution</span><i></i><small>Not connected</small></div><div class="ready"><span>Constitution</span><i></i><small>Clean</small></div><div><span>Survival</span><i></i><small>Awaiting data</small></div></div>
@@ -2194,16 +2857,16 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
       </div>
     </div>
     <div class="calculator-pane" data-calculator-pane="cash-secured-put" hidden>
-      <article class="panel csp-status" data-vsim="csp-status"><div class="panel-head"><div><h3>Cash-secured put</h3><p class="sub" data-vsim="csp-outcome">Ready for a fresh calculation</p></div><span class="readonly-tag" data-vsim="csp-badge">READY</span></div><p class="cc-reason" data-vsim="csp-reason">Uses fresh market data, unborrowed cash, assignment-notional concentration, and constitutional portfolio limits.</p><button type="button" class="cc-directive csp-run" data-csp-calculate>RUN CALCULATION</button><div class="calculator-rules"><span>Cash remains the default.</span><span>Collateral hurdle is charged inside NEV.</span></div></article>
+      <article class="panel csp-status" data-vsim="csp-status"><div class="panel-head"><div><h3>One-ticker cash-secured-put calculator</h3><p class="sub" data-vsim="csp-outcome">Enter one ticker for transparent put math</p></div><span class="readonly-tag" data-vsim="csp-badge">MATH ONLY</span></div><p class="cc-reason" data-vsim="csp-reason">Every put row with a fresh executable bid is shown. No universe, ranking, Governor, portfolio gate, recommendation, or order route.</p><div class="csp-inputs"><label>Ticker<input data-csp-symbol inputmode="text" autocomplete="off" maxlength="10" placeholder="SOFI" aria-label="Ticker symbol"></label><button type="button" class="cc-directive csp-run" data-csp-calculate>CALCULATE TICKER</button></div><div class="calculator-rules"><span>One contract.</span><span>Credit uses executable bid.</span><span>RAW uses the registered risk-free rate.</span><span>Cash-adjusted value requires two verified yields.</span><span>Warnings never hide a row.</span></div></article>
       <div class="calculator-results" data-vsim="csp-results" hidden>
-        <article class="panel csp-recommendation" data-vsim="csp-recommendation" hidden><div class="panel-head"><div><p class="kicker">Best eligible cash-secured put</p><h3><span data-vsim="csp-ticker">—</span> · <span data-vsim="csp-expiry-strike">—</span></h3></div><span class="regime">READ ONLY</span></div><div class="desk-metrics cc-metrics"><div><span>Entry credit</span><strong data-vsim="csp-credit">—</strong><small>modeled executable fill</small></div><div><span>Cash required</span><strong data-vsim="csp-cash">—</strong><small>settled cash · no buying power</small></div><div><span>Breakeven</span><strong data-vsim="csp-breakeven">—</strong><small>strike less credit/share</small></div><div><span>NEV / day</span><strong data-vsim="csp-nev-day">—</strong><small>ranking and eligibility metric</small></div><div><span>Wheel-ready paths</span><strong data-vsim="csp-wheel-ready">—</strong><small>assignment paths within recovery limit</small></div><div><span>Profit probability</span><strong data-vsim="csp-pop">—</strong><small>independent model estimate</small></div></div><p class="cc-decision-impact" data-vsim="csp-impact">—</p></article>
-        <article class="panel table-panel" data-vsim="csp-candidate-panel" hidden><div class="panel-head"><div><h3>Evaluated candidates</h3></div><span data-vsim="csp-asof" class="as-of">—</span></div><div class="table-wrap"><table><thead><tr><th>Rank</th><th>Ticker</th><th>Expiry (DTE)</th><th>Strike</th><th>NEV / day</th><th>Decision</th></tr></thead><tbody data-vsim="csp-candidates"></tbody></table></div></article>
+        <article class="panel csp-recommendation" data-vsim="csp-summary"><div class="panel-head"><div><p class="kicker">Single-ticker calculation</p><h3><span data-vsim="csp-ticker">—</span> · all listed puts in selected expiries</h3></div><span class="regime" data-vsim="csp-calibration">MODELED · UNCALIBRATED · n=0</span></div><div class="desk-metrics cc-metrics"><div><span>Spot</span><strong data-vsim="csp-spot">—</strong><small>live underlying</small></div><div><span>Rows</span><strong data-vsim="csp-row-count">—</strong><small>none suppressed by policy</small></div><div><span>History</span><strong data-vsim="csp-history">—</strong><small>sessions used for physical models</small></div><div><span>Risk-free rate</span><strong data-vsim="csp-rate">—</strong><small>constitution input</small></div><div><span>Dividend yield</span><strong data-vsim="csp-yield">—</strong><small>intentional zero unless verified</small></div><div><span>Paths / model</span><strong data-vsim="csp-samples">—</strong><small>fixed simulation count</small></div></div><p class="cc-decision-impact">This calculator displays math. It does not select, approve, size, or transmit a trade.</p></article>
+        <article class="panel table-panel" data-vsim="csp-candidate-panel" hidden><div class="panel-head"><div><h3>All computable put rows</h3><p class="sub">PRIMARY is the ticker-specific block bootstrap. Every RAW NEV is shown with its Monte Carlo standard error.</p></div><span data-vsim="csp-asof" class="as-of">—</span></div><div class="table-wrap"><table class="csp-math-table"><thead><tr><th>Expiry (DTE)</th><th>Strike</th><th>Bid / Ask</th><th>Net credit</th><th>Gross obligation</th><th>Net tied cash</th><th>Assigned basis</th><th>RN finish ITM</th><th>GARCH σ</th><th>Lognormal RAW ± SE</th><th>Student-t RAW ± SE</th><th>Jump RAW ± SE</th><th>PRIMARY RAW ± SE</th><th>1.25× vol RAW ± SE</th><th>Cash carry PV</th><th>PRIMARY cash-adjusted</th><th>Warnings</th></tr></thead><tbody data-vsim="csp-candidates"></tbody></table></div><div class="panel-note">RAW_NEV₀ = net credit − e^(−rT) × expected terminal put liability. Net tied cash defaults to strike × 100 − net credit unless a verified broker requirement differs. CASH_CARRY_COST₀ = e^(−rT) × net tied cash × [e^(y_alt T) − e^(y_coll T)]; CASH_ADJ_NEV₀ = RAW_NEV₀ − cash carry. Cash-adjusted value is unavailable unless both yields are verified; neither cash yield enters N(d₂). Fees use the explicit assumed schedule. Jump is an uncalibrated diagnostic and may double-count historical jump variance already present in GARCH.</div></article>
         <details class="vsim-diagnostics"><summary>Diagnostics and evidence</summary><pre data-vsim="csp-diagnostics">No calculation loaded.</pre></details>
       </div>
     </div>
   </section>`;
   const additions = `<style>
-    .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th,#calculators table td,#calculators table th{white-space:nowrap}.cc-directive,.cc-back{appearance:none;border:1px solid rgba(61,222,169,.55);border-radius:4px;background:rgba(35,196,143,.1);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:7px 10px;cursor:pointer}.cc-directive:hover,.cc-back:hover{background:rgba(35,196,143,.2)}.cc-unavailable{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.cc-status[data-state="blocked"],.csp-status[data-state="blocked"]{border-color:rgba(242,118,118,.38)}.cc-status[data-state="ready"],.csp-status[data-state="ready"]{border-color:rgba(96,226,168,.38)}.cc-reason,.cc-decision-impact{color:var(--text);line-height:1.55}.cc-rule{margin-top:12px;padding:11px 13px;border-left:2px solid var(--amber);background:rgba(244,186,97,.06);color:var(--amber);font-size:11px}.cc-tenors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.cc-tenor{padding:13px;border:1px solid var(--line);border-radius:5px;background:rgba(7,23,20,.42)}.cc-tenor strong,.cc-tenor span,.cc-tenor small{display:block}.cc-tenor strong{color:var(--green);font-size:16px}.cc-tenor span{margin:5px 0;color:var(--text);font-size:11px}.cc-tenor small{color:var(--muted);font-size:9px}.cc-metrics{margin-top:8px}.cc-decision-impact{margin:14px 0 0;color:var(--green)}.calculator-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.calculator-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.calculator-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.calculator-pane{display:grid;gap:12px}.calculator-pane[hidden]{display:none}.calculator-selector{margin-bottom:0}.calculator-symbols{display:flex;flex-wrap:wrap;gap:8px}.calculator-symbol{display:grid;grid-template-columns:auto auto;gap:3px 14px;align-items:center;text-align:left}.calculator-symbol b{color:var(--text)}.calculator-symbol small{grid-column:1/-1;color:var(--muted);font-size:8px}.calculator-symbol[data-actionable="false"]{border-color:var(--line);color:var(--amber);background:rgba(244,186,97,.05)}.csp-run{margin-top:12px}.csp-recommendation{border-color:rgba(96,226,168,.38)}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}.cc-tenors{grid-template-columns:1fr}.calculator-tabs{overflow:auto}.calculator-symbol{width:100%}}
+    .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th,#calculators table td,#calculators table th{white-space:nowrap}.cc-directive,.cc-back{appearance:none;border:1px solid rgba(61,222,169,.55);border-radius:4px;background:rgba(35,196,143,.1);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:7px 10px;cursor:pointer}.cc-directive:hover,.cc-back:hover{background:rgba(35,196,143,.2)}.cc-unavailable{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.cc-status[data-state="blocked"],.csp-status[data-state="blocked"]{border-color:rgba(242,118,118,.38)}.cc-status[data-state="ready"],.csp-status[data-state="ready"]{border-color:rgba(96,226,168,.38)}.cc-reason,.cc-decision-impact{color:var(--text);line-height:1.55}.cc-rule{margin-top:12px;padding:11px 13px;border-left:2px solid var(--amber);background:rgba(244,186,97,.06);color:var(--amber);font-size:11px}.cc-tenors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.cc-tenor{padding:13px;border:1px solid var(--line);border-radius:5px;background:rgba(7,23,20,.42)}.cc-tenor strong,.cc-tenor span,.cc-tenor small{display:block}.cc-tenor strong{color:var(--green);font-size:16px}.cc-tenor span{margin:5px 0;color:var(--text);font-size:11px}.cc-tenor small{color:var(--muted);font-size:9px}.cc-metrics{margin-top:8px}.cc-decision-impact{margin:14px 0 0;color:var(--green)}.calculator-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.calculator-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.calculator-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.calculator-pane{display:grid;gap:12px}.calculator-pane[hidden]{display:none}.calculator-selector{margin-bottom:0}.calculator-symbols{display:flex;flex-wrap:wrap;gap:8px}.calculator-symbol{display:grid;grid-template-columns:auto auto;gap:3px 14px;align-items:center;text-align:left}.calculator-symbol b{color:var(--text)}.calculator-symbol small{grid-column:1/-1;color:var(--muted);font-size:8px}.calculator-symbol[data-actionable="false"]{border-color:var(--line);color:var(--amber);background:rgba(244,186,97,.05)}.csp-run{margin-top:12px}.csp-recommendation{border-color:rgba(96,226,168,.38)}.cc-choice-shell{padding:12px 14px;border-top:1px solid var(--line)}.cc-choice-shell>p{margin:8px 0 0;color:var(--muted);font-size:9px;line-height:1.45}.cc-choice-result{margin-top:12px}.cc-choice-result[hidden]{display:none}.cc-choice-status{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px;color:var(--muted);font:700 9px/1.4 var(--mono)}.cc-choice-status strong{color:var(--text)}.cc-choice-table{min-width:1480px}.cc-choice-table td{font-variant-numeric:tabular-nums}.cc-choice-table .choice-warning{max-width:310px;white-space:normal;color:var(--amber)}.cc-choice-table .choice-path{font-weight:800}.cc-choice-foot{margin:10px 0 0;color:var(--muted);font:9px/1.5 var(--mono)}.cc-choice-result>.choice-warning{color:var(--amber)}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}.cc-tenors{grid-template-columns:1fr}.calculator-tabs{overflow:auto}.calculator-symbol{width:100%}.cc-choice-shell .cc-directive{width:100%}}
     .underwrite-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.underwrite-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.underwrite-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.underwrite-pane[hidden]{display:none}.underwrite-pane>.page-heading{display:none}.history-link{appearance:none;background:transparent;border:0;color:var(--green);cursor:pointer}.mandate-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}.attribution-row{width:100%;appearance:none;border:0;padding:4px;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:4px}.attribution-row:hover,.attribution-row.active{background:rgba(35,196,143,.1);outline:1px solid rgba(61,222,169,.25)}.performance-chart{touch-action:none;cursor:crosshair}.performance-chart .range-selection{fill:rgba(96,226,168,.14);stroke:#60e2a8;stroke-width:1}.performance-ledger{margin-top:16px}.ledger-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:12px;color:var(--muted);font-size:10px}.ledger-filters>span{margin-right:auto;color:var(--text)}.ledger-filters label{display:flex;align-items:center;gap:6px}.ledger-filters input{color:var(--text);background:#071712;border:1px solid var(--line);border-radius:4px;padding:6px;font:10px var(--mono);color-scheme:dark}.broker-activity{margin-top:16px}.broker-activity summary{cursor:pointer;color:var(--text);font-weight:700}.performance-ledger td,.performance-ledger th,.broker-activity td,.broker-activity th{white-space:nowrap}.system-history{scroll-margin-top:20px}.system-decisions{margin-top:28px;padding-top:28px;border-top:1px solid var(--line)}.system-decisions>.page-heading{align-items:center;margin-bottom:14px}.system-decisions>.page-heading h2{font-size:22px}.system-decisions .evidence-layout{grid-template-columns:minmax(0,2fr) minmax(220px,.7fr)}.guardian-panel .package-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 18px}@media(max-width:1000px){.system-decisions .evidence-layout{grid-template-columns:1fr}}@media(max-width:680px){.mandate-metrics{grid-template-columns:1fr 1fr}.ledger-filters>span{width:100%;margin-right:0}.guardian-panel .package-facts{grid-template-columns:1fr}}
     .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}.cc-lifecycle-cards{display:grid;gap:12px}.cc-life-card{border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42);overflow:hidden}.cc-life-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;padding:14px}.cc-life-head h4{margin:0;font-size:16px}.cc-life-head small{display:block;margin-top:4px;color:var(--muted)}.cc-life-flags{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px}.cc-life-flag{padding:4px 6px;border:1px solid rgba(244,186,97,.4);border-radius:3px;color:var(--amber);font:700 8px/1.2 var(--mono);letter-spacing:.06em}.cc-life-flag.nominal{border-color:rgba(96,226,168,.4);color:var(--green)}.cc-life-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-top:1px solid var(--line)}.cc-life-metrics>div{padding:12px;border-right:1px solid var(--line)}.cc-life-metrics>div:last-child{border-right:0}.cc-life-metrics span,.cc-life-metrics small{display:block;color:var(--muted);font-size:8px}.cc-life-metrics strong{display:block;margin:5px 0;font-size:15px;font-variant-numeric:tabular-nums}.cc-life-paths{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line)}.cc-life-paths>div{padding:12px;border-right:1px solid var(--line)}.cc-life-paths>div:last-child{border-right:0}.cc-life-paths span{display:block;color:var(--muted);font-size:8px;text-transform:uppercase}.cc-life-paths strong{display:block;margin-top:5px;font-size:14px}.cc-life-foot{padding:10px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:9px;overflow-wrap:anywhere}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}.cc-life-metrics{grid-template-columns:repeat(3,1fr)}.cc-life-paths{grid-template-columns:repeat(2,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}.cc-life-head{display:block}.cc-life-flags{justify-content:flex-start;margin-top:9px}.cc-life-metrics{grid-template-columns:1fr 1fr}.cc-life-paths{grid-template-columns:1fr 1fr}}
     .cc-life-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}@media(max-width:1050px){.cc-life-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.cc-life-metrics{grid-template-columns:1fr 1fr}}
@@ -2240,7 +2903,10 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     }
   </style>`;
   const calculatorStyles = `<style>
-    .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}
+    .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}.csp-inputs{display:grid;grid-template-columns:minmax(180px,1fr) auto;gap:10px;align-items:end;margin-top:14px}.csp-inputs label{display:grid;gap:6px;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.09em;text-transform:uppercase}.csp-inputs input{min-width:0;padding:10px 11px;border:1px solid var(--line);border-radius:5px;background:#071712;color:var(--text);font:700 11px/1.2 var(--mono);text-transform:uppercase}.csp-inputs input:focus{outline:1px solid var(--green);border-color:var(--green)}.csp-math-table{min-width:2050px}.csp-math-table td:last-child{max-width:250px;white-space:normal;color:var(--amber)}@media(max-width:520px){.csp-inputs{grid-template-columns:1fr}.csp-inputs .csp-run{width:100%}}
+  </style>`;
+  const portfolioReviewStyles = `<style>
+    .portfolio-review{display:grid;gap:14px}.portfolio-review-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:center;padding:20px;border:1px solid rgba(96,226,168,.28);border-radius:8px;background:linear-gradient(135deg,rgba(35,196,143,.1),rgba(7,23,18,.35) 62%)}.portfolio-review-hero h3{margin:3px 0 7px;font-size:24px}.portfolio-review-hero p:not(.kicker){max-width:760px;margin:0;color:var(--muted);line-height:1.55}.portfolio-review-run{min-width:190px;min-height:42px;border:1px solid var(--green);border-radius:5px;background:rgba(35,196,143,.12);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase;cursor:pointer}.portfolio-review-run:hover{background:rgba(35,196,143,.2)}.portfolio-review-run:disabled{opacity:.5;cursor:wait}.portfolio-review-state{display:flex;align-items:center;gap:8px;margin-top:11px;color:var(--text);font:700 9px/1.3 var(--mono);letter-spacing:.06em;text-transform:uppercase}.portfolio-review-state i{width:8px;height:8px;border-radius:50%;background:var(--amber);box-shadow:0 0 10px rgba(244,186,97,.7)}.portfolio-review-state.complete i{background:var(--green);box-shadow:0 0 10px rgba(96,226,168,.7)}.portfolio-review-state.refused i{background:var(--red);box-shadow:0 0 10px rgba(242,118,118,.7)}.review-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.review-metric{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:rgba(8,21,17,.58)}.review-metric span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.11em;text-transform:uppercase}.review-metric strong{display:block;margin-top:7px;font-size:22px;font-variant-numeric:tabular-nums}.review-metric small{display:block;margin-top:4px;color:var(--muted);font-size:8px}.review-calibration{padding:16px 18px}.review-calibration-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}.review-calibration-cell{padding:11px 12px;border:1px solid var(--line);border-radius:6px;background:rgba(8,21,17,.5)}.review-calibration-cell span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.review-calibration-cell strong{display:block;margin-top:6px;font-size:15px;font-variant-numeric:tabular-nums}.review-calibration-cell small{display:block;margin-top:4px;color:var(--muted);font-size:8px;line-height:1.35}.review-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.review-toolbar .chip{cursor:pointer}.review-toolbar .chip.active{color:var(--green);border-color:rgba(96,226,168,.5);background:rgba(35,196,143,.1)}.review-toolbar-note{margin-left:auto;color:var(--muted);font-size:9px}.review-table{min-width:1320px}.review-table td{font-variant-numeric:tabular-nums}.review-table .policy-pass{color:var(--green)}.review-table .policy-block{color:var(--amber)}.review-table .model-unavailable{color:var(--muted)}.review-symbol-table{min-width:720px}.review-symbol-state{font-weight:700}.review-symbol-state.calculated{color:var(--green)}.review-symbol-state.refused{color:var(--red)}.review-symbol-state.not-evaluated{color:var(--amber)}.review-explainer{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.review-explainer article{padding:15px;border:1px solid var(--line);border-radius:7px;background:rgba(8,21,17,.45)}.review-explainer strong{display:block;margin-bottom:7px}.review-explainer p{margin:0;color:var(--muted);font-size:9px;line-height:1.55}.review-explainer code{color:var(--text);font-size:9px}.review-empty{padding:30px;text-align:center;color:var(--muted)}@media(max-width:900px){.portfolio-review-hero{grid-template-columns:1fr}.portfolio-review-run{width:100%}.review-metrics,.review-calibration-grid{grid-template-columns:1fr 1fr}.review-explainer{grid-template-columns:1fr}}@media(max-width:520px){.review-metrics,.review-calibration-grid{grid-template-columns:1fr}.review-toolbar-note{width:100%;margin-left:0}}
   </style>`;
   const calendarStyles = `<style>
     .pnl-calendar-panel{margin-bottom:16px}.pnl-calendar-head{align-items:center}.pnl-calendar-tools{display:flex;align-items:center;gap:10px}.pnl-calendar-reconciliation.reconciled{color:var(--green);border-color:rgba(96,226,168,.45);background:rgba(96,226,168,.07)}.pnl-calendar-reconciliation.drift{color:var(--red);border-color:rgba(242,118,118,.55);background:rgba(242,118,118,.08)}.pnl-calendar-nav{display:grid;grid-template-columns:34px minmax(140px,auto) 34px;gap:10px;align-items:center;text-align:center}.pnl-calendar-nav button{appearance:none;width:34px;height:34px;border:1px solid var(--line);border-radius:5px;background:#091510;color:var(--text);font-size:20px;cursor:pointer}.pnl-calendar-nav button:disabled{opacity:.28;cursor:not-allowed}.pnl-calendar-nav strong{font-size:15px}.pnl-calendar-scopes{display:flex;gap:7px;margin:4px 0 14px}.pnl-calendar-scopes .chip.active{color:var(--green);border-color:rgba(96,226,168,.5);background:rgba(35,196,143,.1)}.pnl-calendar-weekdays,.pnl-calendar-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.pnl-calendar-weekdays{margin-bottom:7px}.pnl-calendar-weekdays span{text-align:center;color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.13em;text-transform:uppercase}.pnl-calendar-day{position:relative;min-height:84px;padding:10px;border:1px solid var(--line);border-radius:6px;background:rgba(8,21,17,.56);color:var(--text);text-align:left;font:inherit;font-variant-numeric:tabular-nums}.pnl-calendar-day button{font:inherit}.pnl-calendar-day .day-number{display:block;color:var(--muted);font:9px/1.2 var(--mono)}.pnl-calendar-day strong{display:block;margin-top:17px;font:700 clamp(11px,1.2vw,16px)/1.15 var(--mono)}.pnl-calendar-day small{display:block;margin-top:5px;color:var(--muted);font-size:8px}.pnl-calendar-day.actionable{cursor:pointer}.pnl-calendar-day.actionable:hover,.pnl-calendar-day.active{outline:1px solid var(--green);outline-offset:1px}.pnl-calendar-day.positive strong{color:var(--green)}.pnl-calendar-day.negative strong{color:var(--red)}.pnl-calendar-day.zero strong{color:var(--muted)}.pnl-calendar-day.non-trading{border-color:transparent;background:transparent}.pnl-calendar-day.non-trading .day-number{opacity:.45}.pnl-calendar-footer{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:16px;padding-top:15px;border-top:1px solid var(--line)}.pnl-calendar-footer span{display:block;color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.11em;text-transform:uppercase}.pnl-calendar-footer strong{display:block;margin-top:7px;font:700 18px/1.2 var(--mono);font-variant-numeric:tabular-nums}.pnl-calendar-footer>div:first-child strong{color:var(--green)}.pnl-calendar-footer>div:nth-child(2) strong{color:var(--red)}@media(max-width:680px){.pnl-calendar-head{align-items:flex-start}.pnl-calendar-nav{grid-template-columns:30px minmax(105px,auto) 30px}.pnl-calendar-nav button{width:30px;height:30px}.pnl-calendar-weekdays,.pnl-calendar-grid{gap:4px}.pnl-calendar-day{min-height:70px;padding:7px 5px}.pnl-calendar-day strong{margin-top:13px;font-size:10px}.pnl-calendar-day small{font-size:7px}.pnl-calendar-footer{gap:8px}.pnl-calendar-footer strong{font-size:13px}}
@@ -2249,7 +2915,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
     .replace('href="styles.css"', 'href="/design/styles.css"')
     .replace('src="app.js"', 'src="/design/app.js"')
-    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + calendarStyles + botLedgerStyles + mobileStyles + e3Styles + `<style>
+    .replace('</head>', additions + operationalStyles + systemHealthStyles + calculatorStyles + portfolioReviewStyles + calendarStyles + botLedgerStyles + mobileStyles + e3Styles + `<style>
       body:not(.live-ready) .shell{visibility:hidden}
       body:not(.live-ready)::before{content:'Loading live account data…';position:fixed;inset:0;display:grid;place-items:center;color:#8fa49b;background:#03100c;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase}
     </style></head>`)
@@ -2356,12 +3022,26 @@ export function resolveLaneControlOutcome({ action, previousArmed, result = null
   return { armed: prior, error: `ARM UNCONFIRMED — the lane remains in its prior state. (${String(detail)})` };
 }
 
+export function coveredCallDisplayState(result) {
+  const ready = Boolean(result?.ok && result?.selected);
+  const reasonCode = String(result?.reason_code ?? '');
+  const notEvaluated = reasonCode === 'TRUTH/SESSION_NOT_RTH'
+    || reasonCode === 'TRUTH/MARKET_SESSION_UNVERIFIED';
+  return {
+    ready,
+    state: ready ? 'READY' : notEvaluated ? 'NOT_EVALUATED' : 'NO_CANDIDATE',
+    outcome: ready ? 'SELL_CC_CANDIDATE_IDENTIFIED'
+      : notEvaluated ? 'NOT_EVALUATED' : 'CALCULATED_NO_CANDIDATE',
+  };
+}
+
 export function liveDashboardScript({ e3SpineTab = false } = {}) {
   return `(() => {
   'use strict';
   const E3_SPINE_ENABLED = ${e3SpineTab === true};
   const resolveLaneControlOutcome = ${resolveLaneControlOutcome.toString()};
   const armLaneContract = ${armLaneContract.toString()};
+  const coveredCallDisplayState = ${coveredCallDisplayState.toString()};
   const q = (selector, root = document) => root.querySelector(selector);
   const qa = (selector, root = document) => [...root.querySelectorAll(selector)];
   const present = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
@@ -2382,7 +3062,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     );
   });
   const connectorOk = status => status === 'CONNECTED' || status === 'LIVE_READ_ONLY';
-  const structure = value => ({ CSP: 'Cash-secured put', BULL_PUT_SPREAD: 'Bull put spread', CASH_SECURED_PUT: 'Cash-secured put' }[value] || value || '—');
+  const structure = value => ({ CSP: 'Cash-secured put', COVERED_CALL: 'Covered call', BULL_PUT_SPREAD: 'Bull put spread', CASH_SECURED_PUT: 'Cash-secured put' }[value] || value || '—');
   const marketDateKey = value => {
     if (/^\d{4}-\d{2}-\d{2}$/u.test(String(value || ''))) return String(value);
     const date = value instanceof Date ? value : new Date(value);
@@ -2397,7 +3077,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   const requestedScope = initialPerformanceParams.get('pnlScope');
   const calculatorState = {
     mode: 'covered-call', coveredCallSymbol: null, coveredCallRequestId: null,
-    coveredCallInventory: [], cspCycleId: null, cspRequestId: null,
+    coveredCallInventory: [], cspSymbol: null, cspRequestId: null,
   };
   const performanceState = {
     report: null, ledger: null, calendar: null, calendarRequestId: 0,
@@ -2409,6 +3089,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       ? requestedCalendarMonth : marketDateKey(new Date()).slice(0, 7),
   };
   let underwriteMode = 'scan';
+  let portfolioReviewFilter = 'all';
   let tradingViewWidgetLoad = null;
 
   async function ensureTradingViewWidget(root) {
@@ -2482,18 +3163,122 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   function relocateTopOpportunities() {
-    const overview = q('#overview');
     const opportunitiesView = q('#underwrite [data-underwrite-pane="scan"]');
-    if (!overview || !opportunitiesView) return;
-    const detailed = q('.table-panel.detailed', opportunitiesView);
-    if (!detailed) return;
-    const panel = Array.from(overview.children).find(node => {
-      const heading = node.matches('article.table-panel') && q('h3', node);
-      return heading && heading.textContent.trim().toLowerCase() === 'top opportunities';
+    if (!opportunitiesView) return;
+    clear(opportunitiesView);
+    const review = make('section', undefined, 'portfolio-review');
+
+    const hero = make('article', undefined, 'portfolio-review-hero');
+    const heroCopy = make('div');
+    heroCopy.append(make('p', 'Read-only portfolio economics', 'kicker'),
+      make('h3', 'Portfolio review'),
+      make('p', 'A fresh, one-contract comparison across the configured universe and the shares you own. Every calculated row remains visible; policy is a clearly labeled stamp, never a reason to hide the math.'));
+    const state = make('div', undefined, 'portfolio-review-state');
+    state.dataset.reviewState = '';
+    state.append(make('i'), make('span', 'Ready for a fresh review'));
+    heroCopy.append(state);
+    const run = make('button', 'Run fresh portfolio review', 'portfolio-review-run');
+    run.type = 'button'; run.dataset.action = 'cycle';
+    hero.append(heroCopy, run); review.append(hero);
+
+    const metrics = make('div', undefined, 'review-metrics');
+    [
+      ['symbols', 'Symbols calculated', 'Independent outcomes'],
+      ['rows', 'Option rows', 'No qualifying row is hidden'],
+      ['pass', 'No reference flags', 'Informational only'],
+      ['block', 'Reference flags', 'Never suppresses a row'],
+    ].forEach(([key, label, note]) => {
+      const card = make('article', undefined, 'review-metric');
+      const value = make('strong', '—'); value.dataset.reviewMetric = key;
+      card.append(make('span', label), value, make('small', note)); metrics.append(card);
     });
-    if (!panel) return;
-    panel.classList.add('top-opportunities-panel');
-    opportunitiesView.insertBefore(panel, detailed);
+    review.append(metrics);
+
+    const calibration = make('article', undefined, 'panel review-calibration');
+    const calibrationHead = make('div', undefined, 'panel-head');
+    const calibrationTitle = make('div');
+    calibrationTitle.append(make('p', 'Outcomes measured after expiration', 'kicker'),
+      make('h3', 'Forecast calibration'));
+    const calibrationStatus = make('span', 'UNCALIBRATED', 'readonly-tag');
+    calibrationStatus.dataset.reviewCalibrationStatus = '';
+    calibrationHead.append(calibrationTitle, calibrationStatus); calibration.append(calibrationHead);
+    const calibrationGrid = make('div', undefined, 'review-calibration-grid');
+    [
+      ['forecastRows', 'Forecast rows', 'Settled rows scored'],
+      ['contractExpiry', 'Unique contract + expiry', 'Distinct contracts settled'],
+      ['symbolExpiry', 'Unique symbol + expiry', 'Independent headline n'],
+      ['modelVersion', 'Model version', 'Scores never cross versions'],
+      ['primaryBrier', 'PRIMARY Brier', 'Centered bootstrap'],
+      ['lognormalBrier', 'Lognormal Brier', 'Challenger'],
+      ['studentTBrier', 'Student-t₅ Brier', 'Variance normalized'],
+      ['riskNeutralBrier', 'RN Brier', 'Reference · not physical'],
+      ['realizedNev', 'Mean realized RAW NEV₀', 'One-contract measurement'],
+    ].forEach(([key, label, note]) => {
+      const cell = make('div', undefined, 'review-calibration-cell');
+      const value = make('strong', '—'); value.dataset.reviewCalibration = key;
+      cell.append(make('span', label), value, make('small', note)); calibrationGrid.append(cell);
+    });
+    calibration.append(calibrationGrid, make('p',
+      'PRIMARY remains the provisional centered five-session block bootstrap. Calibration labels report evidence only; they never change the model, rank a row, gate a calculation, or enable a send.',
+      'panel-note'));
+    review.append(calibration);
+
+    const candidates = make('article', undefined, 'panel');
+    const head = make('div', undefined, 'panel-head');
+    const heading = make('div');
+    heading.append(make('p', 'Executable bid · one contract · 14 / 30 / 45 DTE', 'kicker'),
+      make('h3', 'Calculated option rows'));
+    const asOf = make('span', 'No completed review', 'as-of'); asOf.dataset.reviewAsOf = '';
+    head.append(heading, asOf); candidates.append(head);
+    const toolbar = make('div', undefined, 'review-toolbar');
+    [['all', 'All rows'], ['pass', 'No reference flags'], ['block', 'Reference flags']].forEach(([key, label], index) => {
+      const chip = make('button', label, 'chip' + (index === 0 ? ' active' : ''));
+      chip.type = 'button'; chip.dataset.reviewFilter = key; toolbar.append(chip);
+    });
+    toolbar.append(make('span', 'Ranked only within the same structure and expiration.', 'review-toolbar-note'));
+    candidates.append(toolbar);
+    const candidateWrap = make('div', undefined, 'table-wrap');
+    const candidateTable = make('table', undefined, 'review-table');
+    const candidateHead = make('thead'); const candidateHeader = make('tr');
+      ['Rank', 'Symbol', 'Structure', 'Expiry', 'DTE', 'Strike', 'Bid', 'Net credit',
+      'PRIMARY RAW NEV', 'MC SE', 'P(finish ITM)', 'CVaR 95', 'VRP', 'Reference']
+      .forEach(label => candidateHeader.append(make('th', label)));
+    candidateHead.append(candidateHeader);
+    const candidateBody = make('tbody'); candidateBody.dataset.reviewRows = '';
+    candidateTable.append(candidateHead, candidateBody); candidateWrap.append(candidateTable);
+    candidates.append(candidateWrap); review.append(candidates);
+
+    const symbols = make('article', undefined, 'panel');
+    const symbolHead = make('div', undefined, 'panel-head');
+    const symbolTitle = make('div');
+    symbolTitle.append(make('p', 'Truth failures stay local to each ticker', 'kicker'),
+      make('h3', 'Per-symbol outcomes'));
+    symbolHead.append(symbolTitle, make('span', 'A weak symbol cannot erase its peers', 'as-of'));
+    symbols.append(symbolHead);
+    const symbolWrap = make('div', undefined, 'table-wrap');
+    const symbolTable = make('table', undefined, 'review-symbol-table');
+    const symbolTableHead = make('thead'); const symbolHeader = make('tr');
+    ['Symbol', 'State', 'Stage', 'Rows', 'History', 'Named reason'].forEach(label => symbolHeader.append(make('th', label)));
+    symbolTableHead.append(symbolHeader);
+    const symbolBody = make('tbody'); symbolBody.dataset.reviewSymbols = '';
+    symbolTable.append(symbolTableHead, symbolBody); symbolWrap.append(symbolTable);
+    symbols.append(symbolWrap); review.append(symbols);
+
+    const explain = make('div', undefined, 'review-explainer');
+    [
+      ['What this page answers', 'What one-contract covered-call and cash-secured-put economics look like now. It does not approve, size, or transmit a trade.'],
+      ['Headline math', 'Net executable bid credit minus the present value of modeled option liability. PRIMARY is the centered five-day block bootstrap; Monte Carlo error is printed beside it.'],
+      ['What reference flags mean', 'A reference flag compares the row with registered limits. It never blocks calculation, hides a row, selects a trade, or creates an order.'],
+    ].forEach(([title, copy]) => { const card = make('article'); card.append(make('strong', title), make('p', copy)); explain.append(card); });
+    review.append(explain, make('pre', 'Ready. No order route exists on this page.', 'portfolio-review-output'));
+    opportunitiesView.append(review);
+  }
+
+  function removeLegacyOverviewOpportunities() {
+    qa('#overview .table-panel').forEach(panel => {
+      const heading = q('.panel-head h3', panel);
+      if (heading?.textContent.trim() === 'Top opportunities') panel.remove();
+    });
   }
 
   function consolidateDecisionsIntoSystem() {
@@ -2507,6 +3292,10 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   function renderRows(tbody, rows, cells) {
+    // U2 replaces the legacy opportunity table with Portfolio Review.  An
+    // optional/removed panel must never prevent the operational Overview
+    // (including live custody positions) from rendering.
+    if (!tbody) return;
     clear(tbody);
     if (!rows.length) {
       const row = make('tr'); const cell = make('td', 'No current candidates. The system remains in NO TRADE until every truth and risk gate passes.');
@@ -2559,14 +3348,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   function resetCspView() {
-    calculatorState.cspCycleId = null; calculatorState.cspRequestId = null;
+    calculatorState.cspSymbol = null; calculatorState.cspRequestId = null;
     const results = q('[data-vsim="csp-results"]'); if (results) results.hidden = true;
-    const recommendation = q('[data-vsim="csp-recommendation"]'); if (recommendation) recommendation.hidden = true;
     const candidates = q('[data-vsim="csp-candidate-panel"]'); if (candidates) candidates.hidden = true;
     clear(q('[data-vsim="csp-candidates"]'));
-    text(q('[data-vsim="csp-outcome"]'), 'Ready for a fresh calculation');
-    text(q('[data-vsim="csp-badge"]'), 'READY');
-    text(q('[data-vsim="csp-reason"]'), 'Uses fresh market data, unborrowed cash, assignment-notional concentration, and constitutional portfolio limits.');
+    text(q('[data-vsim="csp-outcome"]'), 'Enter one ticker for transparent put math');
+    text(q('[data-vsim="csp-badge"]'), 'MATH ONLY');
+    text(q('[data-vsim="csp-reason"]'), 'Every put row with a fresh executable bid is shown. No universe, ranking, Governor, portfolio gate, recommendation, or order route.');
   }
 
   function setCalculatorMode(mode) {
@@ -2784,14 +3572,28 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         make('span', flag.code, 'cc-life-flag' + (flag.code === 'NOMINAL' ? ' nominal' : ''))));
       else badges.append(make('span', result && result.error || 'CALCULATOR_UNAVAILABLE', 'cc-life-flag'));
       head.append(title, badges); card.append(head);
+      const choiceShell = make('div', undefined, 'cc-choice-shell');
+      const choiceButton = make('button', 'COMPARE LIVE CHOICES', 'cc-directive');
+      choiceButton.type = 'button'; choiceButton.dataset.lifecycleChoiceOption = item.option_symbol;
+      choiceButton.setAttribute('aria-label', 'Compare HOLD, CLOSE, and ROLL for ' + item.option_symbol);
+      const choiceResult = make('div', undefined, 'cc-choice-result');
+      choiceResult.hidden = true; choiceResult.dataset.lifecycleChoiceResult = item.option_symbol;
+      choiceShell.append(choiceButton, make('p', 'Read-only option-overlay comparison. Requires current executable quotes during regular trading hours; no row is selected or transmitted.'), choiceResult);
       if (!result || !result.ok) {
-        card.append(make('p', 'Exact lifecycle economics unavailable: ' + (result && result.error || 'live inputs incomplete') + '. No fee or market value was guessed.', 'cc-life-foot'));
+        card.append(make('p', 'Exact lifecycle economics unavailable: ' + (result && result.error || 'live inputs incomplete') + '. No fee or market value was guessed.', 'cc-life-foot'), choiceShell);
         lifecycleRoot.append(card); return;
       }
       const trade = result.current_trade || {}; const riskNeutral = result.risk_neutral || {}; const paths = result.paths || {};
       const distance = result.distance_to_strike || {}; const basisDistance = result.strike_vs_share_basis || {};
-      const rawBrokerTheta = present(trade.broker_long_theta_per_contract_per_day)
-        ? String(trade.broker_long_theta_per_contract_per_day) : 'UNAVAILABLE';
+      const rawBrokerTheta = present(trade.broker_long_theta_per_share_per_calendar_day)
+        ? String(trade.broker_long_theta_per_share_per_calendar_day) : 'UNAVAILABLE';
+      const thetaProof = present(trade.broker_long_theta_per_share_per_calendar_day)
+        ? 'θ ' + moneyExact(Math.abs(Number(trade.broker_long_theta_per_share_per_calendar_day)))
+          + '/share/day · ×' + number(trade.broker_theta_equity_multiplier)
+          + ' × ' + number(trade.broker_theta_contracts)
+          + ' = ' + moneyExact(trade.broker_short_theta_per_day) + '/day · '
+          + (result.classification.current ? 'CURRENT ' : 'STALE ') + when(result.quote && result.quote.asof)
+        : 'Schwab theta unavailable';
       const metrics = make('div', undefined, 'cc-life-metrics');
       [
         ['RN expire OTM', percent(riskNeutral.probability_expire_otm), 'European · excludes early exercise'],
@@ -2800,7 +3602,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         ['Liability left', percent(trade.total_liability_pct_of_original_gross_credit), 'close outlay / original gross credit'],
         ['Locked option P&L', moneyExact(trade.profit_locked_if_call_closed_now), 'net entry credit − close outlay'],
         ['Extrinsic left', percent(trade.extrinsic_pct_of_original_gross_credit), moneyExact(trade.executable_extrinsic_total)],
-        ['Theta / day', moneyExact(trade.broker_short_theta_per_day), 'Schwab $/contract/day × contracts; no ×100'],
+        ['Theta / day', moneyExact(trade.broker_short_theta_per_day), thetaProof],
         ['Adjusted basis', moneyExact(trade.adjusted_share_basis), 'share basis − net credit/share'],
       ].forEach(metric => { const node = make('div'); node.append(make('span', metric[0]), make('strong', metric[1]), make('small', metric[2])); metrics.append(node); });
       const pathGrid = make('div', undefined, 'cc-life-paths');
@@ -2814,20 +3616,106 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         + ' Threshold: ' + flag.threshold + '.').join(' ');
       const gaps = (result.classification.data_gaps || []).length
         ? ' Data gaps: ' + result.classification.data_gaps.join(', ') + '.' : '';
-      card.append(metrics, pathGrid, make('p', flagFacts + ' Sell/wait crossover: '
-        + moneyExact(paths.sell_shares_wait_on_call && paths.sell_shares_wait_on_call.crossover_share_price)
-        + '. Opening fees: ' + moneyExact(result.entry_evidence && result.entry_evidence.opening_fees)
+      const freshnessFact = result.classification.current
+        ? ' Current quote verified; deterministic flags are current.'
+        : ' Quote is stale; economic values are historical context and no current lifecycle condition is classified.';
+      card.append(metrics, pathGrid, make('p', flagFacts + freshnessFact
+        + ' Selling shares while leaving the call open is prohibited because it creates a naked short call.'
+        + ' Opening fees: ' + moneyExact(result.entry_evidence && result.entry_evidence.opening_fees)
         + ' from ' + (result.entry_evidence && result.entry_evidence.source || 'UNVERIFIED')
         + '. Configured close fee: ' + moneyExact(result.current_trade && result.current_trade.close_fees)
         + '. Share basis: ' + moneyExact(result.share_basis) + '; strike minus basis: '
         + moneyExact(basisDistance.dollars_per_share) + ' (' + percent(basisDistance.pct_of_share_basis) + ')'
         + '. RN inputs: r ' + percent(riskNeutral.rate) + ' (' + (riskNeutral.rate_source || 'UNLABELED')
         + '), q ' + percent(riskNeutral.dividend_yield) + ' (' + (riskNeutral.dividend_yield_source || 'UNLABELED') + ')'
-        + '. Raw Schwab theta: ' + rawBrokerTheta + ' $/contract/day × '
-        + number(trade.broker_theta_contracts) + ' contracts; no equity multiplier'
-        + '. CLOSE · ROLL · EXIT: NO_TRUTH.' + gaps, 'cc-life-foot'));
+        + '. Raw Schwab theta: ' + rawBrokerTheta + ' $/share/calendar-day × '
+        + number(trade.broker_theta_equity_multiplier) + ' shares/contract × '
+        + number(trade.broker_theta_contracts) + ' contracts'
+        + '. CLOSE · ROLL · EXIT recommendation: NO_TRUTH. U4 compares option-overlay math only; it never chooses an action.' + gaps, 'cc-life-foot'), choiceShell);
       lifecycleRoot.append(card);
     });
+  }
+
+  function renderLifecycleChoices(root, result) {
+    clear(root); if (!root) return;
+    root.hidden = false;
+    if (!result || !result.ok) {
+      const status = make('div', undefined, 'cc-choice-status');
+      status.append(make('strong', 'NOT EVALUATED'), make('span', result?.reason_code || 'UNAVAILABLE'));
+      root.append(status, make('p', result?.reason || 'Fresh lifecycle comparison is unavailable.', 'cc-choice-foot'));
+      return;
+    }
+    const status = make('div', undefined, 'cc-choice-status');
+    status.append(make('strong', 'COMMON-CLOCK CHOICE TABLE · READ ONLY'),
+      make('span', when(result.valuation_at) + ' · snapshot skew '
+        + (present(result.quote_skew_ms) ? (Number(result.quote_skew_ms) / 1000).toFixed(1) + 's' : '—')
+        + ' · PRIMARY ' + String(result.primary_model || '').toUpperCase()
+        + ' · MODELED · PROVISIONAL · U4 calibration n=0 · ' + number(result.sample_count) + ' paths · r '
+        + percent(result.rate) + ' (' + (result.rate_source || 'UNLABELED') + ') · roll targets '
+        + (result.target_dtes || []).join('/') + ' DTE'));
+    root.append(status);
+    if ((result.global_warnings || []).length) root.append(make('p',
+      'GLOBAL LIMITATIONS · ' + result.global_warnings.join(' · '), 'cc-choice-foot choice-warning'));
+    const wrap = make('div', undefined, 'table-wrap');
+    const table = make('table', undefined, 'cc-choice-table');
+    const labels = ['Path','Expiry / clock','Strike','Executable prices','Cash now','Liability PV','Path NEV₀ ± SE','vs HOLD ± SE','PRIMARY finish ITM','Observed','Warnings'];
+    const thead = make('thead'); const header = make('tr'); labels.forEach(label => header.append(make('th', label))); thead.append(header);
+    const tbody = make('tbody');
+    const rows = [result.hold, result.close, ...(result.rolls || [])];
+    rows.forEach(choice => {
+      const row = make('tr');
+      const values = [
+        choice.path,
+        (choice.expiration || '—') + ' · ' + number(choice.dte) + ' DTE · T '
+          + (present(choice.time_to_expiry_years) ? Number(choice.time_to_expiry_years).toFixed(6) : '—')
+          + 'y · DF ' + (present(choice.discount_factor) ? Number(choice.discount_factor).toFixed(6) : '—'),
+        moneyExact(choice.strike),
+        choice.path === 'CLOSE' ? 'ASK ' + moneyExact(choice.executable_ask_per_share)
+          : choice.path === 'ROLL' ? 'close ASK ' + moneyExact(result.close.executable_ask_per_share)
+            + ' · open BID ' + moneyExact(choice.executable_bid_per_share) : '—',
+        moneyExact(choice.executable_cash_now_0),
+        moneyExact(choice.expected_call_liability_pv_0),
+        moneyExact(choice.path_nev_0) + ' ± ' + moneyExact(choice.path_monte_carlo_standard_error),
+        moneyExact(choice.versus_hold_0) + ' ± ' + moneyExact(choice.versus_hold_monte_carlo_standard_error),
+        present(choice.primary_p_finish_itm) ? percent(choice.primary_p_finish_itm) : '—',
+        choice.quote_asof ? when(choice.quote_asof) : '—',
+        (choice.warnings || []).join(' · ') || 'NONE',
+      ];
+      values.forEach((value, index) => {
+        const cell = make('td', value);
+        if (index === 0) cell.className = 'choice-path';
+        if (index === 10) cell.className = 'choice-warning';
+        row.append(cell);
+      });
+      tbody.append(row);
+    });
+    table.append(thead, tbody); wrap.append(table); root.append(wrap);
+    if (!(result.rolls || []).length) root.append(make('p',
+      'No later configured roll expiry has an executable opening bid in this snapshot.', 'cc-choice-foot'));
+    if ((result.unavailable_rolls || []).length) root.append(make('p',
+      'Unavailable listed rows: ' + result.unavailable_rolls.map(row =>
+        (row.symbol || 'UNKNOWN CONTRACT') + ' — ' + row.reason_code).join(' · '), 'cc-choice-foot'));
+    const cost = result.cost_assumptions || {};
+    root.append(make('p', 'HOLD_NEV₀ = −PV(expected old-call payoff). CLOSE_NEV₀ = −(current ask × covered shares + close fees). ROLL_NEV₀ = CLOSE_NEV₀ + new executable net credit − PV(expected new-call payoff). Shares and original credit are common/sunk and excluded. Costs per contract: close commission '
+      + moneyExact(cost.close_commission_per_contract) + ' + exchange ' + moneyExact(cost.close_exchange_fee_per_contract)
+      + '; open commission ' + moneyExact(cost.open_commission_per_contract) + ' + exchange '
+      + moneyExact(cost.open_exchange_fee_per_contract) + ' (' + (cost.source || 'UNLABELED')
+      + '). PRIMARY finish ITM is a terminal bootstrap probability, not an American assignment probability. American early exercise is not modeled; taxes are omitted without a verified input. This table does not recommend or transmit a trade.', 'cc-choice-foot'));
+  }
+
+  async function runLifecycleChoices(button) {
+    const option = button?.dataset.lifecycleChoiceOption;
+    const root = q('[data-lifecycle-choice-result="' + option + '"]');
+    if (!option || !root) return;
+    button.disabled = true; button.textContent = 'CALCULATING…';
+    try {
+      const result = await api('/api/covered-call/lifecycle-choices?option=' + encodeURIComponent(option));
+      renderLifecycleChoices(root, result);
+    } catch (error) {
+      renderLifecycleChoices(root, { ok: false, reason_code: 'REQUEST_FAILED', reason: error.message });
+    } finally {
+      button.disabled = false; button.textContent = 'COMPARE LIVE CHOICES';
+    }
   }
 
   function activateView(id) {
@@ -2837,16 +3725,23 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   function renderCoveredCall(result) {
-    const ready = Boolean(result && result.ok && result.selected);
+    const display = coveredCallDisplayState(result);
+    const ready = display.ready;
     const results = q('[data-vsim="cc-results"]'); if (results) results.hidden = false;
     const status = q('[data-vsim="cc-status"]');
     if (status) status.dataset.state = ready ? 'ready' : 'blocked';
     text(q('[data-vsim="cc-outcome"]'), ready
       ? 'SELL CC candidate identified for ' + result.symbol
-      : 'NO ELIGIBLE COVERED CALL' + (result && result.symbol ? ' · ' + result.symbol : ''));
-    text(q('[data-vsim="cc-badge"]'), ready ? 'READY' : 'BLOCKED');
-    text(q('[data-vsim="cc-reason"]'), result && result.reason
-      ? result.reason : 'Calculation is unavailable. No covered call should be initiated.');
+      : (display.outcome === 'NOT_EVALUATED' ? 'NOT EVALUATED' : 'CALCULATED · NO CANDIDATE')
+        + (result && result.symbol ? ' · ' + result.symbol : ''));
+    text(q('[data-vsim="cc-badge"]'), ready ? 'READY'
+      : display.outcome === 'NOT_EVALUATED' ? 'SESSION CLOSED' : 'NO CANDIDATE');
+    const forecastFact = result && result.forecast_persistence
+      ? ' Forecast ledger: ' + result.forecast_persistence.status + ' · '
+        + number(result.forecast_persistence.rows) + ' row(s).'
+      : '';
+    text(q('[data-vsim="cc-reason"]'), (result && result.reason
+      ? result.reason : 'Calculation is unavailable. No covered call should be initiated.') + forecastFact);
     text(q('[data-vsim="cc-asof"]'), result && result.asof ? 'Quotes as of ' + when(result.asof) : 'No valid live quote');
     const recommendation = q('[data-vsim="cc-recommendation"]');
     if (recommendation) recommendation.hidden = !ready;
@@ -2902,6 +3797,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       minimum_strike_exclusive: result && result.minimum_strike_exclusive,
       rejected: result && result.rejected, rejection_codes: result && result.rejection_codes,
       forecast: result && result.forecast, method: result && result.method,
+      calibration: result && result.calibration, settlement: result && result.settlement,
       diagnostics: result && result.diagnostics, source: result && result.source,
       execution: result && result.execution,
     }, null, 2));
@@ -2928,118 +3824,98 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     finally { if (button) button.disabled = false; }
   }
 
-  function renderCashSecuredPuts(cycle) {
-    const rows = ((cycle && cycle.cspOpportunities) || (cycle && cycle.opportunities) || [])
-      .filter(item => item.structure === 'CSP' || item.structure === 'CASH_SECURED_PUT')
-      .map((item, index) => ({ ...item, cspRank: index + 1 }));
-    const best = rows.find(item => item.governorApproved) || null;
-    const reasonCodes = [cycle && cycle.reasonCode, ...rows.flatMap(item => item.governorReasonCodes || [])]
-      .filter(Boolean).map(value => String(value).toUpperCase());
-    const failed = cycle && (cycle.outcome === 'REFUSED' || cycle.state === 'QUARANTINED');
-    const unavailable = failed || reasonCodes.some(code => /TRUTH|DATA|QUOTE|CHAIN|SESSION|EVIDENCE|PERSIST|WORKFLOW|RECONCIL|UNAVAILABLE/u.test(code));
-    const governorDeclined = rows.some(item => item.governorStatus === 'DECLINED');
-    const assignmentUnfunded = rows.find(item => (item.governorReasonCodes || [])
-      .includes('SIMULTANEOUS_ASSIGNMENT_UNFUNDED'));
-    const verdict = best ? 'ELIGIBLE CSP CANDIDATE'
-      : unavailable ? 'NO DATA' : governorDeclined ? 'NO CAPITAL' : 'NO EDGE';
+  function cspModelNev(row, name) {
+    const model = row.models && row.models[name];
+    return model && present(model.nev) && present(model.monte_carlo_standard_error)
+      ? moneyExact(model.nev) + ' ± ' + moneyExact(model.monte_carlo_standard_error)
+      : 'UNAVAILABLE';
+  }
+
+  function cspCashValue(row, key) {
+    const value = row && row.one_contract_economics
+      ? row.one_contract_economics[key] : null;
+    return present(value) ? moneyExact(value) : 'UNAVAILABLE';
+  }
+
+  function renderCashSecuredPuts(result) {
+    const rows = result && result.ok && Array.isArray(result.rows) ? result.rows : [];
+    const calibration = result?.calibration || {};
+    const calibrationN = calibration.n || {};
     const results = q('[data-vsim="csp-results"]'); if (results) results.hidden = false;
-    calculatorState.cspCycleId = cycle && cycle.cycleId || null;
     const status = q('[data-vsim="csp-status"]');
-    if (status) status.dataset.state = best ? 'ready' : 'blocked';
-    text(q('[data-vsim="csp-outcome"]'), best ? verdict + ' · ' + best.underlying : verdict);
-    text(q('[data-vsim="csp-badge"]'), best ? 'READY' : 'BLOCKED');
-    text(q('[data-vsim="csp-reason"]'), best
-      ? 'The candidate below cleared current market-data, expectancy, liquidity, cash-security, and portfolio gates.'
-      : unavailable && cycle && cycle.reason
-        ? cycle.reason + ' This is an infrastructure or input failure, not an investment rejection.'
-        : assignmentUnfunded && assignmentUnfunded.assignmentFunding
-          ? 'All open short puts plus this proposal require '
-            + moneyExact(assignmentUnfunded.assignmentFunding.totalObligation)
-            + ' at simultaneous assignment, but settled unborrowed cash is '
-            + moneyExact(assignmentUnfunded.assignmentFunding.settledUnborrowedCash)
-            + '. Schwab buying power and margin capacity are excluded.'
-        : governorDeclined
-          ? 'Underwriting found candidate structures, but the Portfolio Governor approved zero contracts. Cash remains uncommitted.'
-          : cycle && cycle.reason ? cycle.reason
-        : rows[0] && rows[0].governorReasons && rows[0].governorReasons.length
-          ? rows[0].governorReasons.join(' ')
-          : 'Fresh candidates were evaluated, but none produced positive NEV after the full collateral hurdle. Cash remains preferred.');
-    text(q('[data-vsim="csp-asof"]'), cycle && cycle.at ? 'Calculated ' + when(cycle.at) : 'No completed calculation');
-    const recommendation = q('[data-vsim="csp-recommendation"]');
-    if (recommendation) recommendation.hidden = !best;
-    if (best) {
-      const contracts = Number(best.approvedContracts || 0);
-      text(q('[data-vsim="csp-ticker"]'), best.underlying);
-      text(q('[data-vsim="csp-expiry-strike"]'), best.expiration + ' · ' + moneyExact(best.shortStrike) + ' put');
-      text(q('[data-vsim="csp-credit"]'), moneyExact(best.sizedEntryCredit));
-      text(q('[data-vsim="csp-cash"]'), moneyExact(best.sizedBuyingPower));
-      text(q('[data-vsim="csp-breakeven"]'), moneyExact(best.breakeven));
-      text(q('[data-vsim="csp-nev-day"]'), moneyExact(best.nevPerDay));
-      text(q('[data-vsim="csp-wheel-ready"]'), percent(best.wheelCompatibleFraction));
-      text(q('[data-vsim="csp-pop"]'), percent(best.probabilityOfProfitModel));
-      text(q('[data-vsim="csp-impact"]'), 'Decision impact: selling ' + number(contracts)
-        + ' cash-secured put contract' + (contracts === 1 ? '' : 's') + ' would reserve '
-        + moneyExact(best.sizedBuyingPower) + ' through ' + best.expiration + ' and accept assignment at '
-        + moneyExact(best.shortStrike) + ' per share. User action is required outside VSIM; this screen cannot place the trade.');
-    }
+    if (status) status.dataset.state = result && result.ok ? 'ready' : 'unavailable';
+    text(q('[data-vsim="csp-outcome"]'), result && result.ok
+      ? 'CALCULATED · ' + result.symbol : 'MATH UNAVAILABLE');
+    text(q('[data-vsim="csp-badge"]'), result && result.ok ? 'CALCULATED' : 'UNAVAILABLE');
+    const forecastFact = result && result.forecast_persistence
+      ? ' Forecast ledger: ' + result.forecast_persistence.status + ' · '
+        + number(result.forecast_persistence.rows) + ' row(s).'
+      : '';
+    text(q('[data-vsim="csp-reason"]'), (result && result.reason
+      ? result.reason : 'Fresh put math could not be calculated. No stale value was substituted.') + forecastFact);
+    text(q('[data-vsim="csp-ticker"]'), result && result.symbol || '—');
+    setValue('csp-spot', result && result.spot, moneyExact);
+    text(q('[data-vsim="csp-row-count"]'), result && result.ok ? number(result.row_count) : '—');
+    text(q('[data-vsim="csp-history"]'), result && result.ok ? number(result.history_sessions) : '—');
+    text(q('[data-vsim="csp-rate"]'), result && result.ok ? percent(result.rate_assumptions.risk_free_rate) : '—');
+    text(q('[data-vsim="csp-yield"]'), result && result.ok ? percent(result.rate_assumptions.continuous_dividend_yield) : '—');
+    text(q('[data-vsim="csp-samples"]'), result && result.ok ? number(result.sample_count_per_member) : '—');
+    text(q('[data-vsim="csp-calibration"]'), result && result.ok
+      ? 'MODELED · ' + (calibration.status || 'UNCALIBRATED')
+        + ' · n(symbol×expiry)=' + number(calibrationN.unique_symbol_expiry || 0)
+      : 'MODELED · UNCALIBRATED · n(symbol×expiry)=0');
+    text(q('[data-vsim="csp-asof"]'), result && result.asof ? 'Calculated ' + when(result.asof) : 'No live calculation');
     const candidatePanel = q('[data-vsim="csp-candidate-panel"]');
     if (candidatePanel) candidatePanel.hidden = rows.length === 0;
     if (rows.length) fillTable(q('[data-vsim="csp-candidates"]'), rows, [
-      item => number(item.cspRank), item => item.underlying || '—',
-      item => (item.expiration || '—') + ' (' + number(item.dte) + ')', item => moneyExact(item.shortStrike),
-      item => moneyExact(item.nevPerDay), item => item.governorApproved ? 'ELIGIBLE' : item.governorStatus || 'DECLINED',
+      item => (item.expiration || '—') + ' (' + number(item.dte) + ')',
+      item => moneyExact(item.strike),
+      item => moneyExact(item.quote.bid) + ' / ' + (present(item.quote.ask) ? moneyExact(item.quote.ask) : 'UNAVAILABLE'),
+      item => moneyExact(item.one_contract_economics.net_credit),
+      item => moneyExact(item.one_contract_economics.gross_obligation),
+      item => moneyExact(item.one_contract_economics.net_tied_cash),
+      item => moneyExact(item.one_contract_economics.assigned_basis),
+      item => present(item.market_math.risk_neutral_finish_itm_european)
+        ? percent(item.market_math.risk_neutral_finish_itm_european) : 'UNAVAILABLE',
+      item => present(item.market_math.expiry_level_forecast_vol)
+        ? percent(item.market_math.expiry_level_forecast_vol) : 'UNAVAILABLE',
+      item => cspModelNev(item, 'lognormal'),
+      item => cspModelNev(item, 'studentT'),
+      item => cspModelNev(item, 'jump'),
+      item => cspModelNev(item, 'bootstrap'),
+      item => cspModelNev(item, 'volatilityStress'),
+      item => cspCashValue(item, 'cash_carry_cost_0'),
+      item => present(item.headline_models.primary_cash_adj_nev_0)
+        ? moneyExact(item.headline_models.primary_cash_adj_nev_0) : 'UNAVAILABLE',
+      item => item.warnings.length ? item.warnings.join(' · ') : 'NONE',
     ], '');
     else clear(q('[data-vsim="csp-candidates"]'));
-    text(q('[data-vsim="csp-diagnostics"]'), JSON.stringify({
-      cycle_id: cycle && cycle.cycleId, outcome: cycle && cycle.outcome,
-      state: cycle && cycle.state, reason_code: cycle && cycle.reasonCode,
-      reason: cycle && cycle.reason, candidates_returned: rows.length,
-      verdict, governor_rejections: rows.map(item => ({ underlying: item.underlying,
-        strike: item.shortStrike, reason_codes: item.governorReasonCodes,
-        reasons: item.governorReasons, sizing: item.governorSizing,
-        assignment_funding: item.assignmentFunding,
-        wheel_compatibility: item.wheelCompatibility })),
-      authority: cycle && cycle.authority, evidence: cycle && cycle.evidence,
-    }, null, 2));
-  }
-
-  async function waitForCompletedCycle(cycleId) {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      const status = await api('/api/status');
-      if (status.latestCycle && status.latestCycle.cycleId === cycleId
-        && status.latestCycle.state !== 'TRIGGERED') return status.latestCycle;
-    }
-    return null;
+    text(q('[data-vsim="csp-diagnostics"]'), JSON.stringify(result, null, 2));
   }
 
   async function runCashSecuredPut(button) {
-    setCalculatorMode('cash-secured-put'); resetCspView();
-    const requestId = crypto.randomUUID(); calculatorState.cspRequestId = requestId;
+    setCalculatorMode('cash-secured-put');
+    const symbolInput = q('[data-csp-symbol]');
+    const symbol = String(symbolInput && symbolInput.value || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9.]{0,9}$/u.test(symbol)) {
+      renderCashSecuredPuts({ ok: false, reason_code: 'SYMBOL_INVALID', reason: 'Enter one valid ticker symbol.' });
+      if (symbolInput) symbolInput.focus();
+      return;
+    }
+    const requestId = crypto.randomUUID();
+    calculatorState.cspSymbol = symbol; calculatorState.cspRequestId = requestId;
     if (button) button.disabled = true;
-    text(q('[data-vsim="csp-outcome"]'), 'Calculating cash-secured puts…');
+    text(q('[data-vsim="csp-outcome"]'), 'Calculating ' + symbol + '…');
     text(q('[data-vsim="csp-badge"]'), 'RUNNING');
-    text(q('[data-vsim="csp-reason"]'), 'Verifying account cash, market session, live chains, tail risk, liquidity, and portfolio limits.');
+    text(q('[data-vsim="csp-reason"]'), 'Reading one live put chain and calculating every visible row. No account or Governor state is being read.');
     try {
-      const trigger = await api('/api/cash-secured-put/calculate', { method: 'POST', headers: {
-        'content-type': 'application/json', 'idempotency-key': crypto.randomUUID(),
-      }, body: '{}' });
+      const params = new URLSearchParams({ symbol });
+      const result = await api('/api/cash-secured-put/calculate?' + params.toString());
       if (calculatorState.mode !== 'cash-secured-put' || calculatorState.cspRequestId !== requestId) return;
-      if (!trigger.ok) {
-        renderCashSecuredPuts({ outcome: 'REFUSED', state: 'REFUSED', reasonCode: trigger.error && trigger.error.code,
-          reason: trigger.error && trigger.error.message }); return;
-      }
-      const completed = await waitForCompletedCycle(trigger.cycle_id);
-      if (calculatorState.mode !== 'cash-secured-put' || calculatorState.cspRequestId !== requestId) return;
-      if (completed) { currentStatus.latestCycle = completed; renderCashSecuredPuts(completed); }
-      else {
-        text(q('[data-vsim="csp-outcome"]'), 'CSP CALCULATION STILL RUNNING');
-        text(q('[data-vsim="csp-badge"]'), 'IN PROGRESS');
-        text(q('[data-vsim="csp-reason"]'), 'The protected workflow has not finished yet. Its result will appear automatically on the next dashboard refresh.');
-      }
+      renderCashSecuredPuts(result);
     } catch (error) {
       if (calculatorState.mode === 'cash-secured-put' && calculatorState.cspRequestId === requestId) {
-        renderCashSecuredPuts({ outcome: 'REFUSED', state: 'REFUSED', reasonCode: 'CALCULATION_REQUEST_FAILED', reason: error.message });
+        renderCashSecuredPuts({ ok: false, symbol, reason_code: 'CALCULATION_REQUEST_FAILED', reason: error.message });
       }
     } finally { if (button) button.disabled = false; }
   }
@@ -3348,17 +4224,6 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     }
     text(q('#overview .snapshot strong'), when(custody.observedAt));
 
-    const opportunities = cycle.opportunities || [];
-    const topBody = q('#underwrite [data-underwrite-pane="scan"] .top-opportunities-panel tbody');
-    renderRows(topBody, opportunities.slice(0, 10), [
-      (_item, index) => String(index + 1).padStart(2, '0'),
-      item => item.underlying || '—', item => structure(item.structure),
-      item => [item.shortStrike, item.longStrike].filter(present).join(' / ') || '—',
-      item => number(item.dte), item => money(item.nev), item => percent(item.raroc),
-      item => money(item.economicCapital), item => item.admissible ? 'ELIGIBLE' : (item.rejection || 'DECLINED'),
-    ]);
-    text(q('#underwrite [data-underwrite-pane="scan"] .top-opportunities-panel .panel-note'), 'Live ranked shadow candidates. Values are generated from current Schwab option chains; no order can be submitted.');
-
     const positionPanel = q('#overview .positions-empty');
     if (positionPanel) {
       clear(positionPanel);
@@ -3424,27 +4289,113 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
 
   function renderOpportunities(status) {
     const cycle = status.latestCycle || {};
-    const rows = cycle.opportunities || [];
-    const chips = qa('#underwrite [data-underwrite-pane="scan"] .chip');
-    if (chips[0]) text(chips[0], 'Current candidates ' + rows.length);
-    if (chips[1]) text(chips[1], 'Eligible ' + rows.filter(row => row.admissible).length);
-    if (chips[2]) text(chips[2], 'Declined ' + rows.filter(row => !row.admissible).length);
-    if (chips[3]) text(chips[3], cycle.outcome || 'NO CYCLE');
-    text(q('#underwrite [data-underwrite-pane="scan"] .as-of'), cycle.at ? ('As of ' + when(cycle.at)) : 'No completed cycle');
-    renderRows(q('#underwrite [data-underwrite-pane="scan"] .detailed tbody'), rows, [
-      (_item, index) => String(index + 1).padStart(2, '0'), item => item.underlying || '—',
-      item => structure(item.structure), () => '—', () => '—', () => '—',
-      item => money(item.cvar), () => '—', item => money(item.nev), item => percent(item.raroc),
-      item => item.admissible ? 'ELIGIBLE' : (item.rejection || 'DECLINED'),
-    ]);
-    const detail = q('#underwrite [data-underwrite-pane="scan"] .candidate-detail');
-    if (detail) {
-      clear(detail);
-      const panel = make('article', undefined, 'panel');
-      panel.append(make('p', 'Current shadow result', 'kicker'), make('h3', cycle.outcome || 'No live cycle yet'), make('p', cycle.reason || 'Run a verified shadow scan. Missing values are intentionally shown as unavailable instead of synthetic estimates.'));
-      const actions = make('div', undefined, 'operator-actions');
-      const run = make('button', 'Run live shadow scan', 'chip active'); run.dataset.action = 'cycle'; actions.append(run); panel.append(actions); detail.append(panel);
+    const review = cycle.portfolioReview || null;
+    const calibration = review?.calibration || {};
+    const calibrationN = calibration.n || {};
+    const brier = calibration.brier || {};
+    const counts = review?.counts || {};
+    const rows = Array.isArray(review?.rows) ? review.rows : [];
+    const outcomes = Array.isArray(review?.per_symbol) ? review.per_symbol : [];
+    text(q('[data-review-metric="symbols"]'), review ? number(counts.calculated_symbols || 0) : '—');
+    text(q('[data-review-metric="rows"]'), review ? number(review.row_count || 0) : '—');
+    text(q('[data-review-metric="pass"]'), review ? number(counts.policy_pass_rows || 0) : '—');
+    text(q('[data-review-metric="block"]'), review ? number(counts.policy_block_rows || 0) : '—');
+    text(q('[data-review-as-of]'), review?.at ? ('As of ' + when(review.at)) : 'No U2 review has completed');
+    text(q('[data-review-calibration-status]'), calibration.status || 'UNCALIBRATED');
+    const calibrationValue = (key, value, formatter = number) => {
+      text(q('[data-review-calibration="' + key + '"]'), review ? formatter(value) : '—');
+    };
+    const brierValue = (model) => present(brier[model]?.value)
+      ? Number(brier[model].value).toFixed(4) : 'UNAVAILABLE';
+    calibrationValue('forecastRows', calibrationN.forecast_rows || 0);
+    calibrationValue('contractExpiry', calibrationN.unique_contract_expiry || 0);
+    calibrationValue('symbolExpiry', calibrationN.unique_symbol_expiry || 0);
+    calibrationValue('modelVersion', calibration.model_version
+      ? String(calibration.model_version).slice(0, 12) + '…' : 'UNAVAILABLE', String);
+    const modelVersionNode = q('[data-review-calibration="modelVersion"]');
+    if (modelVersionNode) modelVersionNode.title = calibration.model_version || 'No model hash recorded';
+    calibrationValue('primaryBrier', brierValue('bootstrap'), String);
+    calibrationValue('lognormalBrier', brierValue('lognormal'), String);
+    calibrationValue('studentTBrier', brierValue('studentT'), String);
+    calibrationValue('riskNeutralBrier', brierValue('riskNeutral'), String);
+    calibrationValue('realizedNev', calibration.realized_nev_0?.mean_per_forecast_row,
+      value => present(value) ? moneyExact(value) : 'UNAVAILABLE');
+
+    const state = q('[data-review-state]');
+    if (state) {
+      state.classList.remove('complete', 'refused');
+      const outcome = review?.outcome || 'READY_FOR_FRESH_REVIEW';
+      if (outcome === 'PORTFOLIO_REVIEW_COMPLETE') state.classList.add('complete');
+      else if (outcome === 'PORTFOLIO_REVIEW_REFUSED') state.classList.add('refused');
+      text(q('span', state), outcome.replaceAll('_', ' '));
     }
+
+    qa('[data-review-filter]').forEach(button => button.classList.toggle('active',
+      button.dataset.reviewFilter === portfolioReviewFilter));
+    const filtered = rows.filter(row => portfolioReviewFilter === 'all'
+      || (portfolioReviewFilter === 'pass' && row.policy?.status === 'POLICY_PASS')
+      || (portfolioReviewFilter === 'block' && row.policy?.status === 'POLICY_BLOCK'));
+    const candidateBody = q('[data-review-rows]'); clear(candidateBody);
+    if (!filtered.length) {
+      const empty = make('tr'); const cell = make('td', review
+        ? (rows.length ? 'No rows match this filter.' : 'The review completed without a calculable option row. See the per-symbol outcomes below.')
+        : 'Run a fresh portfolio review to replace the legacy scan with current, read-only economics.', 'review-empty');
+      cell.colSpan = 14; empty.append(cell); candidateBody?.append(empty);
+    } else filtered.forEach(item => {
+      const tr = make('tr');
+      const policy = item.policy || {};
+      const vrp = item.vrp || {};
+      const values = [
+        String(item.rank_within_structure_and_expiry || '—').padStart(2, '0'),
+        item.underlying || '—', structure(item.structure), item.expiration || '—',
+        number(item.dte), moneyExact(item.strike), moneyExact(item.bid), moneyExact(item.net_credit),
+        moneyExact(item.primary_raw_nev_0), moneyExact(item.primary_standard_error),
+        percent(item.primary_p_finish_itm), moneyExact(item.cvar_95),
+        vrp.status === 'PASS' ? ('PASS · ' + number(vrp.ratio) + '×')
+          : vrp.status === 'VRP_FAIL' ? ('FLAG · ' + number(vrp.ratio) + '×') : 'UNAVAILABLE',
+        policy.status === 'POLICY_PASS' ? 'NO FLAGS'
+          : policy.status === 'POLICY_BLOCK' ? 'REFERENCE FLAG' : 'UNAVAILABLE',
+      ];
+      values.forEach((value, index) => {
+        const cell = make('td', value);
+        if (index === 8 && !present(item.primary_raw_nev_0)) cell.className = 'model-unavailable';
+        if (index === 13) {
+          cell.className = policy.status === 'POLICY_PASS' ? 'policy-pass' : 'policy-block';
+          cell.title = (policy.reasons || []).join(' · ') || 'No registered policy exception.';
+        }
+        tr.append(cell);
+      });
+      candidateBody?.append(tr);
+    });
+
+    const symbolBody = q('[data-review-symbols]'); clear(symbolBody);
+    if (!outcomes.length) {
+      const empty = make('tr'); const cell = make('td', 'No per-symbol U2 result exists yet.', 'review-empty');
+      cell.colSpan = 6; empty.append(cell); symbolBody?.append(empty);
+    } else outcomes.forEach(item => {
+      const tr = make('tr');
+      const stateName = String(item.state || 'UNKNOWN');
+      const values = [item.symbol || '—', stateName.replaceAll('_', ' '), item.stage || '—',
+        number(item.candidate_count || 0), present(item.history_sessions) ? number(item.history_sessions) : '—',
+        (item.reason_codes || []).join(', ') || 'NONE'];
+      values.forEach((value, index) => {
+        const cell = make('td', String(value));
+        if (index === 1) cell.className = 'review-symbol-state '
+          + (stateName === 'CALCULATED' ? 'calculated' : stateName === 'NOT_EVALUATED' ? 'not-evaluated' : 'refused');
+        tr.append(cell);
+      });
+      symbolBody?.append(tr);
+    });
+
+    const output = q('.portfolio-review-output');
+    if (output && review) text(output, 'Forecast ledger: '
+      + (cycle.forecastPersistence?.status || 'NOT WRITTEN') + ' · '
+      + number(cycle.forecastPersistence?.rows || 0) + ' row(s) · '
+      + 'settlement ' + (review.settlement?.status || 'NOT RUN') + ' · '
+      + number(review.settlement?.unavailable?.length || 0) + ' unavailable outcome(s) · '
+      + 'PRIMARY ' + (calibration.status || 'UNCALIBRATED')
+      + ' · n(symbol×expiry)=' + number(calibrationN.unique_symbol_expiry || 0)
+      + ' · measurement only · no order route.');
   }
 
   async function renderEvidence(status) {
@@ -3919,7 +4870,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   async function operate(action, button) {
-    const output = q('.operator-output');
+    const output = button?.closest('.portfolio-review')?.querySelector('.portfolio-review-output')
+      || q('.operator-output');
     const reason = (q('.control-reason') && q('.control-reason').value || '').trim();
     const control = (controlAction, confirm) => api('/api/operator/controls', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -3964,6 +4916,28 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         renderLane1EventLedger(ledger, currentStatus);
         if (E3_SPINE_ENABLED) renderE3Spine(await api('/api/e3-spine'));
       } catch (error) { showLaneError('REFRESH failed: ' + error.message); }
+      finally { if (button) button.disabled = false; }
+      return;
+    }
+    if (action === 'cycle') {
+      if (!window.confirm('Run a fresh read-only portfolio review? It cannot place an order.')) return;
+      if (button) button.disabled = true;
+      text(output, 'Starting a fresh portfolio review…');
+      try {
+        const started = await operations.cycle();
+        const cycleId = started && started.cycle_id;
+        if (!cycleId) throw new Error('CYCLE_ID_MISSING');
+        let final = started;
+        const terminal = new Set(['SHADOW_RECORDED', 'REFUSED', 'QUARANTINED', 'COMPLETE', 'FAILED']);
+        for (let attempt = 0; attempt < 120 && !terminal.has(String(final.state)); attempt += 1) {
+          text(output, 'RUNNING · ' + cycleId + ' · waiting for this exact portfolio review');
+          await new Promise(resolve => window.setTimeout(resolve, 1000));
+          final = await api('/api/cycle/' + encodeURIComponent(cycleId));
+        }
+        if (!terminal.has(String(final.state))) throw new Error('CYCLE_RESULT_TIMEOUT');
+        text(output, JSON.stringify(final, null, 2));
+        await refresh();
+      } catch (error) { text(output, 'REFUSED: ' + error.message); }
       finally { if (button) button.disabled = false; }
       return;
     }
@@ -4084,6 +5058,11 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   document.addEventListener('click', event => {
     const underwriteTab = event.target.closest('[data-underwrite-mode]');
     if (underwriteTab) { setUnderwriteMode(underwriteTab.dataset.underwriteMode); return; }
+    const reviewFilter = event.target.closest('[data-review-filter]');
+    if (reviewFilter) {
+      portfolioReviewFilter = reviewFilter.dataset.reviewFilter || 'all';
+      renderOpportunities(currentStatus || {}); return;
+    }
     const performanceFilter = event.target.closest('[data-performance-filter]');
     if (performanceFilter) { setPerformanceFilter(performanceFilter.dataset.performanceFilter, performanceFilter.dataset.filterValue); return; }
     const calendarDay = event.target.closest('[data-performance-date]');
@@ -4102,6 +5081,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     if (calculatorTab) { setCalculatorMode(calculatorTab.dataset.calculator); return; }
     const coveredCall = event.target.closest('[data-cc-symbol]');
     if (coveredCall) { openCoveredCall(coveredCall.dataset.ccSymbol, coveredCall); return; }
+    const lifecycleChoice = event.target.closest('[data-lifecycle-choice-option]');
+    if (lifecycleChoice) { runLifecycleChoices(lifecycleChoice); return; }
     const cspCalculate = event.target.closest('[data-csp-calculate]');
     if (cspCalculate) { runCashSecuredPut(cspCalculate); return; }
     const button = event.target.closest('[data-action]'); if (button) operate(button.dataset.action, button);
@@ -4110,10 +5091,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     if (event.target.matches('[data-performance-from]')) commitPerformanceState({ from: event.target.value || null });
     if (event.target.matches('[data-performance-to]')) commitPerformanceState({ to: event.target.value || null });
   });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && event.target.matches('[data-csp-symbol]')) {
+      event.preventDefault(); runCashSecuredPut(q('[data-csp-calculate]'));
+    }
+  });
   window.addEventListener('popstate', () => { applyPerformanceUrl(); renderPerformanceLedger(); loadPerformanceCalendar(); });
   composeConsolidatedViews();
   consolidateDecisionsIntoSystem();
   relocateTopOpportunities();
+  removeLegacyOverviewOpportunities();
   scrubPreviewLanguage();
   refresh().catch(error => {
     text(q('.header-status strong'), 'Live data unavailable');
@@ -4331,6 +5318,11 @@ async function route(request, env, ctx) {
   if (url.pathname === '/api/covered-call/calculate' && request.method === 'GET') {
     return json(await coveredCallDashboard(env, owner.id, url.searchParams.get('symbol')));
   }
+  if (url.pathname === '/api/covered-call/lifecycle-choices' && request.method === 'GET') {
+    return json(await coveredCallLifecycleChoicesDashboard(
+      env, owner.id, url.searchParams.get('option'),
+    ));
+  }
   if (url.pathname === '/api/performance/calendar' && request.method === 'GET') {
     try {
       return json(await performanceCalendarDashboard(env, owner.id, {
@@ -4455,17 +5447,18 @@ async function route(request, env, ctx) {
     const result = await replayEvidenceTool(env, owner.id, { cycleId, fingerprint: null });
     return json(result, result.ok ? 200 : 409);
   }
-  if (url.pathname === '/api/cash-secured-put/calculate' && request.method === 'POST') {
-    try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
-    const idempotencyKey = request.headers.get('idempotency-key');
-    if (!idempotencyKey) return json({ error: 'OPERATOR_IDEMPOTENCY_KEY_REQUIRED' }, 400);
-    return json(await triggerShadowCycle(env, owner.id, { source: 'CSP_CALCULATOR', idempotencyKey }));
+  if (url.pathname === '/api/cash-secured-put/calculate' && request.method === 'GET') {
+    return json(await cashSecuredPutDashboard(env, owner.id, url.searchParams.get('symbol')));
   }
   if (url.pathname === '/api/cycle' && request.method === 'POST') {
     try { requireSameOrigin(request, env); } catch (error) { return json({ error: error.message }, 403); }
     const idempotencyKey = request.headers.get('idempotency-key');
     if (!idempotencyKey) return json({ error: 'OPERATOR_IDEMPOTENCY_KEY_REQUIRED' }, 400);
     return json(await triggerShadowCycle(env, owner.id, { source: 'OPERATOR', idempotencyKey }));
+  }
+  const cycleRead = url.pathname.match(/^\/api\/cycle\/([A-Za-z0-9:_-]{16,160})$/u);
+  if (cycleRead && request.method === 'GET') {
+    return json(await getCycleTool(env, owner.id, decodeURIComponent(cycleRead[1])));
   }
   if (url.pathname === '/api/evidence' && request.method === 'GET') {
     const rows = await env.DB.prepare(`SELECT cycle_id,sequence,evidence_hash,chain_hash,
