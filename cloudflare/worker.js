@@ -10,7 +10,9 @@ import {
   capAuthority, validateAuthorityLevel,
 } from '../src/constitution/authority.js';
 import { DEFAULT_LIMITS } from '../src/constitution/limits.js';
-import { analyzeCoveredCallLifecycle } from '../src/lifecycle/covered_call_analysis.js';
+import {
+  analyzeCoveredCallLifecycle, coveredCallEntryEvidenceFromOpenLots,
+} from '../src/lifecycle/covered_call_analysis.js';
 import { contentHash, ORDER_STATE } from '../src/execution/order.js';
 import { reconcile, RECON } from '../src/truth/reconciliation.js';
 import { authenticateAccess } from './access-auth.js';
@@ -29,7 +31,10 @@ import {
   handleTelegramWebhook, processTelegramUpdate, telegramAssistantStatus,
 } from './telegram-assistant.js';
 import { freezeTradeProposal, reviewTradeTicket } from './proposal-approval.js';
-import { performanceFromBrokerRows, portfolioFromCustody, realizedPnlCalendar } from './portfolio-report.js';
+import {
+  fillsFromBrokerRows, matchRealizedTrades, performanceFromBrokerRows,
+  portfolioFromCustody, realizedPnlCalendar,
+} from './portfolio-report.js';
 import {
   calculateCoveredCallCandidates, configuredCoveredCallDteTargets, COVERED_CALL_DTE_TARGETS,
 } from './covered-call-calculator.js';
@@ -1140,10 +1145,21 @@ async function portfolioDashboard(env, ownerId) {
   const custody = await loadLatestCustody(env, ownerId);
   if (!custody) throw new Error('SCHWAB_CUSTODY_SYNC_REQUIRED');
   const optionPositions = (custody.positions ?? []).filter((position) => position.type === 'OPTION');
+  const shortCalls = optionPositions.filter((position) => Number(position.quantity) < 0
+    && String(position.right).toLowerCase() === 'call');
   const analytics = new Map();
+  const coveredCallLifecycle = new Map();
   const missingAnalytics = [];
+  const client = new SchwabD1Client(env);
+  let openLots = [];
+  try {
+    const ledgerRows = await env.DB.prepare(`SELECT transaction_id,raw_json,occurred_at FROM broker_events
+      WHERE owner_id=? AND transaction_id IS NOT NULL ORDER BY occurred_at ASC`).bind(ownerId).all();
+    openLots = matchRealizedTrades(fillsFromBrokerRows(ledgerRows.results ?? [])).open_lots;
+  } catch (error) {
+    missingAnalytics.push({ symbol: 'BROKER_LEDGER', error: error.message });
+  }
   if (optionPositions.length) {
-    const client = new SchwabD1Client(env);
     const maxAgeMs = Number(env.NUVO_MAX_CHAIN_AGE_MS ?? 120_000);
     const now = Date.now();
     const quotes = await Promise.all(optionPositions.map(async (position) => {
@@ -1156,16 +1172,52 @@ async function portfolioDashboard(env, ownerId) {
     }));
     for (const { symbol, quote, error } of quotes) {
       if (quote?.value) analytics.set(symbol, {
-        theta: quote.value.theta,
-        iv: quote.value.iv,
+        ...quote.value,
         spot: quote.value.underlyingPrice,
         asof: Number.isFinite(quote.asOf) ? new Date(quote.asOf).toISOString() : null,
+        source: quote.source,
         freshness: Number.isFinite(quote.asOf) && now - quote.asOf <= maxAgeMs ? 'CURRENT' : 'LAST_MARKET_QUOTE',
       });
       else missingAnalytics.push({ symbol, error: error || 'SCHWAB_OPTION_QUOTE_UNAVAILABLE' });
     }
+    const provider = marketProvider(env, ownerId);
+    const lifecycleInputs = await Promise.all(shortCalls.map(async (position) => {
+      const [underlyingResult, eventsResult] = await Promise.all([
+        client.marketQuote(ownerId, position.underlying).catch((error) => ({ error: error.message })),
+        provider.events(position.underlying).catch((error) => ({ error: error.message })),
+      ]);
+      return { position, underlyingResult, eventsResult };
+    }));
+    for (const { position, underlyingResult, eventsResult } of lifecycleInputs) {
+      const shares = (custody.positions ?? []).find((candidate) => candidate.type === 'EQUITY'
+        && candidate.symbol === position.underlying);
+      const optionQuote = analytics.get(position.symbol);
+      const entryEvidence = coveredCallEntryEvidenceFromOpenLots(openLots, position);
+      const lifecycle = optionQuote && underlyingResult?.value
+        ? analyzeCoveredCallLifecycle({
+          optionPosition: position,
+          sharePosition: shares,
+          optionQuote,
+          underlyingQuote: {
+            ...underlyingResult.value,
+            asof: Number.isFinite(underlyingResult.asOf)
+              ? new Date(underlyingResult.asOf).toISOString() : null,
+          },
+          entryEvidence,
+          events: eventsResult?.value ?? [],
+          eventCoverage: {
+            eventsVerified: Boolean(eventsResult?.value),
+            dividendsVerified: eventsResult?.coverage?.dividends === true,
+          },
+          now,
+        })
+        : { ok: false, symbol: position.symbol,
+          error: optionQuote ? underlyingResult?.error : 'SCHWAB_OPTION_QUOTE_UNAVAILABLE' };
+      coveredCallLifecycle.set(position.symbol, lifecycle);
+      if (!lifecycle.ok) missingAnalytics.push({ symbol: position.symbol, error: lifecycle.error });
+    }
   }
-  const report = portfolioFromCustody(custody, analytics, { limits: DEFAULT_LIMITS });
+  const report = portfolioFromCustody(custody, analytics, { limits: DEFAULT_LIMITS, coveredCallLifecycle });
   const analyticsRows = [...analytics.values()];
   const lastMarketQuotes = analyticsRows.filter((row) => row.freshness === 'LAST_MARKET_QUOTE').length;
   const analyticsAsOf = analyticsRows.length && analyticsRows.every((row) => row.asof)
@@ -1546,15 +1598,25 @@ async function getCoveredCallLifecycleTool(env, ownerId, truth) {
     });
   }
   const provider = marketProvider(env, ownerId);
+  let openLots = [];
+  try {
+    const ledgerRows = await env.DB.prepare(`SELECT transaction_id,raw_json,occurred_at FROM broker_events
+      WHERE owner_id=? AND transaction_id IS NOT NULL ORDER BY occurred_at ASC`).bind(ownerId).all();
+    openLots = matchRealizedTrades(fillsFromBrokerRows(ledgerRows.results ?? [])).open_lots;
+  } catch (error) {
+    return toolEnvelope(env, { covered_calls: [] }, {
+      code: 'LIFECYCLE_ENTRY_LEDGER_UNAVAILABLE', message: error.message,
+    });
+  }
   const coveredCalls = await Promise.all(shortCalls.map(async (position) => {
     const shares = (truth.positions ?? []).find((candidate) =>
       candidate.asset_class === 'EQUITY' && candidate.symbol === position.underlying);
-    const [option, underlying, history] = await Promise.all([
+    const [option, underlying, events] = await Promise.all([
       provider.optionQuote(position.symbol),
       provider.markQuote(position.underlying),
-      provider.history(position.underlying, { lookback: 400, minBars: 20 }),
+      provider.events(position.underlying),
     ]);
-    const error = option.error ?? underlying.error ?? history.error;
+    const error = option.error ?? underlying.error ?? events.error;
     if (error) return { ok: false, symbol: position.symbol, error };
     return analyzeCoveredCallLifecycle({
       optionPosition: position,
@@ -1564,18 +1626,24 @@ async function getCoveredCallLifecycleTool(env, ownerId, truth) {
         asof: new Date(option.asOf).toISOString(),
         source: option.source,
       },
-      underlyingQuote: underlying.value,
-      historyBars: history.value,
+      underlyingQuote: {
+        ...underlying.value,
+        asof: Number.isFinite(underlying.asOf) ? new Date(underlying.asOf).toISOString() : null,
+      },
+      entryEvidence: coveredCallEntryEvidenceFromOpenLots(openLots, position),
+      events: events.value,
+      eventCoverage: {
+        eventsVerified: true,
+        dividendsVerified: events.coverage?.dividends === true,
+      },
       now: Date.now(),
-      samples: 12_000,
-      seed: `telegram-lifecycle:${position.symbol}:${option.asOf}`,
     });
   }));
   const usable = coveredCalls.filter((row) => row.ok);
   return toolEnvelope(env, {
     covered_calls: coveredCalls,
     analysis_status: usable.length === coveredCalls.length ? 'COMPLETE' : 'PARTIAL',
-    method: 'LIVE_SCHWAB_IV_PLUS_ZERO_DRIFT_REALIZED_VOL_ENSEMBLE',
+    method: 'DETERMINISTIC_EXECUTABLE_COVERED_CALL_LIFECYCLE',
     asof: usable.map((row) => row.quote?.asof).filter(Boolean).sort().at(0) ?? truth.asof,
   }, usable.length ? null : {
     code: 'LIFECYCLE_ANALYSIS_UNAVAILABLE',
@@ -2061,7 +2129,8 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     <article class="panel capital-guardrails"><div class="panel-head"><div><p class="kicker">Constitutional capital utilization</p><h3>Deployment and cash reserve</h3></div><span class="readonly-tag">SETTLED UNBORROWED CASH</span></div><div class="risk-gauges"><div class="risk-gauge" data-vsim="deployed-gauge"></div><div class="risk-gauge" data-vsim="reserve-gauge"></div></div><div class="panel-note">Buying power and withdrawal capacity are excluded from the reserve calculation.</div></article>
     <article class="panel"><div class="panel-head"><div><p class="kicker">Current market value and assignment collateral</p><h3>Capital committed by ticker</h3></div><span data-vsim="concentration-cap" class="as-of">—</span></div><div class="commitment-bars" data-vsim="commitments"></div></article>
     <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Current shares from Schwab custody</p><h3>Inventory / ownership book</h3></div><span data-vsim="inventory-count" class="count">0 positions</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Qty</th><th>Average price</th><th>Mark</th><th>Market value</th><th>Open P&amp;L</th><th>Portfolio weight</th><th>Available CCs</th><th>Directive</th></tr></thead><tbody data-vsim="inventory-body"></tbody></table></div><div class="panel-note">SELL CC appears only when Schwab proves at least one unencumbered 100-share lot, no working order is present, and average share price is known.</div></article>
-    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Open short options from Schwab custody</p><h3>Income / harvest book</h3></div><span data-vsim="harvest-count" class="count">0 active</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Type</th><th>Strike</th><th>Expiration</th><th>Qty</th><th>Entry credit</th><th>Mark</th><th>Open P&amp;L</th><th>θ / day</th><th>Distance to strike</th><th>Capital committed</th><th>Quote</th></tr></thead><tbody data-vsim="harvest-body"></tbody></table></div><div class="panel-note">Distance is OTM cushion: percent of spot · dollars/share · strike-IV sigma. Stale quote-derived values remain visible but are explicitly muted and badged.</div></article>
+    <article class="panel table-panel"><div class="panel-head"><div><p class="kicker">Open short options from Schwab custody</p><h3>Income / harvest book</h3></div><span data-vsim="harvest-count" class="count">0 active</span></div><div class="table-wrap"><table><thead><tr><th>Ticker</th><th>Type</th><th>Strike</th><th>Expiration</th><th>Qty</th><th>Entry credit</th><th>Mark</th><th>Open P&amp;L</th><th>θ / day</th><th>Distance to strike</th><th>Capital committed</th><th>Quote</th></tr></thead><tbody data-vsim="harvest-body"></tbody></table></div><div class="panel-note">Distance is OTM cushion: percent of spot · dollars/share · risk-neutral −d₂ when lifecycle inputs are complete. Stale quote-derived values remain visible but are explicitly muted and badged.</div></article>
+    <article class="panel cc-lifecycle-panel"><div class="panel-head"><div><p class="kicker">Shares already owned · calls already open</p><h3>Covered-call lifecycle calculator</h3></div><span class="readonly-tag">DETERMINISTIC · READ ONLY</span></div><div class="cc-lifecycle-cards" data-vsim="cc-lifecycle-cards"></div><div class="panel-note">Flags are observable conditions, not a blended score. Risk-neutral probability is European and excludes early exercise. CLOSE · ROLL · EXIT remain NO_TRUTH until a validated common-horizon decision model exists.</div></article>
   </section>`;
   const underwrite = `<section class="view" id="underwrite" aria-labelledby="underwrite-title"><div class="page-heading"><div><p class="kicker">One underwriting workspace · read-only</p><h2 id="underwrite-title">Underwrite</h2></div><span class="readonly-tag">NO ORDER ROUTE</span></div><div class="underwrite-tabs" role="tablist" aria-label="Underwriting mode"><button type="button" class="underwrite-tab active" role="tab" aria-selected="true" data-underwrite-mode="scan">Scan opportunities</button><button type="button" class="underwrite-tab" role="tab" aria-selected="false" data-underwrite-mode="manual">Specify manually</button></div><div class="underwrite-pane active" data-underwrite-pane="scan"></div><div class="underwrite-pane" data-underwrite-pane="manual" hidden></div></section>`;
   const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Lifetime results and canonical Schwab ledger drill-down</p><h2 id="performance-title">Performance</h2></div><button type="button" class="as-of history-link" data-jump-system-history>History integrity →</button></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L · Lifetime</span><strong data-vsim="performance-realized">—</strong><small data-vsim="performance-realized-note">Lifetime · matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small data-vsim="performance-unrealized-note">latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small data-vsim="performance-total-note">realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small data-vsim="profit-factor-note">Lifetime · gross wins ÷ gross losses</small></div><div><span>Matched trades</span><strong data-vsim="closed-trades">—</strong><small data-vsim="closed-trades-note">Lifetime ledger denominator</small></div></div><article class="panel pnl-calendar-panel"><div class="panel-head pnl-calendar-head"><div><p class="kicker" data-vsim="pnl-calendar-subtitle">Realized daily P&amp;L · all closed lifecycles · Schwab ledger</p><h3>Realized P&amp;L calendar</h3></div><div class="pnl-calendar-tools"><span data-vsim="pnl-calendar-reconciliation" class="readonly-tag">CHECKING</span><div class="pnl-calendar-nav"><button type="button" aria-label="Previous month" data-pnl-calendar-shift="-1">‹</button><strong data-vsim="pnl-calendar-month">—</strong><button type="button" aria-label="Next month" data-pnl-calendar-shift="1">›</button></div></div></div><div class="pnl-calendar-scopes" role="group" aria-label="Realized P&amp;L strategy scope"><button type="button" class="chip active" data-pnl-calendar-scope="ALL">All strategies</button><button type="button" class="chip" data-pnl-calendar-scope="IN_MANDATE">CC + CSP only</button></div><div class="pnl-calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span></div><div class="pnl-calendar-grid" data-vsim="pnl-calendar-grid"></div><div class="pnl-calendar-footer"><div><span>Profit</span><strong data-vsim="pnl-calendar-profit">—</strong></div><div><span>Loss</span><strong data-vsim="pnl-calendar-loss">—</strong></div><div><span data-vsim="pnl-calendar-net-label">MONTH TOTAL</span><strong data-vsim="pnl-calendar-net">—</strong></div></div><p class="panel-note" data-vsim="pnl-calendar-note">New York market date · NYSE full-day closures · early-close sessions count as trading days.</p></article><article class="panel mandate-panel"><div class="panel-head"><div><p class="kicker">Historical strategy-leg view</p><h3>Mandate lens</h3></div><span class="readonly-tag">DRILL DOWN TO VERIFY STRUCTURES</span></div><div class="desk-metrics mandate-metrics"><div><span>Mandate-compatible legs</span><strong data-vsim="mandate-pnl">—</strong><small data-vsim="mandate-trades">—</small></div><div><span>Compatible profit factor</span><strong data-vsim="mandate-profit-factor">—</strong><small>SHARES · SHORT_CALL · SHORT_PUT</small></div><div><span>Structure review</span><strong data-vsim="review-pnl">—</strong><small data-vsim="review-trades">—</small></div><div><span>Review profit factor</span><strong data-vsim="review-profit-factor">—</strong><small>inspect long legs and futures</small></div></div><p class="panel-note" data-vsim="mandate-note">Historical option legs require ledger review before they can be classified as standalone or part of a spread.</p></article><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles · drag to filter ledger dates</p><h3>Cumulative realized P&amp;L</h3></div><span data-vsim="performance-asof" class="as-of">—</span></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss. Drag horizontally to filter the ledger by date."></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><article class="panel table-panel performance-ledger"><div class="panel-head"><div><p class="kicker">Canonical append-only Schwab ledger</p><h3>Closed trade drill-down</h3></div><span data-vsim="filtered-trade-count" class="count">—</span></div><div class="ledger-filters"><span data-vsim="ledger-filter-summary">All matched trades</span><label>From <input type="date" data-performance-from></label><label>To <input type="date" data-performance-to></label><button type="button" class="chip" data-clear-performance-filter>Clear filters</button></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Strategy</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div><div class="panel-note">Click attribution rows or drag the cumulative curve to filter. Raw broker packets remain protected; this table shows FIFO-matched lifecycles.</div></article><details class="panel broker-activity"><summary>Broker activity · imported orders, executions, cash, assignment and transfer events</summary><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div></details><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
@@ -2122,7 +2191,8 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
   const additions = `<style>
     .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th,#calculators table td,#calculators table th{white-space:nowrap}.cc-directive,.cc-back{appearance:none;border:1px solid rgba(61,222,169,.55);border-radius:4px;background:rgba(35,196,143,.1);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:7px 10px;cursor:pointer}.cc-directive:hover,.cc-back:hover{background:rgba(35,196,143,.2)}.cc-unavailable{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.cc-status[data-state="blocked"],.csp-status[data-state="blocked"]{border-color:rgba(242,118,118,.38)}.cc-status[data-state="ready"],.csp-status[data-state="ready"]{border-color:rgba(96,226,168,.38)}.cc-reason,.cc-decision-impact{color:var(--text);line-height:1.55}.cc-rule{margin-top:12px;padding:11px 13px;border-left:2px solid var(--amber);background:rgba(244,186,97,.06);color:var(--amber);font-size:11px}.cc-tenors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.cc-tenor{padding:13px;border:1px solid var(--line);border-radius:5px;background:rgba(7,23,20,.42)}.cc-tenor strong,.cc-tenor span,.cc-tenor small{display:block}.cc-tenor strong{color:var(--green);font-size:16px}.cc-tenor span{margin:5px 0;color:var(--text);font-size:11px}.cc-tenor small{color:var(--muted);font-size:9px}.cc-metrics{margin-top:8px}.cc-decision-impact{margin:14px 0 0;color:var(--green)}.calculator-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.calculator-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.calculator-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.calculator-pane{display:grid;gap:12px}.calculator-pane[hidden]{display:none}.calculator-selector{margin-bottom:0}.calculator-symbols{display:flex;flex-wrap:wrap;gap:8px}.calculator-symbol{display:grid;grid-template-columns:auto auto;gap:3px 14px;align-items:center;text-align:left}.calculator-symbol b{color:var(--text)}.calculator-symbol small{grid-column:1/-1;color:var(--muted);font-size:8px}.calculator-symbol[data-actionable="false"]{border-color:var(--line);color:var(--amber);background:rgba(244,186,97,.05)}.csp-run{margin-top:12px}.csp-recommendation{border-color:rgba(96,226,168,.38)}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}.cc-tenors{grid-template-columns:1fr}.calculator-tabs{overflow:auto}.calculator-symbol{width:100%}}
     .underwrite-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.underwrite-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.underwrite-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.underwrite-pane[hidden]{display:none}.underwrite-pane>.page-heading{display:none}.history-link{appearance:none;background:transparent;border:0;color:var(--green);cursor:pointer}.mandate-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}.attribution-row{width:100%;appearance:none;border:0;padding:4px;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:4px}.attribution-row:hover,.attribution-row.active{background:rgba(35,196,143,.1);outline:1px solid rgba(61,222,169,.25)}.performance-chart{touch-action:none;cursor:crosshair}.performance-chart .range-selection{fill:rgba(96,226,168,.14);stroke:#60e2a8;stroke-width:1}.performance-ledger{margin-top:16px}.ledger-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:12px;color:var(--muted);font-size:10px}.ledger-filters>span{margin-right:auto;color:var(--text)}.ledger-filters label{display:flex;align-items:center;gap:6px}.ledger-filters input{color:var(--text);background:#071712;border:1px solid var(--line);border-radius:4px;padding:6px;font:10px var(--mono);color-scheme:dark}.broker-activity{margin-top:16px}.broker-activity summary{cursor:pointer;color:var(--text);font-weight:700}.performance-ledger td,.performance-ledger th,.broker-activity td,.broker-activity th{white-space:nowrap}.system-history{scroll-margin-top:20px}.system-decisions{margin-top:28px;padding-top:28px;border-top:1px solid var(--line)}.system-decisions>.page-heading{align-items:center;margin-bottom:14px}.system-decisions>.page-heading h2{font-size:22px}.system-decisions .evidence-layout{grid-template-columns:minmax(0,2fr) minmax(220px,.7fr)}.guardian-panel .package-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 18px}@media(max-width:1000px){.system-decisions .evidence-layout{grid-template-columns:1fr}}@media(max-width:680px){.mandate-metrics{grid-template-columns:1fr 1fr}.ledger-filters>span{width:100%;margin-right:0}.guardian-panel .package-facts{grid-template-columns:1fr}}
-    .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}}
+    .expiration-ladder{display:grid;gap:9px}.expiration-row{display:grid;grid-template-columns:110px minmax(120px,1fr) 96px 100px;gap:12px;align-items:center;font-size:10px}.expiration-row strong{color:var(--muted);font-size:9px;letter-spacing:.08em}.expiration-row strong span{color:var(--text);margin-right:8px}.risk-track{position:relative;height:9px;overflow:visible;border-radius:9px;background:#152c25}.risk-track>i{display:block;height:100%;max-width:100%;border-radius:9px;background:linear-gradient(90deg,#2d8f70,#60e2a8)}.risk-track>.cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber);box-shadow:0 0 0 1px rgba(244,186,97,.15)}.breach .risk-track>i{background:linear-gradient(90deg,#9d493f,#f27676)}.breach>span,.breach>b{color:var(--red)}.cash-row .risk-track>i{background:linear-gradient(90deg,#2e728e,#69c5e6)}.risk-gauges{display:grid;grid-template-columns:1fr 1fr;gap:16px}.risk-gauge{padding:14px;border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42)}.risk-gauge-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.risk-gauge-head span{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.risk-gauge-head strong{font-size:18px}.risk-gauge small{display:block;margin-top:8px;color:var(--muted);font-size:9px}.commitment-track{position:relative;overflow:visible}.commitment-track .cap-line{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--amber)}.commitment-row.breach .commitment-track i{background:linear-gradient(90deg,#9d493f,#f27676)}.stale-value{color:#71877e!important;opacity:.72}.stale-badge{display:inline-block;margin-left:6px;padding:1px 4px;border:1px solid rgba(244,186,97,.45);border-radius:3px;color:var(--amber);font-size:7px;line-height:1.3;letter-spacing:.08em;vertical-align:middle}.distance-value{font-variant-numeric:tabular-nums}.distance-value.itm{color:var(--red)}.desk-metrics.five-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}.cc-lifecycle-cards{display:grid;gap:12px}.cc-life-card{border:1px solid var(--line);border-radius:6px;background:rgba(7,23,20,.42);overflow:hidden}.cc-life-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;padding:14px}.cc-life-head h4{margin:0;font-size:16px}.cc-life-head small{display:block;margin-top:4px;color:var(--muted)}.cc-life-flags{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px}.cc-life-flag{padding:4px 6px;border:1px solid rgba(244,186,97,.4);border-radius:3px;color:var(--amber);font:700 8px/1.2 var(--mono);letter-spacing:.06em}.cc-life-flag.nominal{border-color:rgba(96,226,168,.4);color:var(--green)}.cc-life-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-top:1px solid var(--line)}.cc-life-metrics>div{padding:12px;border-right:1px solid var(--line)}.cc-life-metrics>div:last-child{border-right:0}.cc-life-metrics span,.cc-life-metrics small{display:block;color:var(--muted);font-size:8px}.cc-life-metrics strong{display:block;margin:5px 0;font-size:15px;font-variant-numeric:tabular-nums}.cc-life-paths{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line)}.cc-life-paths>div{padding:12px;border-right:1px solid var(--line)}.cc-life-paths>div:last-child{border-right:0}.cc-life-paths span{display:block;color:var(--muted);font-size:8px;text-transform:uppercase}.cc-life-paths strong{display:block;margin-top:5px;font-size:14px}.cc-life-foot{padding:10px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:9px;overflow-wrap:anywhere}@media(max-width:1050px){.desk-metrics.five-metrics{grid-template-columns:repeat(3,1fr)}.cc-life-metrics{grid-template-columns:repeat(3,1fr)}.cc-life-paths{grid-template-columns:repeat(2,1fr)}}@media(max-width:680px){.expiration-row{grid-template-columns:78px 1fr 78px}.expiration-row>b{display:none}.risk-gauges{grid-template-columns:1fr}.desk-metrics.five-metrics{grid-template-columns:1fr 1fr}.cc-life-head{display:block}.cc-life-flags{justify-content:flex-start;margin-top:9px}.cc-life-metrics{grid-template-columns:1fr 1fr}.cc-life-paths{grid-template-columns:1fr 1fr}}
+    .cc-life-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}@media(max-width:1050px){.cc-life-metrics{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.cc-life-metrics{grid-template-columns:1fr 1fr}}
   </style>`;
   const operationalStyles = `<style>
     #overview .today-pnl-card{border-color:rgba(96,226,168,.42);background:linear-gradient(145deg,rgba(17,46,37,.88),rgba(7,25,20,.96))}#overview .today-pnl-card[data-pnl-state="loss"]{border-color:rgba(242,118,118,.48);background:linear-gradient(145deg,rgba(48,25,24,.82),rgba(20,17,15,.96))}#overview .today-pnl-card[data-pnl-state="unavailable"]{border-color:rgba(244,186,97,.42)}#overview .today-pnl-card .metric-value{font-variant-numeric:tabular-nums}#overview .today-pnl-card .metric-foot{line-height:1.45}.vsim-diagnostics{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted)}.vsim-diagnostics summary{cursor:pointer;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.vsim-diagnostics pre{margin:10px 0 0;padding:12px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:#07110e;color:#9eb2a8;font-size:9px;line-height:1.45;white-space:pre-wrap}#overview .system-brief .health-list li{align-items:center;gap:10px;padding:8px 0}#overview .system-brief .health-label{display:grid;grid-template-columns:10px 1fr;align-items:center;min-width:0}#overview .system-brief .health-label small{grid-column:2;color:var(--muted);font-size:7px;margin-top:2px;font-family:ui-monospace,monospace}#overview .system-brief .health-value{text-align:right;font-size:8px}#overview .system-brief .health-green{background:var(--green);box-shadow:0 0 6px rgba(96,226,168,.6)}#overview .system-brief .health-red{background:var(--red);box-shadow:0 0 6px rgba(242,118,118,.45)}#overview .system-brief .health-amber{background:var(--amber)}#overview .system-brief .health-tape{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font:8px/1.45 ui-monospace,monospace;white-space:normal}#overview .system-brief .tv-live-widget{margin-top:8px;min-height:44px;overflow:hidden;border:1px solid var(--line);border-radius:5px;background:#07110e}#overview .system-brief .tv-live-widget .tv-placeholder{padding:13px;color:var(--red);font:8px ui-monospace,monospace}
@@ -2685,6 +2755,60 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       item => quoteValue(item, item.theta_per_day), item => distanceValue(item), item => money(item.capital_committed ?? item.expiration_capital),
       item => item.quote_asof ? when(item.quote_asof) + (item.quote_freshness === 'LAST_MARKET_QUOTE' ? ' · LAST QUOTE' : '') : 'UNAVAILABLE',
     ], 'No current short-option positions in Schwab custody.');
+    const lifecycleRoot = q('[data-vsim="cc-lifecycle-cards"]'); clear(lifecycleRoot);
+    const lifecycleRows = (portfolio.harvest || []).filter(item => item.type === 'COVERED_CALL');
+    if (!lifecycleRows.length) lifecycleRoot.append(make('p', 'No open covered calls in current Schwab custody.', 'muted'));
+    lifecycleRows.forEach(item => {
+      const result = item.lifecycle;
+      const card = make('section', undefined, 'cc-life-card');
+      const head = make('div', undefined, 'cc-life-head');
+      const title = make('div'); title.append(make('h4', item.symbol + ' · $' + number(item.strike) + ' call'),
+        make('small', item.expiration + ' · ' + number(result && result.dte) + ' DTE · ' + number(item.quantity)
+          + ' contract(s) · ' + number(result && result.covered_shares) + ' covered shares'));
+      const badges = make('div', undefined, 'cc-life-flags');
+      if (result && result.ok) (result.classification.flags || []).forEach(flag => badges.append(
+        make('span', flag.code, 'cc-life-flag' + (flag.code === 'NOMINAL' ? ' nominal' : ''))));
+      else badges.append(make('span', result && result.error || 'CALCULATOR_UNAVAILABLE', 'cc-life-flag'));
+      head.append(title, badges); card.append(head);
+      if (!result || !result.ok) {
+        card.append(make('p', 'Exact lifecycle economics unavailable: ' + (result && result.error || 'live inputs incomplete') + '. No fee or market value was guessed.', 'cc-life-foot'));
+        lifecycleRoot.append(card); return;
+      }
+      const trade = result.current_trade || {}; const riskNeutral = result.risk_neutral || {}; const paths = result.paths || {};
+      const distance = result.distance_to_strike || {}; const basisDistance = result.strike_vs_share_basis || {};
+      const metrics = make('div', undefined, 'cc-life-metrics');
+      [
+        ['RN expire OTM', percent(riskNeutral.probability_expire_otm), 'European · excludes early exercise'],
+        ['Distance to strike', percent(distance.pct_of_spot), moneyExact(distance.dollars_per_share) + ' · ' + number(distance.risk_neutral_sigma) + 'σ (−d₂)'],
+        ['Close outlay', money(trade.total_close_outlay), 'ask × shares + close fees'],
+        ['Liability left', percent(trade.total_liability_pct_of_original_gross_credit), 'close outlay / original gross credit'],
+        ['Locked option P&L', money(trade.profit_locked_if_call_closed_now), 'net entry credit − close outlay'],
+        ['Extrinsic left', percent(trade.extrinsic_pct_of_original_gross_credit), money(trade.executable_extrinsic_total)],
+        ['Theta / day', money(trade.broker_short_theta_per_day), 'broker Greek · short position'],
+        ['Adjusted basis', moneyExact(trade.adjusted_share_basis), 'share basis − net credit/share'],
+      ].forEach(metric => { const node = make('div'); node.append(make('span', metric[0]), make('strong', metric[1]), make('small', metric[2])); metrics.append(node); });
+      const pathGrid = make('div', undefined, 'cc-life-paths');
+      [
+        ['Assignment P&L', money(paths.assignment && paths.assignment.pnl)],
+        ['Exit-now P&L', money(paths.exit_now && paths.exit_now.pnl)],
+        ['Worthless scenario', money(paths.expire_worthless && paths.expire_worthless.pnl)],
+        ['Close/keep crossover', moneyExact(paths.close_call_keep_shares && paths.close_call_keep_shares.crossover_share_price)],
+      ].forEach(path => { const node = make('div'); node.append(make('span', path[0]), make('strong', path[1])); pathGrid.append(node); });
+      const flagFacts = (result.classification.flags || []).map(flag => flag.code + ': ' + flag.explanation
+        + ' Threshold: ' + flag.threshold + '.').join(' ');
+      const gaps = (result.classification.data_gaps || []).length
+        ? ' Data gaps: ' + result.classification.data_gaps.join(', ') + '.' : '';
+      card.append(metrics, pathGrid, make('p', flagFacts + ' Sell/wait crossover: '
+        + moneyExact(paths.sell_shares_wait_on_call && paths.sell_shares_wait_on_call.crossover_share_price)
+        + '. Opening fees: ' + money(result.entry_evidence && result.entry_evidence.opening_fees)
+        + ' from ' + (result.entry_evidence && result.entry_evidence.source || 'UNVERIFIED')
+        + '. Configured close fee: ' + money(result.current_trade && result.current_trade.close_fees)
+        + '. Share basis: ' + moneyExact(result.share_basis) + '; strike minus basis: '
+        + moneyExact(basisDistance.dollars_per_share) + ' (' + percent(basisDistance.pct_of_share_basis) + ')'
+        + '. RN inputs: r ' + percent(riskNeutral.rate) + ', q ' + percent(riskNeutral.dividend_yield)
+        + '. CLOSE · ROLL · EXIT: NO_TRUTH.' + gaps, 'cc-life-foot'));
+      lifecycleRoot.append(card);
+    });
   }
 
   function activateView(id) {

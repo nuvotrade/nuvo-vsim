@@ -155,47 +155,28 @@ function percent(value) {
 export function coveredCallLifecycleAnswer(lifecycle) {
   const analysis = lifecycle?.covered_calls?.find((row) => row?.ok);
   if (!analysis) return '';
-  const verdict = analysis.comparison?.quantitative_verdict;
-  const lead = verdict === 'HOLD_TO_EXPIRY_STATISTICALLY_FAVORED'
-    ? 'HOLD — current model favors holding to expiry.'
-    : verdict === 'CLOSE_NOW_STATISTICALLY_FAVORED'
-      ? 'CLOSE EARLY — current model favors locking the profit now.'
-      : 'NEAR TIE — the model does not show a strong close-versus-hold edge.';
-  const holdExpected = analysis.comparison?.hold_expected_profit_model;
-  const locked = analysis.comparison?.close_now_locked_profit;
-  const difference = analysis.comparison?.hold_minus_close_expected_value;
-  const reasoning = verdict === 'HOLD_TO_EXPIRY_STATISTICALLY_FAVORED'
-    ? `Holding has the higher modeled value: expected expiry profit ${wholeDollar(holdExpected)} versus ${wholeDollar(locked)} locked by closing now, an advantage of ${wholeDollar(difference)}. The remaining premium is large enough to compensate for the modeled assignment and upside-cap risk.`
-    : verdict === 'CLOSE_NOW_STATISTICALLY_FAVORED'
-      ? `Closing has the higher modeled value: ${wholeDollar(locked)} is locked now versus expected expiry profit of ${wholeDollar(holdExpected)}. Holding is worth ${wholeDollar(difference)} less in expectation because the smaller right-tail outcomes can cost more through the covered-call upside cap than the remaining premium can earn.`
-      : `The modeled difference between holding and closing is only ${wholeDollar(difference)}, inside the engine's decision buffer. There is no strong statistical edge; liquidity, taxes, and your preference for assignment versus retained shares become the deciding factors.`;
+  const flags = (analysis.classification?.flags ?? []).map((flag) => flag.code).join(', ') || 'UNKNOWN';
   return [
-    lead,
+    `DETERMINISTIC STATE — ${flags}.`,
     '',
-    `Quantitative lifecycle analysis — ${analysis.underlying} ${analysis.expiration} $${analysis.strike} short call`,
-    `Profit locked if closed now: ${wholeDollar(analysis.current_trade?.profit_locked_if_closed_now)}`,
-    `Profit already captured: ${percent(analysis.current_trade?.profit_captured_pct)}`,
-    `Executable buyback cost: ${wholeDollar(analysis.current_trade?.executable_buyback_total)}`,
-    `Maximum additional option profit if it expires worthless: ${wholeDollar(analysis.current_trade?.maximum_additional_option_profit_if_worthless)}`,
-    `Market-implied probability of expiring OTM: ${percent(analysis.probabilities?.market_implied_expire_otm)}`,
-    `Model probability of expiring OTM: ${percent(analysis.probabilities?.model_expire_otm)}`,
-    `Model probability the short call remains profitable from entry: ${percent(analysis.probabilities?.model_short_call_profitable_from_entry)}`,
-    `Market-implied probability the short call remains profitable from entry: ${percent(analysis.probabilities?.market_implied_short_call_profitable_from_entry)}`,
-    `Model probability holding beats closing now: ${percent(analysis.probabilities?.model_hold_outperforms_close_now)}`,
-    `Model probability of assignment at expiry: ${percent(analysis.probabilities?.model_expire_itm_assignment)}`,
-    `Market-implied probability of assignment at expiry: ${percent(analysis.probabilities?.market_implied_expire_itm_assignment)}`,
-    `Model-minus-market assignment gap: ${percent(analysis.probabilities?.model_minus_market_assignment)}`,
-    `Market-implied probability of touching the strike: ${percent(analysis.probabilities?.market_implied_touch_strike)}`,
-    `Expected profit if held to expiry: ${wholeDollar(holdExpected)}`,
-    `Expected upside surrendered if held: ${wholeDollar(analysis.comparison?.expected_upside_surrendered_if_held)}`,
-    `Expected hold-minus-close value: ${wholeDollar(analysis.comparison?.hold_minus_close_expected_value)}`,
+    `Covered-call lifecycle — ${analysis.underlying} ${analysis.expiration} $${analysis.strike} short call`,
+    `Risk-neutral probability of expiring OTM: ${percent(analysis.risk_neutral?.probability_expire_otm)}`,
+    `Executable buyback principal: ${wholeDollar(analysis.current_trade?.buyback_principal)}`,
+    `Total close outlay: ${wholeDollar(analysis.current_trade?.total_close_outlay)}`,
+    `Option P&L locked by closing call: ${wholeDollar(analysis.current_trade?.profit_locked_if_call_closed_now)}`,
+    `Executable extrinsic remaining: ${wholeDollar(analysis.current_trade?.executable_extrinsic_total)} (${percent(analysis.current_trade?.extrinsic_pct_of_original_gross_credit)} of original gross credit)`,
+    `Short-call theta/day: ${wholeDollar(analysis.current_trade?.broker_short_theta_per_day)}`,
+    `Adjusted share basis: ${wholeDollar(analysis.current_trade?.adjusted_share_basis)}`,
+    `Assignment path P&L: ${wholeDollar(analysis.paths?.assignment?.pnl)}`,
+    `Exit-now path P&L: ${wholeDollar(analysis.paths?.exit_now?.pnl)}`,
+    `Expire-worthless scenario P&L: ${wholeDollar(analysis.paths?.expire_worthless?.pnl)}`,
+    `Close/keep crossover: ${wholeDollar(analysis.paths?.close_call_keep_shares?.crossover_share_price)}`,
+    `Sell/wait crossover: ${wholeDollar(analysis.paths?.sell_shares_wait_on_call?.crossover_share_price)}`,
     '',
-    'Reasoning',
-    reasoning,
-    '',
-    `Model basis: ${analysis.model?.paths?.toLocaleString('en-US') ?? 'UNKNOWN'} zero-drift paths, ${percent(analysis.model?.volatility)} annualized volatility${analysis.model?.volatility_floor_applied ? ` with an ${percent(analysis.model.volatility_floor_applied)} short-history floor` : ''}, ${analysis.model?.bootstrap_included ? 'including' : 'excluding'} block bootstrap.`,
+    'CLOSE: NO_TRUTH · ROLL: NO_TRUTH · EXIT: NO_TRUTH',
+    'These are deterministic facts and named conditions, not a blended score or recommendation.',
     `Live data: ${analysis.quote?.asof ?? lifecycle.asof ?? 'UNKNOWN'}`,
-    'No order was placed. A roll or a new call sale is a separate new-position analysis.',
+    'Risk-neutral probability is European and excludes early exercise. No order was placed.',
   ].join('\n');
 }
 

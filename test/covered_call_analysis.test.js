@@ -1,87 +1,169 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { analyzeCoveredCallLifecycle } from '../src/lifecycle/covered_call_analysis.js';
+import {
+  analyzeCoveredCallLifecycle, coveredCallEntryEvidenceFromOpenLots,
+} from '../src/lifecycle/covered_call_analysis.js';
+import { d1d2, dteToT, greeks } from '../src/math/black_scholes.js';
+import { normCdf } from '../src/math/stats.js';
 
-function history(n = 252) {
-  const bars = [];
-  let close = 100;
-  for (let i = 0; i < n; i += 1) {
-    const change = Math.sin(i * 0.71) * 0.012 + Math.cos(i * 0.19) * 0.006;
-    const open = close * (1 + change * 0.2);
-    close *= 1 + change;
-    bars.push({ o: open, h: Math.max(open, close) * 1.01, l: Math.min(open, close) * 0.99, c: close });
-  }
-  return bars;
-}
-
-const base = {
+const spcx = {
   optionPosition: {
-    symbol: 'TEST260828C00105000', underlying: 'TEST', right: 'call',
-    strike: 105, expiration: '2026-08-28', qty: -2, multiplier: 100, average_price: 2.4,
+    symbol: 'SPCX260904C00141000', underlying: 'SPCX', right: 'call',
+    strike: 141, expiration: '2026-09-04', qty: -5, multiplier: 100,
   },
-  sharePosition: { symbol: 'TEST', qty: 300 },
+  sharePosition: { symbol: 'SPCX', qty: 500, average_price: 145.61832 },
   optionQuote: {
-    bid: 0.9, ask: 1.0, mid: 0.95, iv: 0.42, delta: 0.31, theta: -0.18,
-    asof: '2026-08-26T16:00:00.000Z', source: 'SCHWAB',
+    bid: 1.40, ask: 1.42, mid: 1.41, iv: 0.50, delta: 0.25, theta: -0.18,
+    asof: '2026-09-02T16:00:00.000Z', source: 'SCHWAB',
   },
-  underlyingQuote: { last: 100 },
-  historyBars: history(),
-  now: Date.parse('2026-08-26T16:00:00.000Z'),
-  samples: 4_000,
-  seed: 'covered-call-test',
+  underlyingQuote: { last: 137.81, bid: 137.81, asof: '2026-09-02T16:00:00.000Z' },
+  entryEvidence: {
+    verified: true, source: 'SPCX_REGRESSION_FIXTURE', transactionIds: ['SPCX-ENTRY'],
+    grossCredit: 1001.64, openingFees: 0, netCredit: 1001.64,
+  },
+  events: [],
+  eventCoverage: { eventsVerified: true, dividendsVerified: true },
+  now: Date.parse('2026-09-02T16:00:00.000Z'),
+  closeCommissionPerContract: 0.65,
+  closeExchangeFeePerContract: 0,
+  stockExitFees: 0,
+  assignmentFees: 0,
+  expirationScenarioPrice: 137.81,
 };
 
-test('covered-call lifecycle analysis quantifies close versus hold deterministically', () => {
-  const first = analyzeCoveredCallLifecycle(base);
-  const second = analyzeCoveredCallLifecycle(base);
-  assert.deepEqual(first, second);
-  assert.equal(first.ok, true);
-  assert.equal(first.contracts, 2);
-  assert.equal(first.covered_shares, 200);
-  assert.equal(first.current_trade.entry_credit_total, 480);
-  assert.equal(first.current_trade.executable_buyback_total, 201.6);
-  assert.equal(first.current_trade.profit_locked_if_closed_now, 278.4);
-  assert.ok(first.current_trade.profit_captured_pct > 0.5);
-  assert.equal(
-    first.comparison.expected_upside_surrendered_if_held,
-    first.comparison.expected_expiry_intrinsic_value_total,
-  );
-  assert.ok(first.comparison.expected_upside_surrendered_if_held >= 0);
-  assert.equal(
-    first.comparison.hold_expected_profit_model,
-    first.current_trade.entry_credit_total
-      - first.comparison.expected_upside_surrendered_if_held
-      - first.comparison.expected_assignment_fee,
-  );
-  assert.equal(
-    first.probabilities.model_minus_market_assignment,
-    first.probabilities.model_expire_itm_assignment
-      - first.probabilities.market_implied_expire_itm_assignment,
-  );
-  assert.ok(Number.isFinite(first.probabilities.model_minus_market_assignment));
-  assert.ok(first.probabilities.model_minus_market_assignment >= -1);
-  assert.ok(first.probabilities.model_minus_market_assignment <= 1);
-  for (const [name, probability] of Object.entries(first.probabilities)) {
-    if (name === 'model_minus_market_assignment' || !Number.isFinite(probability)) continue;
-    assert.ok(probability >= 0 && probability <= 1);
-  }
-  assert.match(first.comparison.quantitative_verdict, /STATISTICALLY_FAVORED|NEAR_TIE/u);
-  assert.equal(first.model.drift, 0);
-});
-
-test('an uncovered or incomplete short call is refused rather than guessed', () => {
-  const result = analyzeCoveredCallLifecycle({
-    ...base,
-    sharePosition: { symbol: 'TEST', qty: 100 },
-  });
-  assert.deepEqual(result, { ok: false, error: 'COVERED_CALL_ANALYSIS_INPUT_INCOMPLETE' });
-});
-
-test('a recent listing uses the constitutional short-history volatility floor', () => {
-  const result = analyzeCoveredCallLifecycle({ ...base, historyBars: history(51) });
+test('SPCX lifecycle regression reproduces all nine locked values with explicit zero-fee assumptions', () => {
+  const result = analyzeCoveredCallLifecycle(spcx);
   assert.equal(result.ok, true);
-  assert.equal(result.model.history_sessions, 51);
-  assert.equal(result.model.volatility_floor_applied, 0.80);
-  assert.ok(result.model.volatility >= 0.80);
-  assert.equal(result.model.bootstrap_included, false);
+  assert.equal(result.entry_evidence.opening_fees, 0);
+  assert.equal(result.quote.share_exit_bid, 137.81);
+  assert.equal(result.current_trade.buyback_principal, 710);
+  assert.equal(result.current_trade.total_close_outlay, 713.25);
+  assert.equal(result.current_trade.adjusted_share_basis, 143.61504);
+  assert.equal(result.current_trade.profit_locked_if_call_closed_now, 288.39);
+  assert.equal(result.paths.assignment.pnl, -1307.52);
+  assert.equal(result.paths.exit_now.pnl, -3615.77);
+  assert.equal(result.paths.expire_worthless.pnl, -2902.52);
+  assert.equal(result.paths.close_call_keep_shares.crossover_share_price, 142.4265);
+  assert.equal(result.paths.sell_shares_wait_on_call.crossover_share_price, 136.3835);
+});
+
+test('opening and stock-exit fees remain explicit and change their dependent economics', () => {
+  const result = analyzeCoveredCallLifecycle({
+    ...spcx,
+    entryEvidence: {
+      ...spcx.entryEvidence, grossCredit: 1001.64, openingFees: 5, netCredit: 996.64,
+    },
+    stockExitFees: 10,
+  });
+  assert.equal(result.current_trade.adjusted_share_basis, 143.62504);
+  assert.equal(result.paths.exit_now.pnl, -3630.77);
+  assert.equal(result.paths.sell_shares_wait_on_call.crossover_share_price, 136.3635);
+});
+
+test('risk-neutral sigma distance is exactly -d2 and reconciles with N(-d2)', () => {
+  const result = analyzeCoveredCallLifecycle(spcx);
+  const t = dteToT(result.dte);
+  const { d2 } = d1d2({ spot: 137.81, strike: 141, vol: 0.50, t });
+  assert.equal(result.risk_neutral.sigma_distance_to_strike, -d2);
+  assert.ok(Math.abs(result.risk_neutral.probability_expire_otm - normCdf(-d2)) < 1e-12);
+});
+
+test('Black-Scholes theta uses 2*sqrt(T), not 2*T', () => {
+  const input = { type: 'call', spot: 100, strike: 105, vol: 0.4, t: 0.02, rate: 0.05, yield: 0.01 };
+  const { d1, d2 } = d1d2(input);
+  const pdf = Math.exp(-(d1 * d1) / 2) / Math.sqrt(2 * Math.PI);
+  const expectedAnnual = -(100 * Math.exp(-0.01 * 0.02) * pdf * 0.4) / (2 * Math.sqrt(0.02))
+    - 0.05 * 105 * Math.exp(-0.05 * 0.02) * normCdf(d2)
+    + 0.01 * 100 * Math.exp(-0.01 * 0.02) * normCdf(d1);
+  assert.ok(Math.abs(greeks(input).theta - expectedAnnual / 365) < 1e-12);
+});
+
+test('deterministic flags carry their observed values and never become recommendations', () => {
+  const result = analyzeCoveredCallLifecycle({
+    ...spcx,
+    optionPosition: { ...spcx.optionPosition, strike: 140 },
+    sharePosition: { ...spcx.sharePosition, average_price: 145 },
+    optionQuote: { ...spcx.optionQuote, bid: 0.08, ask: 0.10, mid: 0.09 },
+    underlyingQuote: { ...spcx.underlyingQuote, last: 141, bid: 140.95 },
+    events: [
+      { type: 'EARNINGS', at: Date.parse('2026-09-03T20:00:00.000Z') },
+      { type: 'EX_DIVIDEND', at: Date.parse('2026-09-03T13:30:00.000Z'), cash_amount: 0.50 },
+    ],
+  });
+  const flags = new Map(result.classification.flags.map((flag) => [flag.code, flag]));
+  for (const code of [
+    'EXPIRY_PROXIMITY', 'BELOW_BASIS', 'ASSIGNMENT_LIKELY',
+    'EVENT_IN_TENOR', 'EARLY_ASSIGNMENT_RISK',
+  ]) {
+    assert.equal(flags.has(code), true, code);
+    assert.ok(Object.hasOwn(flags.get(code), 'observed'), code);
+    assert.ok(flags.get(code).threshold, code);
+  }
+  assert.deepEqual(result.classification.recommendations, {
+    do_nothing: 'NOT_RECOMMENDED_BY_FLAGS',
+    close: 'NO_TRUTH',
+    roll: 'NO_TRUTH',
+    exit: 'NO_TRUTH',
+  });
+});
+
+test('NOMINAL is emitted only when no deterministic condition is flagged', () => {
+  const result = analyzeCoveredCallLifecycle({
+    ...spcx,
+    optionPosition: { ...spcx.optionPosition, strike: 150, expiration: '2026-09-18' },
+  });
+  assert.deepEqual(result.classification.flags.map((flag) => flag.code), ['NOMINAL']);
+});
+
+test('uncovered calls and unverified entry economics are refused rather than guessed', () => {
+  assert.equal(analyzeCoveredCallLifecycle({
+    ...spcx, sharePosition: { ...spcx.sharePosition, qty: 100 },
+  }).error, 'COVERED_CALL_ANALYSIS_INPUT_INCOMPLETE');
+  assert.equal(analyzeCoveredCallLifecycle({
+    ...spcx, entryEvidence: { verified: false, reason: 'MISSING_FEE' },
+  }).error, 'MISSING_FEE');
+});
+
+test('broker open lots reconstruct gross credit, opening fees and net credit exactly', () => {
+  const evidence = coveredCallEntryEvidenceFromOpenLots([
+    {
+      symbol: ' SPCX 260904C00141000 ', quantity: -3, cash_per_unit: 199.02,
+      fee_per_unit: 1.30, transaction_id: 'A',
+    },
+    {
+      symbol: 'SPCX260904C00141000', quantity: -2, cash_per_unit: 199.04,
+      fee_per_unit: 1.30, transaction_id: 'B',
+    },
+  ], spcx.optionPosition);
+  assert.deepEqual(evidence, {
+    verified: true,
+    source: 'SCHWAB_LEDGER_OPEN_LOTS',
+    contracts: 5,
+    grossCredit: 1001.64,
+    openingFees: 6.5,
+    netCredit: 995.14,
+    transactionIds: ['A', 'B'],
+  });
+});
+
+test('live CBRS opening lot preserves the broker gross credit and all four dollars of fees', () => {
+  const evidence = coveredCallEntryEvidenceFromOpenLots([{
+    symbol: 'CBRS260904C00200000',
+    quantity: -6,
+    cash_per_unit: 69.333333,
+    fee_per_unit: 0.666667,
+    transaction_id: '129732444954',
+  }], {
+    symbol: 'CBRS260904C00200000',
+    quantity: -6,
+  });
+  assert.deepEqual(evidence, {
+    verified: true,
+    source: 'SCHWAB_LEDGER_OPEN_LOTS',
+    contracts: 6,
+    grossCredit: 420,
+    openingFees: 4,
+    netCredit: 416,
+    transactionIds: ['129732444954'],
+  });
 });

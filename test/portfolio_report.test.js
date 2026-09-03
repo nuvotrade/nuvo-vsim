@@ -142,7 +142,10 @@ describe('canonical Schwab portfolio and performance reporting', () => {
       ['XYZ260918P00050000', { theta: -0.03, asof: custody.observedAt }],
       ['DEF260918P00040000', { theta: -0.02, asof: custody.observedAt }],
     ]);
-    const report = portfolioFromCustody(custody, analytics);
+    const lifecycle = { ok: true, risk_neutral: { sigma_distance_to_strike: 1.2345 } };
+    const report = portfolioFromCustody(custody, analytics, {
+      coveredCallLifecycle: new Map([['ABC260918C00130000', lifecycle]]),
+    });
     assert.equal(report.account.cash, -30000);
     assert.equal(report.account.margin_debit, 30000);
     assert.equal(report.account.buying_power, 95000);
@@ -153,6 +156,10 @@ describe('canonical Schwab portfolio and performance reporting', () => {
     assert.equal(report.account.position_equity, 100800);
     assert.equal(report.summary.income_theta_per_day, 13);
     assert.equal(report.summary.net_theta_per_day, 11);
+    const coveredCall = report.harvest.find(row => row.type === 'COVERED_CALL');
+    assert.equal(coveredCall.lifecycle, lifecycle);
+    assert.equal(coveredCall.distance_to_strike_sigma, 1.2345);
+    assert.equal(coveredCall.distance_source, 'RISK_NEUTRAL_NEGATIVE_D2');
     assert.equal(report.harvest.find(row => row.type === 'CASH_SECURED_PUT').capital_committed, 5000);
     assert.ok(!report.capital_committed.some(row => row.symbol === 'CASH'));
   });

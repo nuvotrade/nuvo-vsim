@@ -521,6 +521,28 @@ describe('Massive production provider', () => {
     assert.equal(actionCalls, 2);
   });
 
+  test('normalizes verified ex-dividend facts for covered-call early-assignment classification', async () => {
+    const base = marketFetcher();
+    const provider = new MassiveProvider({
+      now: () => NOW,
+      fetcher: async (request) => {
+        if (new URL(request.url).pathname === '/v1/corporate-actions') {
+          return Response.json({
+            status: 'VERIFIED', source: 'MASSIVE_ACTIONS', splits: [],
+            dividends: [{ exDividendDate: '2026-08-28', cashAmount: 0.25 }],
+          });
+        }
+        return base(request);
+      },
+    });
+    const result = await provider.events('TEST');
+    assert.equal(result.coverage.dividends, true);
+    assert.deepEqual(result.value.find((event) => event.type === 'EX_DIVIDEND'), {
+      type: 'EX_DIVIDEND', at: Date.parse('2026-08-28T16:00:00Z'),
+      cash_amount: 0.25, source: 'MASSIVE_ACTIONS',
+    });
+  });
+
   test('retries a transient market-session failure without inventing a state', async () => {
     const base = marketFetcher();
     let statusCalls = 0;

@@ -308,11 +308,27 @@ export class MassiveProvider extends DataProvider {
         ...(actions.splits ?? []).map((event) => ({
           type: 'CORPORATE_SPLIT', at: timestamp(`${event.executionDate}T16:00:00Z`), source: actions.source,
         })),
+        ...(actions.dividends ?? []).map((event) => ({
+          type: 'EX_DIVIDEND',
+          at: timestamp(`${event.exDividendDate ?? event.ex_dividend_date ?? event.date}T16:00:00Z`),
+          cash_amount: numeric(event.cashAmount ?? event.cash_amount ?? event.amount),
+          source: actions.source,
+        })),
       ];
-      if (events.some((event) => !Number.isFinite(event.at))) {
+      if (events.some((event) => !Number.isFinite(event.at)
+        || (event.type === 'EX_DIVIDEND' && !(event.cash_amount >= 0)))) {
         return { error: 'MASSIVE_EVENT_DATE_UNVERIFIED' };
       }
-      return { value: events, asOf: this.now(), source: 'MASSIVE_EVENT_CLEARANCE' };
+      return {
+        value: events,
+        asOf: this.now(),
+        source: 'MASSIVE_EVENT_CLEARANCE',
+        coverage: {
+          earnings: true,
+          corporate_actions: true,
+          dividends: Array.isArray(actions.dividends),
+        },
+      };
     } catch (error) {
       return { error: error.message };
     }

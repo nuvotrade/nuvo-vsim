@@ -438,7 +438,9 @@ export function performanceFromBrokerRows(rows, {
   };
 }
 
-export function portfolioFromCustody(custody, optionAnalytics = new Map(), { limits = {} } = {}) {
+export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
+  limits = {}, coveredCallLifecycle = new Map(),
+} = {}) {
   const account = custody?.account ?? {};
   const positions = custody?.positions ?? [];
   const openOrders = custody?.openOrders ?? [];
@@ -513,14 +515,18 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), { lim
       distance_to_strike_dollars: cushion,
       distance_to_strike_pct: spot > 0 && cushion !== null ? cushion / spot : null,
       one_sigma_move: oneSigmaMove,
-      distance_to_strike_sigma: oneSigmaMove > 0 && cushion !== null ? cushion / oneSigmaMove : null,
-      distance_source: cushion !== null && oneSigmaMove !== null
-        ? 'SCHWAB_CUSTODY_SPOT_AND_OPTION_QUOTE_IV' : 'INCOMPLETE',
+      distance_to_strike_sigma: finite(coveredCallLifecycle.get(position.symbol)?.risk_neutral?.sigma_distance_to_strike)
+        ?? (oneSigmaMove > 0 && cushion !== null ? cushion / oneSigmaMove : null),
+      distance_source: coveredCallLifecycle.get(position.symbol)?.ok
+        ? 'RISK_NEUTRAL_NEGATIVE_D2'
+        : cushion !== null && oneSigmaMove !== null
+          ? 'SCHWAB_CUSTODY_SPOT_AND_OPTION_QUOTE_IV' : 'INCOMPLETE',
       expiration_capital: right === 'put' && strike !== null
         ? strike * qty * multiplier
         : right === 'call' && spot !== null ? spot * qty * multiplier : null,
       quote_asof: analytics.asof ?? null,
       quote_freshness: analytics.freshness ?? null,
+      lifecycle: coveredCallLifecycle.get(position.symbol) ?? null,
     };
   });
   const commitments = new Map();

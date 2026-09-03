@@ -8,23 +8,6 @@ import {
 } from '../cloudflare/telegram-assistant.js';
 import { analyzeCoveredCallLifecycle } from '../src/lifecycle/covered_call_analysis.js';
 
-function coveredCallHistory(n = 51) {
-  const bars = [];
-  let close = 100;
-  for (let index = 0; index < n; index += 1) {
-    const change = Math.sin(index * 0.71) * 0.012 + Math.cos(index * 0.19) * 0.006;
-    const open = close * (1 + change * 0.2);
-    close *= 1 + change;
-    bars.push({
-      o: open,
-      h: Math.max(open, close) * 1.01,
-      l: Math.min(open, close) * 0.99,
-      c: close,
-    });
-  }
-  return bars;
-}
-
 describe('Telegram Guardian assistant', () => {
   test('webhook secret comparison accepts only the exact secret', async () => {
     assert.equal(await secureSecretMatches('correct-secret', 'correct-secret'), true);
@@ -61,25 +44,25 @@ describe('Telegram Guardian assistant', () => {
         symbol: 'TEST260828C00105000', underlying: 'TEST', right: 'call',
         strike: 105, expiration: '2026-08-28', qty: -2, multiplier: 100, average_price: 2.4,
       },
-      sharePosition: { symbol: 'TEST', qty: 300 },
+      sharePosition: { symbol: 'TEST', qty: 300, average_price: 98 },
       optionQuote: {
         bid: 0.9, ask: 1, mid: 0.95, iv: 0.42, delta: 0.31, theta: -0.18,
         asof: '2026-08-26T16:00:00.000Z', source: 'SCHWAB',
       },
-      underlyingQuote: { last: 100 },
-      historyBars: coveredCallHistory(),
+      underlyingQuote: { last: 100, bid: 99.95 },
+      entryEvidence: {
+        verified: true, source: 'TEST_LEDGER', transactionIds: ['ENTRY'],
+        grossCredit: 480, openingFees: 0, netCredit: 480,
+      },
+      eventCoverage: { eventsVerified: true, dividendsVerified: true },
       now: Date.parse('2026-08-26T16:00:00.000Z'),
-      samples: 4_000,
-      seed: 'telegram-covered-call-test',
     });
     const answer = coveredCallLifecycleAnswer({ covered_calls: [analysis] });
-    assert.match(answer, /^(?:HOLD|CLOSE EARLY|NEAR TIE) —/u);
-    assert.match(answer, /Market-implied probability of expiring OTM: \d+\.\d%/u);
-    assert.match(answer, /Model probability holding beats closing now: \d+\.\d%/u);
-    assert.match(answer, /Model-minus-market assignment gap: -?\d+\.\d%/u);
-    assert.match(answer, /Expected upside surrendered if held: \$[\d,]+/u);
-    assert.match(answer, /Expected hold-minus-close value: -?\$[\d,]+/u);
-    assert.match(answer, /Reasoning/u);
+    assert.match(answer, /^DETERMINISTIC STATE —/u);
+    assert.match(answer, /Risk-neutral probability of expiring OTM: \d+\.\d%/u);
+    assert.match(answer, /Executable buyback principal: \$[\d,]+/u);
+    assert.match(answer, /Option P&L locked by closing call: -?\$[\d,]+/u);
+    assert.match(answer, /CLOSE: NO_TRUTH · ROLL: NO_TRUTH · EXIT: NO_TRUTH/u);
     assert.match(answer, /No order was placed/u);
     assert.doesNotMatch(answer, /pre-approved|frozen order|required before execution|MANAGE-ONLY/iu);
   });
