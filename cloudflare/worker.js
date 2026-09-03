@@ -5044,7 +5044,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       try {
         const result = await bounded(operations.laneRecover(), 10_000,
           'LANE_1_RECOVERY_RESPONSE_TIMEOUT');
-        if (result.state !== 'OPEN_SHORT' || result.positionSide !== 'SHORT') {
+        if (!['LONG', 'SHORT'].includes(result.positionSide)
+          || result.state !== 'OPEN_' + result.positionSide) {
           throw new Error(result.faultCode || 'LANE_1_RECOVERY_STATE_MISMATCH');
         }
         await refresh();

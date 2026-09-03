@@ -148,6 +148,16 @@ test('lane UI reducer updates only accepted success and preserves prior state on
     error: 'DISARM UNCONFIRMED — the lane may still be armed. Cancel any in-flight order at Schwab directly. (ACCOUNT_COORDINATOR_UNAVAILABLE)' });
 });
 
+test('recovery UI accepts either exact one-share open side and never assumes SHORT', () => {
+  const script = liveDashboardScript({ e3SpineTab: true });
+  const start = script.indexOf("if (action === 'laneRecover')");
+  const end = script.indexOf('const confirmations =', start);
+  const branch = script.slice(start, end);
+  assert.match(branch, /\['LONG', 'SHORT'\]\.includes\(result\.positionSide\)/u);
+  assert.match(branch, /result\.state !== 'OPEN_' \+ result\.positionSide/u);
+  assert.doesNotMatch(branch, /result\.state !== 'OPEN_SHORT'/u);
+});
+
 test('ARM panel contract follows live coordinator stage and names illegal states', () => {
   assert.deepEqual(armLaneContract({ state: 'OPEN_SHORT', positionSide: 'SHORT' }), {
     permitted: true, transition: 'ARM_EXISTING_SHORT',
