@@ -48,9 +48,11 @@ test('covered-call calculator evaluates the 7, 14, and 21 DTE targets and ranks 
   assert.ok(Math.abs((result.selected.gross_premium - result.selected.net_premium) - 1.95) < 1e-9);
   assert.equal(result.selected.expected_assignment_fee, 0);
   assert.equal(result.selected.cost_model_version, SCHWAB_COVERED_CALL_COSTS.version);
-  assert.ok(result.selected.incremental_nev_vs_holding > 0);
-  assert.ok(result.selected.incremental_nev_per_day > 0);
-  assert.equal(result.objective, 'MAX_PRIMARY_RAW_NEV0_PER_DAY_VS_HOLDING_SHARES');
+  assert.ok(result.selected.net_premium_per_calendar_day > 0);
+  assert.ok(result.selected.wheel_income_return_on_cost_per_day > 0);
+  assert.equal(result.objective, 'MAX_PRIMARY_EXPECTED_WHEEL_PROFIT_FROM_COST_PER_CALENDAR_DAY');
+  assert.ok(Number.isFinite(result.selected.expected_wheel_profit));
+  assert.ok(Number.isFinite(result.selected.expected_wheel_profit_per_calendar_day));
   assert.equal(result.forecast.status, 'VERIFIED_NO_FALLBACK');
   assert.equal(result.method.credit, 'SCHWAB_EXECUTABLE_BID');
   assert.equal(result.method.primary_model, 'bootstrap');
@@ -58,6 +60,7 @@ test('covered-call calculator evaluates the 7, 14, and 21 DTE targets and ranks 
   assert.equal(result.method.mixture, 'NONE');
   assert.equal(result.method.cash_carry,
     'NOT_APPLICABLE_COVERED_CALL_INCREMENTAL_VALUE_IS_RAW_ONLY');
+  assert.equal(result.method.uncovered_hold_comparison, 'DIAGNOSTIC_ONLY_NOT_AN_ENTRY_GATE');
   assert.equal(result.selected.calculation_unit_contracts, 1);
   assert.equal('cash_carry_cost_0' in result.selected, false);
   assert.equal('cash_adj_nev_0' in result.selected, false);
@@ -115,6 +118,9 @@ test('returns no eligible covered call rather than weakening the cost-basis rule
   assert.equal(result.outcome, 'NO_ELIGIBLE_COVERED_CALL');
   assert.equal(result.reason_code, 'NO_LIQUID_STRIKE_STRICTLY_ABOVE_COST_BASIS_AND_MARKET');
   assert.equal(result.rejected.at_or_below_cost_basis, 3);
+  assert.ok(result.targets.every((row) => row.decision === 'HOLD_SHARES_NO_TRADE'));
+  assert.ok(result.targets.every((row) => row.primary_blocker.code
+    === 'UNDERWRITE/STRIKE_AT_OR_BELOW_COST_BASIS'));
 });
 
 test('refuses incomplete custody or uncovered capacity', () => {
@@ -144,17 +150,46 @@ test('constitutional event and liquidity gates cannot be outweighed by premium',
   assert.equal(result.rejected.event_in_window, 2);
 });
 
-test('holding shares wins when executable premium does not pay for modeled surrendered upside', () => {
+test('wheel profit policy does not reject an above-cost call merely because uncovered shares model higher upside', () => {
   const result = calculateCoveredCallCandidates({
     symbol: 'ABC', shares: 100, averagePrice: 90, availableContracts: 1, spot: 100,
     historyBars: history(), samples: 1_500,
     contracts: [call({ dte: 7, strike: 100.01, bid: 0.05, ask: 0.051, delta: 0.50 })],
   });
-  assert.equal(result.ok, false);
-  assert.equal(result.reason_code, 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES');
-  assert.equal(result.rejected.no_incremental_edge, 1);
-  assert.equal(result.rejection_codes['UNDERWRITE/INCREMENTAL_NEV_HURDLE_FAILED'], 1);
-  assert.equal(result.method.score, 'PRIMARY_RAW_NEV0_VS_HOLDING_SHARES_PER_CALENDAR_DAY');
+  assert.equal(result.ok, true);
+  assert.equal(result.selected.strike, 100.01);
+  assert.equal(result.selected.legacy_uncovered_hold_gate_passed, false);
+  assert.equal(result.method.score, 'MAX_PRIMARY_EXPECTED_WHEEL_PROFIT_FROM_COST_PER_CALENDAR_DAY');
+  assert.equal(result.method.uncovered_hold_comparison, 'DIAGNOSTIC_ONLY_NOT_AN_ENTRY_GATE');
+});
+
+test('returns exactly one wheel choice for this week, next week, and week after', () => {
+  const result = calculateCoveredCallCandidates({
+    symbol: 'ABC', shares: 100, averagePrice: 99, availableContracts: 1, spot: 100,
+    historyBars: history(), samples: 1_500, targets: [1, 8, 15],
+    expectedMoves: {
+      '2026-09-01': { expected_move: 1.5, upper_boundary: 101.5 },
+      '2026-09-08': { expected_move: 2.2, upper_boundary: 102.2 },
+      '2026-09-15': { expected_move: 3.0, upper_boundary: 103.0 },
+    },
+    contracts: [
+      call({ dte: 1, strike: 101, bid: 0.45, ask: 0.47, delta: 0.28 }),
+      call({ dte: 1, strike: 102, bid: 0.20, ask: 0.21, delta: 0.16 }),
+      call({ dte: 8, strike: 102, bid: 0.85, ask: 0.89, delta: 0.25 }),
+      call({ dte: 15, strike: 103, bid: 1.10, ask: 1.15, delta: 0.23 }),
+    ],
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.targets.map((row) => row.slot_label),
+    ['This week', 'Next week', 'Week after']);
+  assert.deepEqual(result.targets.map((row) => row.best?.dte), [1, 8, 15]);
+  assert.ok(result.targets.every((row) => row.best?.order_instruction.startsWith('SELL TO OPEN 1 ')));
+  assert.ok(result.targets.every((row) => Number.isFinite(row.best?.expected_wheel_profit)));
+  assert.ok(result.targets.every((row) => row.best?.expected_move_formula === 'ATM_CALL_MID_PLUS_ATM_PUT_MID'));
+  assert.equal(result.method.expected_move_reference,
+    'ATM_CALL_MID_PLUS_ATM_PUT_MID_INFORMATIONAL_NOT_A_GATE');
+  assert.equal(result.technical_timing.policy_effect, 'INFORMATIONAL_ONLY_NOT_A_GATE');
+  assert.ok(result.targets.every((row) => row.decision === 'SELL_COVERED_CALL'));
 });
 
 test('short history is blocked instead of using a fallback volatility', () => {

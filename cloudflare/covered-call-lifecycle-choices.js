@@ -263,6 +263,10 @@ export function compareCoveredCallLifecycleChoices({
     const brokerReportedDte = finite(contract.dte);
     const bid = finite(contract.bid);
     const ask = finite(contract.ask);
+    const iv = finite(contract.iv);
+    const delta = finite(contract.delta);
+    const openInterest = finite(contract.openInterest);
+    const volume = finite(contract.volume);
     const symbol = String(contract.symbol ?? '').replaceAll(' ', '');
     if (rollDte === null) {
       unavailableRows.push({ symbol: symbol || null, reason_code: 'CONTRACT/ROLL_EXPIRATION_UNAVAILABLE' });
@@ -329,6 +333,11 @@ export function compareCoveredCallLifecycleChoices({
       strike: rollStrike,
       executable_bid_per_share: bid,
       executable_ask_per_share: ask,
+      implied_volatility: iv,
+      delta,
+      open_interest: openInterest,
+      volume,
+      spread_pct: ask !== null && bid + ask > 0 ? (ask - bid) / ((ask + bid) / 2) : null,
       quote_asof: Number.isFinite(Number(contract.quoteAsOf))
         ? new Date(Number(contract.quoteAsOf)).toISOString() : null,
       close_debit_0: roundMoney(closeDebit),

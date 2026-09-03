@@ -38,9 +38,15 @@ import {
   summarizeCoveredCallPortfolioState,
 } from './covered-call-calculator.js';
 import { compareCoveredCallLifecycleChoices } from './covered-call-lifecycle-choices.js';
+import { buildCoveredCallPositionDecision } from './position-management-decision.js';
 import {
   calculateCashSecuredPutRows, configuredCashSecuredPutDteTargets,
 } from './cash-secured-put-calculator.js';
+import {
+  buildCashSecuredPutDecision, calculateAtmStraddleExpectedMoves, cspDecisionAlertText,
+  weeklyExpiryDteTargets,
+} from './csp-decision-engine.js';
+import { analyzeCompletedTradeBatch, loadTradeLearning } from './trade-learning.js';
 import {
   compilePortfolioReview, PORTFOLIO_REVIEW_DTE_TARGETS,
 } from './portfolio-review.js';
@@ -1671,13 +1677,8 @@ export async function settleMaturedUnderwriteForecasts(env, ownerId, {
 
 async function coveredCallDashboard(env, ownerId, rawSymbol) {
   const symbol = String(rawSymbol ?? '').trim().toUpperCase();
-  const targetDtes = configuredCoveredCallDteTargets(env.NUVO_CC_DTE_TARGETS);
-  if (!targetDtes) return blockedCoveredCall(symbol || null,
-    'CONFIG/COVERED_CALL_DTE_TARGETS_INVALID',
-    'The configured covered-call tenor targets are invalid. No strike was selected.', {
-      target_dtes: [],
-      diagnostics: { configured_value_present: env.NUVO_CC_DTE_TARGETS !== undefined },
-    });
+  const valuationAt = Date.now();
+  const targetDtes = weeklyExpiryDteTargets(valuationAt);
   const blocked = (blockedSymbol, reasonCode, reason, detail = {}) => blockedCoveredCall(
     blockedSymbol, reasonCode, reason, { ...detail, target_dtes: targetDtes },
   );
@@ -1737,7 +1738,7 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     'TRUTH/SESSION_NOT_RTH',
     `The options market is ${String(session.value?.status ?? 'closed').toLowerCase()}. Recalculation becomes available automatically during regular trading hours.`);
   const [chain, events, history] = await Promise.all([
-    provider.optionChain(symbol, { expirations: targetDtes, rights: ['call'] }),
+    provider.optionChain(symbol, { expirations: targetDtes, rights: ['put', 'call'] }),
     provider.events(symbol),
     provider.history(symbol, { lookback: 400, minBars: 121 }),
   ]);
@@ -1759,8 +1760,11 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     spot: chain.value?.spot,
     contracts: chain.value?.contracts,
     historyBars: history.value,
+    expectedMoves: calculateAtmStraddleExpectedMoves({
+      spot: chain.value?.spot, contracts: chain.value?.contracts,
+    }),
     events: events.value,
-    now: Date.now(),
+    now: valuationAt,
     seed: `covered-call-entry:${symbol}:${chain.asOf}`,
     targets: targetDtes,
     costs: SCHWAB_COVERED_CALL_COSTS,
@@ -1771,13 +1775,10 @@ async function coveredCallDashboard(env, ownerId, rawSymbol) {
     settlement: { status: settlement.status, settled: settlement.settled,
       unavailable: settlement.unavailable },
     reason: calculation.ok
-      ? 'Best eligible strike by incremental modeled value per day versus continuing to hold the shares uncovered.'
-      : calculation.reason_code === 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES'
-        ? 'Every eligible call surrendered at least as much modeled upside as its executable premium paid. Holding the shares uncovered is preferred.'
-        : 'No liquid call strictly above both average share price and the current market passed every gate.',
+      ? 'Three weekly wheel decisions were produced from fresh executable quotes. Any selected strike is above both share cost and current market; assignment at the strike realizes a gain and releases the shares.'
+      : 'No liquid call strictly above both average share price and the current market passed every gate.',
     target_dtes: targetDtes,
-    target_dtes_source: env.NUVO_CC_DTE_TARGETS === undefined
-      ? 'CODE_DEFAULT_7_14_21_UNRATIFIED' : 'WORKER_VAR_UNRATIFIED',
+    target_dtes_source: 'NEW_YORK_THIS_FRIDAY_NEXT_FRIDAY_FOLLOWING_FRIDAY',
     execution: 'READ_ONLY_CALCULATION_NO_ORDER_ROUTE',
     mutation_eligible: false,
     user_action_required: calculation.ok,
@@ -1816,7 +1817,7 @@ function blockedLifecycleChoices(optionSymbol, reasonCode, reason, detail = {}) 
   };
 }
 
-export async function coveredCallLifecycleChoicesDashboard(env, ownerId, rawOptionSymbol) {
+export async function coveredCallLifecycleChoicesDashboard(env, ownerId, rawOptionSymbol, context = {}) {
   const optionSymbol = String(rawOptionSymbol ?? '').trim().toUpperCase().replaceAll(' ', '');
   const blocked = (code, reason, detail = {}) => blockedLifecycleChoices(
     optionSymbol || null, code, reason, detail,
@@ -1826,9 +1827,9 @@ export async function coveredCallLifecycleChoicesDashboard(env, ownerId, rawOpti
   if (!targetDtes) return blocked('CONFIG/COVERED_CALL_DTE_TARGETS_INVALID',
     'The configured roll-tenor targets are invalid.');
 
-  const [snapshot, baseline] = await Promise.all([
-    reconciledSnapshot(env, ownerId), loadBaseline(env, ownerId),
-  ]);
+  const [snapshot, baseline] = context.snapshot && context.baseline
+    ? [context.snapshot, context.baseline]
+    : await Promise.all([reconciledSnapshot(env, ownerId), loadBaseline(env, ownerId)]);
   const reconciliation = accountReconciliation(baseline, snapshot);
   if (reconciliation.status !== 'CAPTURED') return blocked(`RECON/${reconciliation.status}`,
     'Current Schwab custody does not match the captured reconciliation checkpoint.', {
@@ -1857,20 +1858,20 @@ export async function coveredCallLifecycleChoicesDashboard(env, ownerId, rawOpti
       open_order_count: relatedOrders.length,
     });
 
-  const provider = marketProvider(env, ownerId);
-  let marketSession;
-  try {
-    const marketDate = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(new Date());
-    const hours = await new SchwabD1Client(env).marketHours(ownerId, {
-      markets: ['option'], date: marketDate,
-    });
-    marketSession = sessionStatus(hours, Date.now());
-  } catch (error) {
-    return blocked('TRUTH/MARKET_SESSION_UNVERIFIED',
-      'The options session could not be verified.', { market_error: String(error.message ?? error) });
-  }
+  const provider = context.provider ?? marketProvider(env, ownerId);
+  let marketSession = context.marketSession;
+  if (!marketSession) try {
+      const marketDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(new Date());
+      const hours = await new SchwabD1Client(env).marketHours(ownerId, {
+        markets: ['option'], date: marketDate,
+      });
+      marketSession = sessionStatus(hours, Date.now());
+    } catch (error) {
+      return blocked('TRUTH/MARKET_SESSION_UNVERIFIED',
+        'The options session could not be verified.', { market_error: String(error.message ?? error) });
+    }
   if (!marketSession) return blocked('TRUTH/MARKET_SESSION_UNVERIFIED',
     'The options session could not be verified.');
   if (marketSession !== 'OPEN') return blocked(
@@ -1945,47 +1946,112 @@ export async function coveredCallLifecycleChoicesDashboard(env, ownerId, rawOpti
   };
 }
 
+export async function positionManagementDashboard(env, ownerId) {
+  const [snapshot, baseline] = await Promise.all([
+    reconciledSnapshot(env, ownerId), loadBaseline(env, ownerId),
+  ]);
+  let marketSession;
+  try {
+    const marketDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const hours = await new SchwabD1Client(env).marketHours(ownerId, {
+      markets: ['option'], date: marketDate,
+    });
+    marketSession = sessionStatus(hours, Date.now());
+  } catch {
+    marketSession = null;
+  }
+  const provider = marketProvider(env, ownerId);
+  const openCoveredCalls = (snapshot.positions ?? []).filter((position) =>
+    position.type === 'OPTION' && Number(position.quantity) < 0
+      && String(position.right).toLowerCase() === 'call');
+  const decisions = await Promise.all(openCoveredCalls.map(async (position) => {
+    let comparison;
+    try {
+      comparison = await coveredCallLifecycleChoicesDashboard(env, ownerId, position.symbol, {
+        snapshot, baseline, marketSession, provider,
+      });
+    } catch (error) {
+      comparison = {
+        ok: false,
+        reason_code: 'TRUTH/LIFECYCLE_COMPARISON_REQUEST_FAILED',
+        reason: String(error?.message ?? error),
+        current_option_symbol: position.symbol,
+      };
+    }
+    const shares = (snapshot.positions ?? []).find((candidate) => candidate.type === 'EQUITY'
+      && candidate.symbol === position.underlying);
+    const contracts = Math.abs(Number(position.quantity));
+    const multiplier = Number(position.multiplier ?? 100);
+    const lifecycleTruth = {
+      ok: true, symbol: position.symbol, underlying: position.underlying,
+      contracts, covered_shares: contracts * multiplier,
+      strike: Number(position.strike), expiration: position.expiration,
+      dte: comparison?.hold?.dte ?? null, spot: comparison?.spot ?? null,
+      share_basis: Number(shares?.averagePrice),
+      quote: { asof: comparison?.quote_snapshot?.current_option_asof ?? null },
+      classification: { current: true, flags: [] },
+      current_trade: {
+        total_close_outlay: comparison?.close
+          ? Math.abs(Number(comparison.close.executable_cash_now_0)) : null,
+        profit_locked_if_call_closed_now: null,
+      },
+      paths: { assignment: { pnl: null } },
+    };
+    return buildCoveredCallPositionDecision({ comparison, lifecycle: lifecycleTruth });
+  }));
+  return {
+    outcome: decisions.some((decision) => decision.outcome === 'ERROR')
+      ? 'PARTIAL' : 'COMPLETE',
+    asof: snapshot.asOf ?? null,
+    decision_count: decisions.length,
+    decisions,
+    method: {
+      current_position_truth: 'SCHWAB_READ_ONLY_CUSTODY_AND_EXECUTABLE_QUOTES',
+      comparison: 'COMMON_CLOCK_HOLD_CLOSE_ROLL',
+      selection: 'ONE_ACTION_PER_OPEN_COVERED_CALL',
+      execution: 'PROPOSAL_ONLY_MANUAL_EXECUTION',
+    },
+    mutation_eligible: false,
+  };
+}
+
 async function cashSecuredPutDashboard(env, ownerId, rawSymbol) {
   const symbol = String(rawSymbol ?? '').trim().toUpperCase();
   if (!/^[A-Z][A-Z0-9.]{0,9}$/u.test(symbol)) {
-    return {
-      ok: false, outcome: 'CSP_MATH_UNAVAILABLE', reason_code: 'SYMBOL_INVALID',
-      reason: 'Enter one valid ticker symbol.', execution: 'READ_ONLY_MATH_NO_ORDER_ROUTE',
-    };
+    return buildCashSecuredPutDecision({ symbol });
   }
   const targets = configuredCashSecuredPutDteTargets(env.NUVO_CSP_CALCULATOR_DTE_TARGETS);
-  if (!targets) return {
-    ok: false, outcome: 'CSP_MATH_UNAVAILABLE', symbol,
-    reason_code: 'CSP_CALCULATOR_DTE_TARGETS_INVALID',
-    reason: 'The calculator expiry targets are invalid.', execution: 'READ_ONLY_MATH_NO_ORDER_ROUTE',
-  };
-  const settlement = await settleMaturedUnderwriteForecasts(env, ownerId, {
-    surface: 'CSP_SINGLE_TICKER',
-  });
+  if (!targets) return buildCashSecuredPutDecision({ symbol,
+    marketSessionError: 'CSP_CALCULATOR_DTE_TARGETS_INVALID' });
   const provider = marketProvider(env, ownerId);
-  const [chain, history, events, session] = await Promise.all([
-    provider.optionChain(symbol, { expirations: targets, rights: ['put'], includePartial: true }),
-    provider.history(symbol, { lookback: 400, minBars: 1 }),
-    provider.events(symbol),
-    provider.marketState(),
-  ]);
-  if (chain.error) return {
-    ok: false, outcome: 'CSP_MATH_UNAVAILABLE', symbol,
-    reason_code: 'LIVE_PUT_CHAIN_UNAVAILABLE',
-    reason: 'Fresh put quotes are unavailable. No stale quote or estimate was substituted.',
-    execution: 'READ_ONLY_MATH_NO_ORDER_ROUTE',
-    diagnostics: {
-      chain_error: chain.error, history_error: history.error ?? null,
-      events_error: events.error ?? null, market_session_error: session.error ?? null,
-    },
-  };
-  const calculation = calculateCashSecuredPutRows({
+  const valuationAt = Date.now();
+  const weeklyTargets = weeklyExpiryDteTargets(valuationAt);
+  if (weeklyTargets.length !== 3) return buildCashSecuredPutDecision({ symbol,
+    marketSessionError: 'CSP_WEEKLY_EXPIRY_TARGETS_UNAVAILABLE' });
+  let chain; let history; let events; let session; let snapshot; let baseline; let controls;
+  try {
+    [chain, history, events, session, snapshot, baseline, controls] = await Promise.all([
+      provider.optionChain(symbol, { expirations: weeklyTargets, rights: ['put', 'call'], includePartial: true }),
+      provider.history(symbol, { lookback: 400, minBars: 1 }),
+      provider.events(symbol),
+      provider.marketState(),
+      reconciledSnapshot(env, ownerId),
+      loadBaseline(env, ownerId),
+      loadOperatorControls(env, ownerId),
+    ]);
+  } catch (error) {
+    return buildCashSecuredPutDecision({ symbol,
+      marketSessionError: String(error?.message ?? error) });
+  }
+  const rowCalculation = calculateCashSecuredPutRows({
     symbol,
     spot: chain.value?.spot,
     contracts: chain.value?.contracts,
     historyBars: history.value ?? [],
     events: events.value ?? [],
-    now: Date.now(),
+    now: valuationAt,
     rate: DEFAULT_LIMITS.riskFreeRate,
     dividendYield: 0,
     alternativeCashRate: null,
@@ -1995,33 +2061,65 @@ async function cashSecuredPutDashboard(env, ownerId, rawSymbol) {
     targetBasis: null,
     seed: `csp-single-ticker:${symbol}:${chain.asOf}`,
   });
-  const response = {
-    ...calculation,
-    calibration: settlement.calibration,
-    settlement: { status: settlement.status, settled: settlement.settled,
-      unavailable: settlement.unavailable },
-    reason: calculation.ok
-      ? `All ${calculation.row_count} put rows with an executable bid are shown. Nothing is ranked, approved, or suppressed by portfolio policy.`
-      : 'The requested ticker did not provide the core inputs needed for a cash-secured-put row.',
-    target_dtes: targets,
-    asof: chain.asOf ? new Date(chain.asOf).toISOString() : null,
-    source: chain.source,
-    diagnostics: {
-      market_session: session.value?.status ?? null,
-      market_session_error: session.error ?? null,
-      history_error: history.error ?? null,
-      events_error: events.error ?? null,
-      chain_contracts_received: chain.value?.contracts?.length ?? 0,
-      events_received: events.value?.length ?? 0,
-    },
+  const calculation = {
+    ...rowCalculation,
+    expected_moves: calculateAtmStraddleExpectedMoves({
+      spot: chain.value?.spot,
+      contracts: chain.value?.contracts ?? [],
+    }),
   };
+  const asof = Number.isFinite(chain?.asOf) ? chain.asOf : null;
   try {
-    response.forecast_persistence = await recordUnderwriteForecastRows(env, ownerId, {
-      surface: 'CSP_SINGLE_TICKER', symbol, asof: response.asof, result: response,
+    const settlement = await settleMaturedUnderwriteForecasts(env, ownerId, {
+      surface: 'CSP_SINGLE_TICKER',
     });
-  } catch (error) {
-    response.forecast_persistence = { status: 'FAILED', rows: 0, error: String(error.message ?? error) };
+    await recordUnderwriteForecastRows(env, ownerId, {
+      surface: 'CSP_SINGLE_TICKER', symbol,
+      asof: asof ? new Date(asof).toISOString() : null,
+      result: { ...calculation, calibration: settlement.calibration },
+    });
+  } catch {
+    // Forecast calibration is secondary evidence. It never changes or suppresses the live decision.
   }
+  const reconciliation = accountReconciliation(baseline, snapshot);
+  const decision = buildCashSecuredPutDecision({
+    symbol,
+    calculation: chain?.error ? { ok: false, reason_code: chain.error } : calculation,
+    account: {
+      nav: snapshot?.nav,
+      cash: snapshot?.cash,
+      withdrawableCash: snapshot?.withdrawableCash,
+      buyingPower: snapshot?.buyingPower,
+    },
+    positions: snapshot?.positions ?? [],
+    openOrders: snapshot?.openOrders ?? [],
+    accountAsOf: snapshot?.asOf ?? null,
+    accountHash: snapshot?.snapshotHash ?? null,
+    controls,
+    reconciliation: reconciliation.status,
+    marketSession: session?.value?.status ?? null,
+    marketSessionError: session?.error ?? null,
+    source: chain?.source ?? null,
+    asof,
+    now: valuationAt,
+    maxAccountAgeMs: Number(env.NUVO_MAX_ACCOUNT_AGE_MS ?? DEFAULT_LIMITS.maxAccountAgeMs),
+    maxChainAgeMs: Number(env.NUVO_MAX_CHAIN_AGE_MS ?? DEFAULT_LIMITS.maxChainAgeMs),
+  });
+  const response = {
+    ...decision,
+    alert: { text: cspDecisionAlertText(decision), derived_from_decision_id: decision.decision_id },
+  };
+  await audit(env, ownerId, 'CSP_CANONICAL_DECISION', {
+    decision_id: response.decision_id,
+    input_fingerprint: response.input_fingerprint,
+    symbol: response.symbol,
+    outcome: response.outcome,
+    choices: (response.choices ?? []).map((choice) => ({
+      slot: choice.slot, outcome: choice.outcome,
+      contract: choice.recommendation?.contract ?? null,
+      blocker: choice.primary_blocker?.code ?? null,
+    })),
+  });
   return response;
 }
 
@@ -2030,7 +2128,7 @@ async function performanceDashboard(env, ownerId) {
   const [rows, current, ledgerStatus] = await Promise.all([
     env.DB.prepare(`SELECT transaction_id,raw_json,occurred_at FROM broker_events
       WHERE owner_id=? AND transaction_id IS NOT NULL AND transaction_leg_id IS NULL
-      AND raw_json IS NOT NULL ORDER BY occurred_at ASC LIMIT 10000`).bind(ownerId).all(),
+      AND raw_json IS NOT NULL ORDER BY occurred_at ASC`).bind(ownerId).all(),
     env.DB.prepare(`SELECT unrealized_pnl,observed_at FROM broker_account_performance
       WHERE owner_id=? ORDER BY observed_at DESC LIMIT 1`).bind(ownerId).first(),
     client.ledgerStatus(ownerId),
@@ -2038,6 +2136,7 @@ async function performanceDashboard(env, ownerId) {
   const report = performanceFromBrokerRows(rows.results ?? [], {
     currentUnrealized: current?.unrealized_pnl,
   });
+  const learning = await loadTradeLearning(env, ownerId, report.trades);
   const importedCount = Number(ledgerStatus.transaction_count ?? 0);
   const rowCount = (rows.results ?? []).length;
   const complete = Boolean(ledgerStatus.complete) && report.summary.history_complete
@@ -2059,6 +2158,7 @@ async function performanceDashboard(env, ownerId) {
         : 'Totals include only matched Schwab lifecycles. Unmatched closures are excluded from realized P&L.',
     },
     raw_packets: 'PROTECTED_NOT_EXPOSED',
+    learning,
   };
 }
 
@@ -2066,7 +2166,7 @@ async function performanceCalendarDashboard(env, ownerId, { month, scope }) {
   const [rows, ledgerStatus] = await Promise.all([
     env.DB.prepare(`SELECT transaction_id,raw_json,occurred_at FROM broker_events
       WHERE owner_id=? AND transaction_id IS NOT NULL AND transaction_leg_id IS NULL
-      AND raw_json IS NOT NULL ORDER BY occurred_at ASC LIMIT 10000`).bind(ownerId).all(),
+      AND raw_json IS NOT NULL ORDER BY occurred_at ASC`).bind(ownerId).all(),
     new SchwabD1Client(env).ledgerStatus(ownerId),
   ]);
   const report = performanceFromBrokerRows(rows.results ?? []);
@@ -2791,13 +2891,16 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
   const e3Styles = e3SpineEnabled ? `<style>
     .e3-spine-panes{display:grid;grid-template-columns:1fr 1fr;gap:16px}.e3-spine-facts{display:grid;grid-template-columns:1fr 1fr;margin:0}.e3-spine-facts>div{padding:13px;border-bottom:1px solid var(--line)}.e3-spine-facts dt{color:var(--muted);font:700 9px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.e3-spine-facts dd{margin:7px 0 0;font:700 17px/1.2 var(--mono);font-variant-numeric:tabular-nums}.lane-arm-state{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:7px 11px}.lane-arm-state:before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}.lane-arm-state[data-state="armed"]{color:var(--green);border-color:rgba(96,226,168,.55);background:rgba(35,196,143,.13)}.lane-arm-state[data-state="disarmed"]{color:var(--red);border-color:rgba(242,118,118,.55);background:rgba(242,118,118,.1)}.lane-control-error,.lane-preview-result{margin:10px 0 0;padding:9px 11px;border:1px solid rgba(242,118,118,.45);border-radius:5px;background:rgba(242,118,118,.08);color:var(--red);font:700 10px/1.45 var(--mono)}.lane-preview-result{border-color:rgba(96,226,168,.45);background:rgba(35,196,143,.08);color:var(--green)}.lane-control-error[hidden],.lane-preview-result[hidden]{display:none}.lane-preview-source{margin:10px 0 0;color:var(--muted);font:700 9px/1.45 var(--mono);overflow-wrap:anywhere}@media(max-width:760px){.e3-spine-panes{grid-template-columns:1fr}.e3-spine-facts{grid-template-columns:1fr}}
   </style>` : '';
-  const portfolio = `<section class="portfolio-ledger" aria-label="Current Schwab portfolio books">
+  const positionPortfolio = `<section class="portfolio-ledger" aria-label="Current Schwab portfolio books">
     <article class="panel position-book-panel"><div class="panel-head"><div><p class="kicker">Verified Schwab custody · shares with nested option contracts</p><h3>Position book</h3></div><span data-vsim="position-book-count" class="count">0 underlyings</span></div><div class="position-book" data-vsim="position-book"></div><div class="panel-note">Parent rows are owned shares. Contract rows are open short options and retain their own strike, expiry, quote age and liability. CALCULATE CC opens read-only Underwrite math and cannot send an order.</div></article>
-    <article class="panel cc-lifecycle-panel"><div class="panel-head"><div><p class="kicker">Open covered calls · observable state</p><h3>Covered-call lifecycle</h3></div><span class="readonly-tag">DETERMINISTIC · READ ONLY</span></div><div class="cc-lifecycle-cards" data-vsim="cc-lifecycle-cards"></div><div class="panel-note">Current flags require a current quote. Historical values remain muted when stale. Full common-clock model comparisons stay in Underwrite; this section never recommends or sends.</div></article>
-    <article class="panel expiration-panel"><div class="panel-head"><div><p class="kicker">Open short-option capital by time to expiry</p><h3>Expiration ladder</h3></div><span data-vsim="custody-scope" class="as-of">—</span></div><div class="expiration-ladder" data-vsim="expiration-ladder"></div><div class="panel-note" data-vsim="expiration-note">W1–W4 use current V5 custody and the configured expiration concentration limit.</div></article>
+    <article class="panel cc-lifecycle-panel"><div class="panel-head"><div><p class="kicker">Open covered calls · verified economics</p><h3>Covered-call lifecycle</h3></div><span class="readonly-tag">DETAILS · READ ONLY</span></div><div class="cc-lifecycle-cards" data-vsim="cc-lifecycle-cards"></div><div class="panel-note">This evidence explains the action above. It never submits, replaces, or cancels an order.</div></article>
+  </section>`;
+  const overviewPortfolio = `<section class="overview-portfolio" aria-labelledby="overview-portfolio-title">
+    <div class="overview-section-head"><div><p class="kicker">Current allocation and open-position economics</p><h3 id="overview-portfolio-title">Portfolio overview</h3></div><span class="readonly-tag">VERIFIED SCHWAB CUSTODY</span></div>
+    <div class="portfolio-ledger" aria-label="Portfolio allocation and economics">
     <article class="panel"><div class="panel-head"><div><p class="kicker">Open-position economics · Schwab custody</p><h3>Portfolio economics</h3></div><span class="readonly-tag">READ ONLY</span></div>
       <div class="desk-metrics">
-        <div><span>Booked premium</span><strong data-vsim="booked-premium">—</strong><small>open short-option entry credit</small></div>
+        <div><span>Gross booked premium</span><strong data-vsim="booked-premium">—</strong><small>before opening fees · fee-aware lifecycle math below</small></div>
         <div><span>Income θ / day</span><strong data-vsim="income-theta">—</strong><small data-vsim="income-theta-note">short-option time decay</small></div>
         <div data-vsim="net-theta-card"><span>Net θ / day</span><strong data-vsim="net-theta">—</strong><small data-vsim="net-theta-note">all open option positions</small></div>
         <div><span>Open P&amp;L</span><strong data-vsim="open-pnl">—</strong><small data-vsim="open-pnl-note">shares + open options</small></div>
@@ -2805,11 +2908,15 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
         <div><span>Realized premium · MTD</span><strong data-vsim="mtd-realized-premium">—</strong><small data-vsim="mtd-realized-premium-note">closed covered calls + CSPs only</small></div>
       </div>
     </article>
+    <article class="panel expiration-panel"><div class="panel-head"><div><p class="kicker">Open short-option capital by time to expiry</p><h3>Expiration ladder</h3></div><span data-vsim="custody-scope" class="as-of">—</span></div><div class="expiration-ladder" data-vsim="expiration-ladder"></div><div class="panel-note" data-vsim="expiration-note">W1–W4 use current V5 custody and the configured expiration concentration limit.</div></article>
     <article class="panel capital-guardrails"><div class="panel-head"><div><p class="kicker">Constitutional capital utilization</p><h3>Deployment and cash reserve</h3></div><span class="readonly-tag">SETTLED UNBORROWED CASH</span></div><div class="risk-gauges"><div class="risk-gauge" data-vsim="deployed-gauge"></div><div class="risk-gauge" data-vsim="reserve-gauge"></div></div><div class="panel-note">Buying power and withdrawal capacity are excluded from the reserve calculation.</div></article>
     <article class="panel"><div class="panel-head"><div><p class="kicker">Current market value and assignment collateral</p><h3>Capital committed by ticker</h3></div><span data-vsim="concentration-cap" class="as-of">—</span></div><div class="commitment-bars" data-vsim="commitments"></div></article>
+    </div>
   </section>`;
   const underwrite = `<section class="view" id="underwrite" aria-labelledby="underwrite-title"><div class="page-heading"><div><p class="kicker">One underwriting workspace · read-only</p><h2 id="underwrite-title">Underwrite</h2></div><span class="readonly-tag">NO ORDER ROUTE</span></div><div class="underwrite-tabs" role="tablist" aria-label="Underwriting mode"><button type="button" class="underwrite-tab active" role="tab" aria-selected="true" data-underwrite-mode="scan">Portfolio review</button><button type="button" class="underwrite-tab" role="tab" aria-selected="false" data-underwrite-mode="manual">Specify manually</button></div><div class="underwrite-pane active" data-underwrite-pane="scan"></div><div class="underwrite-pane" data-underwrite-pane="manual" hidden></div></section>`;
   const performance = `<section class="view" id="performance" aria-labelledby="performance-title"><div class="page-heading"><div><p class="kicker">Lifetime results and canonical Schwab ledger drill-down</p><h2 id="performance-title">Performance</h2></div><button type="button" class="as-of history-link" data-jump-system-history>History integrity →</button></div><div class="desk-metrics performance-metrics"><div><span>Realized P&amp;L · Lifetime</span><strong data-vsim="performance-realized">—</strong><small data-vsim="performance-realized-note">Lifetime · matched closed trades</small></div><div><span>Unrealized P&amp;L</span><strong data-vsim="performance-unrealized">—</strong><small data-vsim="performance-unrealized-note">latest custody marks</small></div><div><span>Total P&amp;L</span><strong data-vsim="performance-total">—</strong><small data-vsim="performance-total-note">realized + unrealized</small></div><div><span>Win rate</span><strong data-vsim="win-rate">—</strong><small data-vsim="win-count">—</small></div><div><span>Profit factor</span><strong data-vsim="profit-factor">—</strong><small data-vsim="profit-factor-note">Lifetime · gross wins ÷ gross losses</small></div><div><span>Matched trades</span><strong data-vsim="closed-trades">—</strong><small data-vsim="closed-trades-note">Lifetime ledger denominator</small></div></div><article class="panel pnl-calendar-panel"><div class="panel-head pnl-calendar-head"><div><p class="kicker" data-vsim="pnl-calendar-subtitle">Realized daily P&amp;L · all closed lifecycles · Schwab ledger</p><h3>Realized P&amp;L calendar</h3></div><div class="pnl-calendar-tools"><span data-vsim="pnl-calendar-reconciliation" class="readonly-tag">CHECKING</span><div class="pnl-calendar-nav"><button type="button" aria-label="Previous month" data-pnl-calendar-shift="-1">‹</button><strong data-vsim="pnl-calendar-month">—</strong><button type="button" aria-label="Next month" data-pnl-calendar-shift="1">›</button></div></div></div><div class="pnl-calendar-scopes" role="group" aria-label="Realized P&amp;L strategy scope"><button type="button" class="chip active" data-pnl-calendar-scope="ALL">All strategies</button><button type="button" class="chip" data-pnl-calendar-scope="IN_MANDATE">CC + CSP only</button></div><div class="pnl-calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span></div><div class="pnl-calendar-grid" data-vsim="pnl-calendar-grid"></div><div class="pnl-calendar-footer"><div><span>Profit</span><strong data-vsim="pnl-calendar-profit">—</strong></div><div><span>Loss</span><strong data-vsim="pnl-calendar-loss">—</strong></div><div><span data-vsim="pnl-calendar-net-label">MONTH TOTAL</span><strong data-vsim="pnl-calendar-net">—</strong></div></div><p class="panel-note" data-vsim="pnl-calendar-note">New York market date · NYSE full-day closures · early-close sessions count as trading days.</p></article><article class="panel mandate-panel"><div class="panel-head"><div><p class="kicker">Historical strategy-leg view</p><h3>Mandate lens</h3></div><span class="readonly-tag">DRILL DOWN TO VERIFY STRUCTURES</span></div><div class="desk-metrics mandate-metrics"><div><span>Mandate-compatible legs</span><strong data-vsim="mandate-pnl">—</strong><small data-vsim="mandate-trades">—</small></div><div><span>Compatible profit factor</span><strong data-vsim="mandate-profit-factor">—</strong><small>SHARES · SHORT_CALL · SHORT_PUT</small></div><div><span>Structure review</span><strong data-vsim="review-pnl">—</strong><small data-vsim="review-trades">—</small></div><div><span>Review profit factor</span><strong data-vsim="review-profit-factor">—</strong><small>inspect long legs and futures</small></div></div><p class="panel-note" data-vsim="mandate-note">Historical option legs require ledger review before they can be classified as standalone or part of a spread.</p></article><article class="panel"><div class="panel-head"><div><p class="kicker">Matched realized lifecycles · drag to filter ledger dates</p><h3>Cumulative realized P&amp;L</h3></div><span data-vsim="performance-asof" class="as-of">—</span></div><svg class="performance-chart" data-vsim="performance-chart" viewBox="0 0 1000 220" role="img" aria-label="Cumulative realized profit and loss. Drag horizontally to filter the ledger by date."></svg></article><div class="two-column"><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By ticker</h3></div></div><div class="attribution" data-vsim="ticker-attribution"></div></article><article class="panel"><div class="panel-head"><div><p class="kicker">Click a row to filter the ledger</p><h3>By strategy</h3></div></div><div class="attribution" data-vsim="strategy-attribution"></div></article></div><article class="panel table-panel performance-ledger"><div class="panel-head"><div><p class="kicker">Canonical append-only Schwab ledger</p><h3>Closed trade drill-down</h3></div><span data-vsim="filtered-trade-count" class="count">—</span></div><div class="ledger-filters"><span data-vsim="ledger-filter-summary">All matched trades</span><label>From <input type="date" data-performance-from></label><label>To <input type="date" data-performance-to></label><button type="button" class="chip" data-clear-performance-filter>Clear filters</button></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Ticker</th><th>Strategy</th><th>Asset</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th></tr></thead><tbody data-vsim="closed-trades-body"></tbody></table></div><div class="panel-note">Click attribution rows or drag the cumulative curve to filter. Raw broker packets remain protected; this table shows FIFO-matched lifecycles.</div></article><details class="panel broker-activity"><summary>Broker activity · imported orders, executions, cash, assignment and transfer events</summary><div class="table-wrap"><table><thead><tr><th>Occurred</th><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Cash amount</th><th>State</th></tr></thead><tbody data-vsim="broker-activity-body"></tbody></table></div></details><div class="preview-disclaimer" data-vsim="performance-warning"></div></section>`;
+  const performanceView = performance
+    .replace('data-jump-system-history', 'data-jump-history');
   const readinessScorecard = `<article class="panel scorecard"><div class="panel-head"><div><p class="kicker">Five scoreboards</p><h3>Readiness</h3></div><strong class="readiness">1 / 5</strong></div>
             <div class="score-rows"><div><span>Economic</span><i></i><small>Awaiting data</small></div><div><span>Calibration</span><i></i><small>Awaiting data</small></div><div><span>Execution</span><i></i><small>Not connected</small></div><div class="ready"><span>Constitution</span><i></i><small>Clean</small></div><div><span>Survival</span><i></i><small>Awaiting data</small></div></div>
           </article>`;
@@ -2821,6 +2928,21 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     <div class="lane-summary-block"><span>Blocking</span><strong data-vsim="lane-summary-blocking">—</strong></div>
     </article>`;
   const overviewBreachStrip = `<section class="overview-breach-strip" data-vsim="breach-strip" aria-label="Current constitutional limit breaches" hidden><strong>LIMIT BREACHES · INFORMATION ONLY</strong><div data-vsim="breach-items"></div></section>`;
+  const cspCommandCenter = `<section class="panel csp-command-center csp-status" data-vsim="csp-status" aria-labelledby="csp-command-title">
+    <div class="csp-command-head"><div><p class="kicker">One engine · one best contract per weekly expiry</p><h2 id="csp-command-title">Cash-secured put decision</h2><p data-vsim="csp-outcome">Enter a ticker</p></div><span class="readonly-tag" data-vsim="csp-badge">WAITING</span></div>
+    <div class="csp-inputs"><label>Ticker<input data-csp-symbol inputmode="text" autocomplete="off" maxlength="10" value="" placeholder="SPY" aria-label="Ticker symbol"></label><button type="button" class="cc-directive csp-run" data-csp-calculate>RUN CSP</button></div>
+    <p class="csp-command-reason" data-vsim="csp-reason">Enter one ticker to calculate the three nearest weekly expiries.</p>
+    <div class="csp-weekly-choices" data-vsim="csp-choices" aria-live="polite"><div class="csp-choice loading">No CSP calculation has been requested.</div></div>
+    <div class="csp-decision-foot"><span data-vsim="csp-asof">No market snapshot requested</span><span data-vsim="csp-decision-id">No decision yet</span></div>
+    <p class="panel-note">Exactly one top-ranked contract is shown for each weekly expiry. Selection certainty means the same verified inputs and rules reproduce the same result; it does not guarantee profit. Order transmission remains off.</p>
+  </section>`;
+  const cspView = `<section class="view" id="csp" aria-label="Cash-secured put stage">${cspCommandCenter}</section>`;
+  const positionsView = `<section class="view" id="positions" aria-labelledby="positions-title"><div class="page-heading"><div><p class="kicker">Wheel state · one action per open position</p><h2 id="positions-title">Position management</h2></div><span class="readonly-tag">PROPOSAL ONLY · MANUAL EXECUTION</span></div><article class="panel position-decision-panel"><div class="panel-head"><div><p class="kicker">What to do now</p><h3>Position actions</h3></div><button type="button" class="cc-directive" data-position-management-refresh>REFRESH ACTIONS</button></div><div class="position-decision-list" data-vsim="position-decisions"><p class="muted">Open Position Management to calculate one decision per open wheel position.</p></div><div class="panel-note">Exactly one result is shown per position: HOLD, CLOSE, ROLL, ACCEPT ASSIGNMENT, or ERROR. The engine uses current executable quotes; all orders remain manual.</div></article>${positionPortfolio}</section>`;
+  const historyView = `<section class="view" id="history" aria-labelledby="history-title">
+    <div class="page-heading"><div><p class="kicker">Immutable trade record · learning follows closure</p><h2 id="history-title">History</h2></div><span class="readonly-tag" data-vsim="history-integrity">CHECKING LEDGER</span></div>
+    <div class="desk-metrics history-metrics"><div><span>Imported transactions</span><strong data-vsim="history-imported">—</strong><small>canonical broker packets</small></div><div><span>Completed trades</span><strong data-vsim="history-completed">—</strong><small>FIFO-matched lifecycles</small></div><div><span>LLM analyzed</span><strong data-vsim="history-analyzed">—</strong><small>sealed post-trade lessons</small></div><div><span>Awaiting analysis</span><strong data-vsim="history-pending">—</strong><small>completed trades only</small></div></div>
+    <article class="panel table-panel history-ledger"><div class="panel-head"><div><p class="kicker">Every imported, matched trade · originals never rewritten</p><h3>Completed trade ledger</h3></div><span data-vsim="history-trade-count" class="count">—</span></div><div class="table-wrap"><table><thead><tr><th>Closed</th><th>Trade ID</th><th>Ticker</th><th>Strategy</th><th>Direction</th><th>Qty</th><th>Opened</th><th>Opening price</th><th>Closing price</th><th>Fees</th><th>Realized P&amp;L</th><th>Learning</th></tr></thead><tbody data-vsim="history-trades-body"></tbody></table></div><p class="panel-note" data-vsim="history-note">Checking the append-only Schwab ledger. LLM learning is downstream evidence and can never alter the trade, fill, or original decision.</p></article>
+  </section>`;
   const operationsSection = `<section class="overview-operations" aria-labelledby="overview-operations-title"><div class="overview-section-head"><div><p class="kicker">Current control-plane state</p><h3 id="overview-operations-title">Operations</h3></div><span class="readonly-tag">STATUS ONLY</span></div><div class="operations-grid"><article class="panel system-brief operations-system" aria-label="Operational integrity"></article>${laneSummaryCard}</div></section>`;
   const mobileSystemCard = `<article class="panel system-brief mobile-system-brief" aria-label="System status"></article>`;
   const botStatusCard = `<article class="panel bot-status-card" aria-labelledby="bot-status-title">
@@ -2852,9 +2974,8 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
       <article class="panel calculator-selector cc-status" data-vsim="cc-status"><div class="panel-head"><div><h3>Covered call</h3><p class="sub" data-vsim="cc-outcome">Choose an owned ticker</p></div><span class="readonly-tag" data-vsim="cc-badge">READY</span></div><div class="calculator-symbols" data-vsim="cc-symbols"><span class="cc-unavailable">Loading owned positions…</span></div><p data-vsim="cc-reason" class="cc-reason">VSIM will re-check custody, the market session, and fresh option quotes before calculating.</p><div class="calculator-rules"><span>Strike must exceed your average share price.</span><span>Evaluates 7 / 14 / 21 DTE.</span><span data-vsim="cc-symbol-count">Loading custody…</span></div></article>
       <article class="panel cc-existing-choice-workspace" data-vsim="cc-lifecycle-workspace" hidden><div class="panel-head"><div><p class="kicker">Existing covered call · one common clock</p><h3 data-vsim="cc-lifecycle-title">HOLD · CLOSE · ROLL</h3></div><span class="readonly-tag">MATH ONLY · NO SEND</span></div><div class="cc-choice-result" data-lifecycle-choice-result></div></article>
       <div class="calculator-results" data-vsim="cc-results" hidden>
-        <article class="panel cc-recommendation" data-vsim="cc-recommendation" hidden><div class="panel-head"><div><p class="kicker">Best eligible covered call</p><h3><span data-vsim="cc-ticker">—</span> · Sell <span data-vsim="cc-contracts">—</span> call contract(s)</h3></div><span class="regime">READ ONLY</span></div><div class="desk-metrics cc-metrics"><div><span>Strike</span><strong data-vsim="cc-strike">—</strong><small data-vsim="cc-expiration">—</small></div><div><span>Net premium</span><strong data-vsim="cc-premium">—</strong><small>executable bid less fees</small></div><div><span>Premium ROC</span><strong data-vsim="cc-roc">—</strong><small data-vsim="cc-annualized-roc">—</small></div><div><span>Expire OTM</span><strong data-vsim="cc-otm">—</strong><small>market-implied</small></div><div><span>Touch risk</span><strong data-vsim="cc-touch">—</strong><small>market-implied</small></div><div><span>Called-away return</span><strong data-vsim="cc-callaway">—</strong><small>gain + premium vs cost</small></div></div><p class="cc-decision-impact" data-vsim="cc-impact">—</p></article>
+        <article class="panel cc-recommendation" data-vsim="cc-recommendation" hidden><div class="panel-head"><div><p class="kicker">Best overall wheel choice</p><h3><span data-vsim="cc-ticker">—</span> · Sell <span data-vsim="cc-contracts">—</span> call contract(s)</h3></div><span class="regime">MANUAL ORDER</span></div><div class="desk-metrics cc-metrics"><div><span>Strike</span><strong data-vsim="cc-strike">—</strong><small data-vsim="cc-expiration">—</small></div><div><span>Net premium</span><strong data-vsim="cc-premium">—</strong><small>executable bid less fees</small></div><div><span>Expected wheel profit</span><strong data-vsim="cc-expected-profit">—</strong><small data-vsim="cc-expected-profit-day">primary model · from share cost</small></div><div><span>MM upper reference</span><strong data-vsim="cc-mm-upper">—</strong><small data-vsim="cc-mm-position">reference only · not a gate</small></div><div><span>Timing reference</span><strong data-vsim="cc-timing">—</strong><small data-vsim="cc-timing-detail">RSI / MACD · not a gate</small></div><div><span>Called-away profit</span><strong data-vsim="cc-callaway-profit">—</strong><small data-vsim="cc-callaway">gain + premium vs cost</small></div></div><p class="cc-decision-impact" data-vsim="cc-impact">—</p></article>
         <article class="panel"><div class="panel-head"><div><h3>7 / 14 / 21 DTE comparison</h3></div><span data-vsim="cc-asof" class="as-of">—</span></div><div class="cc-tenors" data-vsim="cc-tenors"></div></article>
-        <article class="panel table-panel" data-vsim="cc-candidate-panel" hidden><div class="panel-head"><div><h3>Eligible candidates</h3></div><span class="count" data-vsim="cc-eligible-count">—</span></div><div class="table-wrap"><table><thead><tr><th>Rank</th><th>Expiry (DTE)</th><th>Strike</th><th>Bid</th><th>NEV / day</th><th>vs hold</th></tr></thead><tbody data-vsim="cc-candidates"></tbody></table></div></article>
         <details class="vsim-diagnostics"><summary>Diagnostics and evidence</summary><pre data-vsim="cc-diagnostics">No calculation loaded.</pre></details>
       </div>
     </div>
@@ -2867,6 +2988,14 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
       </div>
     </div>
   </section>`;
+  const simplifiedCalculators = calculators
+    .replace('<button type="button" class="calculator-tab" role="tab" aria-selected="false" data-calculator="cash-secured-put">Cash-secured puts</button>', '')
+    .replace(/\n    <div class="calculator-pane" data-calculator-pane="cash-secured-put"[\s\S]*?\n    <\/div>\n  <\/section>$/u,
+      '\n  </section>');
+  const coveredCallsView = simplifiedCalculators
+    .replace('id="calculators" aria-labelledby="calculators-title"', 'id="covered-calls" aria-labelledby="covered-calls-title"')
+    .replace('<p class="kicker">Read-only underwriting · no order route</p><h2 id="calculators-title">Options calculators</h2>', '<p class="kicker">Wheel state · SHARES → COVERED CALL</p><h2 id="covered-calls-title">Covered calls</h2>')
+    .replace(/\n    <div class="calculator-tabs"[\s\S]*?<\/div>(?=\n    <div class="calculator-pane active")/u, '');
   const additions = `<style>
     .portfolio-ledger{display:grid;gap:16px;margin-top:16px}.desk-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:6px;overflow:hidden}.desk-metrics>div{padding:15px;border-right:1px solid var(--line);background:rgba(7,23,20,.42)}.desk-metrics>div:last-child{border-right:0}.desk-metrics span,.desk-metrics small{display:block}.desk-metrics span{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}.desk-metrics strong{display:block;margin:6px 0 3px;font-size:20px;font-variant-numeric:tabular-nums}.desk-metrics small{font-size:9px;color:var(--muted)}.commitment-bars,.attribution{display:grid;gap:10px}.commitment-row,.attribution-row{display:grid;grid-template-columns:80px 1fr 80px 100px;gap:10px;align-items:center;font-size:11px}.commitment-track,.attribution-track{height:8px;background:#102620;border-radius:10px;overflow:hidden}.commitment-track i,.attribution-track i{display:block;height:100%;background:linear-gradient(90deg,#32c98d,#66e8ae)}.negative{color:var(--red)!important}.positive-value{color:var(--green)!important}.performance-chart{width:100%;height:220px;background:rgba(5,18,15,.35);border:1px solid var(--line)}.record-metrics,.performance-metrics{margin-bottom:16px}.portfolio-ledger table td,.portfolio-ledger table th,#records table td,#records table th,#calculators table td,#calculators table th{white-space:nowrap}.cc-directive,.cc-back{appearance:none;border:1px solid rgba(61,222,169,.55);border-radius:4px;background:rgba(35,196,143,.1);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:7px 10px;cursor:pointer}.cc-directive:hover,.cc-back:hover{background:rgba(35,196,143,.2)}.cc-unavailable{color:var(--muted);font-size:9px;letter-spacing:.08em;text-transform:uppercase}.cc-status[data-state="blocked"],.csp-status[data-state="blocked"]{border-color:rgba(242,118,118,.38)}.cc-status[data-state="ready"],.csp-status[data-state="ready"]{border-color:rgba(96,226,168,.38)}.cc-reason,.cc-decision-impact{color:var(--text);line-height:1.55}.cc-rule{margin-top:12px;padding:11px 13px;border-left:2px solid var(--amber);background:rgba(244,186,97,.06);color:var(--amber);font-size:11px}.cc-tenors{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.cc-tenor{padding:13px;border:1px solid var(--line);border-radius:5px;background:rgba(7,23,20,.42)}.cc-tenor strong,.cc-tenor span,.cc-tenor small{display:block}.cc-tenor strong{color:var(--green);font-size:16px}.cc-tenor span{margin:5px 0;color:var(--text);font-size:11px}.cc-tenor small{color:var(--muted);font-size:9px}.cc-metrics{margin-top:8px}.cc-decision-impact{margin:14px 0 0;color:var(--green)}.calculator-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.calculator-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.calculator-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.calculator-pane{display:grid;gap:12px}.calculator-pane[hidden]{display:none}.calculator-selector{margin-bottom:0}.calculator-symbols{display:flex;flex-wrap:wrap;gap:8px}.calculator-symbol{display:grid;grid-template-columns:auto auto;gap:3px 14px;align-items:center;text-align:left}.calculator-symbol b{color:var(--text)}.calculator-symbol small{grid-column:1/-1;color:var(--muted);font-size:8px}.calculator-symbol[data-actionable="false"]{border-color:var(--line);color:var(--amber);background:rgba(244,186,97,.05)}.csp-run{margin-top:12px}.csp-recommendation{border-color:rgba(96,226,168,.38)}.cc-choice-shell{padding:12px 14px;border-top:1px solid var(--line)}.cc-choice-shell>p{margin:8px 0 0;color:var(--muted);font-size:9px;line-height:1.45}.cc-choice-result{margin-top:12px}.cc-choice-result[hidden]{display:none}.cc-choice-status{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px;color:var(--muted);font:700 9px/1.4 var(--mono)}.cc-choice-status strong{color:var(--text)}.cc-choice-table{min-width:1480px}.cc-choice-table td{font-variant-numeric:tabular-nums}.cc-choice-table .choice-warning{max-width:310px;white-space:normal;color:var(--amber)}.cc-choice-table .choice-path{font-weight:800}.cc-choice-foot{margin:10px 0 0;color:var(--muted);font:9px/1.5 var(--mono)}.cc-choice-result>.choice-warning{color:var(--amber)}@media(max-width:1050px){.desk-metrics{grid-template-columns:repeat(3,1fr)}.desk-metrics>div:nth-child(3n){border-right:0}.desk-metrics>div:nth-child(-n+3){border-bottom:1px solid var(--line)}}@media(max-width:680px){.desk-metrics{grid-template-columns:1fr 1fr}.desk-metrics>div{border-bottom:1px solid var(--line)}.commitment-row,.attribution-row{grid-template-columns:62px 1fr 70px}.commitment-row strong,.attribution-row strong{display:none}.cc-tenors{grid-template-columns:1fr}.calculator-tabs{overflow:auto}.calculator-symbol{width:100%}.cc-choice-shell .cc-directive{width:100%}}
     .underwrite-tabs{display:flex;gap:7px;margin:-6px 0 16px;border-bottom:1px solid var(--line);padding-bottom:12px}.underwrite-tab{appearance:none;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--muted);font:700 10px/1.2 var(--mono);letter-spacing:.08em;padding:9px 13px;cursor:pointer}.underwrite-tab.active{color:var(--green);border-color:rgba(61,222,169,.55);background:rgba(35,196,143,.1)}.underwrite-pane[hidden]{display:none}.underwrite-pane>.page-heading{display:none}.history-link{appearance:none;background:transparent;border:0;color:var(--green);cursor:pointer}.mandate-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px}.attribution-row{width:100%;appearance:none;border:0;padding:4px;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:4px}.attribution-row:hover,.attribution-row.active{background:rgba(35,196,143,.1);outline:1px solid rgba(61,222,169,.25)}.performance-chart{touch-action:none;cursor:crosshair}.performance-chart .range-selection{fill:rgba(96,226,168,.14);stroke:#60e2a8;stroke-width:1}.performance-ledger{margin-top:16px}.ledger-filters{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:12px;color:var(--muted);font-size:10px}.ledger-filters>span{margin-right:auto;color:var(--text)}.ledger-filters label{display:flex;align-items:center;gap:6px}.ledger-filters input{color:var(--text);background:#071712;border:1px solid var(--line);border-radius:4px;padding:6px;font:10px var(--mono);color-scheme:dark}.broker-activity{margin-top:16px}.broker-activity summary{cursor:pointer;color:var(--text);font-weight:700}.performance-ledger td,.performance-ledger th,.broker-activity td,.broker-activity th{white-space:nowrap}.system-history{scroll-margin-top:20px}.system-decisions{margin-top:28px;padding-top:28px;border-top:1px solid var(--line)}.system-decisions>.page-heading{align-items:center;margin-bottom:14px}.system-decisions>.page-heading h2{font-size:22px}.system-decisions .evidence-layout{grid-template-columns:minmax(0,2fr) minmax(220px,.7fr)}.guardian-panel .package-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 18px}@media(max-width:1000px){.system-decisions .evidence-layout{grid-template-columns:1fr}}@media(max-width:680px){.mandate-metrics{grid-template-columns:1fr 1fr}.ledger-filters>span{width:100%;margin-right:0}.guardian-panel .package-facts{grid-template-columns:1fr}}
@@ -2905,7 +3034,7 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
     }
   </style>`;
   const calculatorStyles = `<style>
-    .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden],[data-vsim="csp-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}.csp-inputs{display:grid;grid-template-columns:minmax(180px,1fr) auto;gap:10px;align-items:end;margin-top:14px}.csp-inputs label{display:grid;gap:6px;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.09em;text-transform:uppercase}.csp-inputs input{min-width:0;padding:10px 11px;border:1px solid var(--line);border-radius:5px;background:#071712;color:var(--text);font:700 11px/1.2 var(--mono);text-transform:uppercase}.csp-inputs input:focus{outline:1px solid var(--green);border-color:var(--green)}.csp-math-table{min-width:2050px}.csp-math-table td:last-child{max-width:250px;white-space:normal;color:var(--amber)}@media(max-width:520px){.csp-inputs{grid-template-columns:1fr}.csp-inputs .csp-run{width:100%}}
+    .calculator-results{display:grid;gap:12px}.calculator-results[hidden],.calculator-pane[hidden],[data-vsim="cc-candidate-panel"][hidden]{display:none}.calculator-rules{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:10px}.calculator-rules span:before{content:'✓';margin-right:6px;color:var(--green)}.calculator-symbol:disabled{opacity:1;cursor:default}.calculator-symbol:disabled:hover{background:rgba(244,186,97,.05)}.wheel-next-action{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 16px;border-color:rgba(96,226,168,.42);background:linear-gradient(135deg,rgba(35,196,143,.12),rgba(7,23,18,.42) 65%)}.wheel-next-action h2{margin:5px 0;font-size:27px}.wheel-next-action p:not(.kicker){margin:0;color:var(--muted)}.wheel-next-action .cc-directive{min-height:42px;white-space:nowrap}#csp .csp-command-center{margin:0}#positions .portfolio-ledger{margin-top:0}.csp-command-center{margin:0 0 16px;border-color:rgba(96,226,168,.42);background:linear-gradient(135deg,rgba(35,196,143,.1),rgba(7,23,18,.42) 65%)}.csp-command-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.csp-command-head h2{margin:4px 0 5px;font-size:26px}.csp-command-head p:not(.kicker){margin:0;color:var(--muted)}.csp-inputs{display:grid;grid-template-columns:minmax(180px,1fr) auto;gap:10px;align-items:end;margin-top:14px}.csp-inputs label{display:grid;gap:6px;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.09em;text-transform:uppercase}.csp-inputs input{min-width:0;padding:10px 11px;border:1px solid var(--line);border-radius:5px;background:#071712;color:var(--text);font:700 13px/1.2 var(--mono);text-transform:uppercase}.csp-inputs input:focus{outline:1px solid var(--green);border-color:var(--green)}.csp-command-reason{margin:13px 0;color:var(--text);line-height:1.5}.csp-weekly-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.csp-choice{min-width:0;padding:15px;border:1px solid var(--line);border-radius:7px;background:rgba(5,18,14,.7)}.csp-choice[data-outcome="SELL_CSP"]{border-color:rgba(96,226,168,.48)}.csp-choice[data-outcome="KEEP_CASH"],.csp-choice[data-outcome="ERROR"]{border-color:rgba(244,186,97,.45)}.csp-choice-slot{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font:800 8px/1.25 var(--mono);letter-spacing:.1em;text-transform:uppercase}.csp-choice-slot b{color:var(--green)}.csp-choice[data-outcome="KEEP_CASH"] .csp-choice-slot b,.csp-choice[data-outcome="ERROR"] .csp-choice-slot b{color:var(--amber)}.csp-choice h3{margin:12px 0 7px;font:800 14px/1.35 var(--mono);overflow-wrap:anywhere}.csp-choice p{margin:0;color:var(--muted);font-size:9px;line-height:1.55}.csp-choice-proof{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:12px 0}.csp-choice-proof div{padding:8px;border:1px solid var(--line);border-radius:4px}.csp-choice-proof span,.csp-choice-proof strong{display:block}.csp-choice-proof span{color:var(--muted);font:700 7px/1.2 var(--mono);text-transform:uppercase}.csp-choice-proof strong{margin-top:4px;font:800 12px/1.2 var(--mono)}.csp-order-ticket{margin-top:12px;padding:9px;border-left:2px solid var(--green);background:rgba(35,196,143,.08);color:var(--green);font:800 9px/1.45 var(--mono);overflow-wrap:anywhere}.csp-decision-foot{display:flex;justify-content:space-between;gap:10px;margin-top:12px;color:var(--muted);font:700 8px/1.4 var(--mono)}.csp-status[data-state="error"]{border-color:rgba(242,118,118,.55)}@media(max-width:900px){.csp-weekly-choices{grid-template-columns:1fr}.wheel-next-action{display:grid}}@media(max-width:520px){.csp-inputs{grid-template-columns:1fr}.csp-inputs .csp-run{width:100%}.csp-decision-foot{display:grid}}
   </style>`;
   const portfolioReviewStyles = `<style>
     .portfolio-review{display:grid;gap:14px}.portfolio-review-hero{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:center;padding:20px;border:1px solid rgba(96,226,168,.28);border-radius:8px;background:linear-gradient(135deg,rgba(35,196,143,.1),rgba(7,23,18,.35) 62%)}.portfolio-review-hero h3{margin:3px 0 7px;font-size:24px}.portfolio-review-hero p:not(.kicker){max-width:760px;margin:0;color:var(--muted);line-height:1.55}.portfolio-review-run{min-width:190px;min-height:42px;border:1px solid var(--green);border-radius:5px;background:rgba(35,196,143,.12);color:var(--green);font:700 10px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase;cursor:pointer}.portfolio-review-run:hover{background:rgba(35,196,143,.2)}.portfolio-review-run:disabled{opacity:.5;cursor:wait}.portfolio-review-state{display:flex;align-items:center;gap:8px;margin-top:11px;color:var(--text);font:700 9px/1.3 var(--mono);letter-spacing:.06em;text-transform:uppercase}.portfolio-review-state i{width:8px;height:8px;border-radius:50%;background:var(--amber);box-shadow:0 0 10px rgba(244,186,97,.7)}.portfolio-review-state.complete i{background:var(--green);box-shadow:0 0 10px rgba(96,226,168,.7)}.portfolio-review-state.refused i{background:var(--red);box-shadow:0 0 10px rgba(242,118,118,.7)}.review-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.review-metric{padding:14px 16px;border:1px solid var(--line);border-radius:7px;background:rgba(8,21,17,.58)}.review-metric span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.11em;text-transform:uppercase}.review-metric strong{display:block;margin-top:7px;font-size:22px;font-variant-numeric:tabular-nums}.review-metric small{display:block;margin-top:4px;color:var(--muted);font-size:8px}.review-calibration{padding:16px 18px}.review-calibration-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}.review-calibration-cell{padding:11px 12px;border:1px solid var(--line);border-radius:6px;background:rgba(8,21,17,.5)}.review-calibration-cell span{display:block;color:var(--muted);font:700 8px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.review-calibration-cell strong{display:block;margin-top:6px;font-size:15px;font-variant-numeric:tabular-nums}.review-calibration-cell small{display:block;margin-top:4px;color:var(--muted);font-size:8px;line-height:1.35}.review-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.review-toolbar .chip{cursor:pointer}.review-toolbar .chip.active{color:var(--green);border-color:rgba(96,226,168,.5);background:rgba(35,196,143,.1)}.review-toolbar-note{margin-left:auto;color:var(--muted);font-size:9px}.review-table{min-width:1320px}.review-table td{font-variant-numeric:tabular-nums}.review-table .policy-pass{color:var(--green)}.review-table .policy-block{color:var(--amber)}.review-table .model-unavailable{color:var(--muted)}.review-symbol-table{min-width:720px}.review-symbol-state{font-weight:700}.review-symbol-state.calculated{color:var(--green)}.review-symbol-state.refused{color:var(--red)}.review-symbol-state.not-evaluated{color:var(--amber)}.review-explainer{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.review-explainer article{padding:15px;border:1px solid var(--line);border-radius:7px;background:rgba(8,21,17,.45)}.review-explainer strong{display:block;margin-bottom:7px}.review-explainer p{margin:0;color:var(--muted);font-size:9px;line-height:1.55}.review-explainer code{color:var(--text);font-size:9px}.review-empty{padding:30px;text-align:center;color:var(--muted)}@media(max-width:900px){.portfolio-review-hero{grid-template-columns:1fr}.portfolio-review-run{width:100%}.review-metrics,.review-calibration-grid{grid-template-columns:1fr 1fr}.review-explainer{grid-template-columns:1fr}}@media(max-width:520px){.review-metrics,.review-calibration-grid{grid-template-columns:1fr}.review-toolbar-note{width:100%;margin-left:0}}
@@ -2915,13 +3044,14 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
   </style>`;
   const dashboardCleanupStyles = `<style>
     .overview-breach-strip{display:flex;align-items:center;gap:14px;margin:0 0 16px;padding:11px 14px;border:1px solid rgba(242,118,118,.52);border-radius:7px;background:rgba(242,118,118,.08);color:var(--red)}.overview-breach-strip[hidden]{display:none}.overview-breach-strip>strong{flex:0 0 auto;font:800 8px/1.3 var(--mono);letter-spacing:.11em}.overview-breach-strip>div{display:flex;flex-wrap:wrap;gap:7px}.overview-breach-item{padding:5px 7px;border:1px solid rgba(242,118,118,.35);border-radius:4px;background:rgba(242,118,118,.06);font:800 8px/1.25 var(--mono);letter-spacing:.05em}
-    .overview-clocks{display:grid;grid-template-columns:repeat(3,minmax(116px,1fr));gap:8px;min-width:min(100%,450px)}.overview-clocks>div{padding:8px 10px;border-left:1px solid var(--line)}.overview-clocks span,.overview-clocks strong{display:block}.overview-clocks span{color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.overview-clocks strong{margin-top:4px;color:var(--text);font:700 9px/1.3 var(--mono);font-variant-numeric:tabular-nums}.overview-clocks .clock-stale{color:var(--amber)}
+    .overview-clocks{display:grid;grid-template-columns:repeat(3,minmax(116px,1fr));gap:8px;min-width:min(100%,450px)}.overview-clocks>div{padding:8px 10px;border-left:1px solid var(--line)}.overview-clocks span,.overview-clocks strong{display:block}.overview-clocks span{color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase}.overview-clocks strong{margin-top:4px;color:var(--text);font:700 9px/1.3 var(--mono);font-variant-numeric:tabular-nums}.overview-clocks .clock-stale{color:var(--amber)}.history-metrics{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px}.history-ledger td:nth-child(2){max-width:210px;overflow-wrap:anywhere}.learning-state{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:4px 7px;color:var(--muted);font:700 8px/1 var(--mono);letter-spacing:.08em}.learning-state[data-state="COMPLETE"]{border-color:rgba(96,226,168,.45);color:var(--green)}.learning-state[data-state="FAILED"]{border-color:rgba(242,118,118,.45);color:var(--red)}
     #overview .today-pnl-card:not([data-pnl-state="loss"]){border-color:var(--line);background:var(--panel)}#overview .positive-value{color:var(--text)!important}
+    .position-decision-panel{margin-bottom:16px;border-color:rgba(96,226,168,.42);background:linear-gradient(135deg,rgba(35,196,143,.1),rgba(7,23,18,.42) 65%)}.position-decision-list{display:grid;gap:10px}.position-decision-card{padding:16px;border:1px solid var(--line);border-radius:7px;background:rgba(5,18,14,.72)}.position-decision-card[data-decision="CLOSE"],.position-decision-card[data-decision="ROLL"]{border-color:rgba(96,226,168,.55)}.position-decision-card[data-decision="ERROR"]{border-color:rgba(242,118,118,.55)}.position-decision-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.position-decision-head h4{margin:4px 0 0;font:800 20px/1.25 var(--mono)}.position-decision-badge{padding:5px 8px;border:1px solid currentColor;border-radius:4px;color:var(--green);font:800 9px/1.2 var(--mono);letter-spacing:.09em}.position-decision-card[data-decision="HOLD"] .position-decision-badge,.position-decision-card[data-decision="ACCEPT_ASSIGNMENT"] .position-decision-badge{color:var(--amber)}.position-decision-card[data-decision="ERROR"] .position-decision-badge{color:var(--red)}.position-decision-instruction{margin:14px 0 7px;color:var(--text);font:800 14px/1.5 var(--mono)}.position-decision-reason{margin:0;color:var(--muted);line-height:1.55}.position-decision-order{margin-top:12px;padding:11px 13px;border-left:2px solid var(--green);background:rgba(35,196,143,.08);color:var(--green);font:800 10px/1.5 var(--mono);overflow-wrap:anywhere}.position-decision-proof{margin-top:12px;border-top:1px solid var(--line)}.position-decision-proof summary{padding-top:11px;color:var(--muted);cursor:pointer;font:700 9px/1.3 var(--mono);letter-spacing:.07em}.position-decision-proof-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:9px}.position-decision-proof-grid div{padding:9px;border:1px solid var(--line);border-radius:4px}.position-decision-proof-grid span,.position-decision-proof-grid strong{display:block}.position-decision-proof-grid span{color:var(--muted);font:700 7px/1.2 var(--mono);text-transform:uppercase}.position-decision-proof-grid strong{margin-top:5px;font:800 12px/1.2 var(--mono)}
     .position-book{display:grid;gap:10px}.position-book-group{border:1px solid var(--line);border-radius:7px;background:rgba(7,23,20,.42);overflow:hidden}.position-book-parent{display:grid;grid-template-columns:minmax(92px,1.1fr) repeat(6,minmax(84px,1fr)) auto;gap:0;align-items:stretch}.position-book-parent>div{min-width:0;padding:12px;border-right:1px solid var(--line)}.position-book-parent>div:last-of-type{border-right:0}.position-book-parent span,.position-contract-grid span{display:block;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.09em;text-transform:uppercase}.position-book-parent strong,.position-contract-grid strong{display:block;margin-top:5px;color:var(--text);font:750 12px/1.3 var(--mono);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.position-book-symbol strong{font-size:15px}.position-book-action{display:grid;align-items:center;padding:10px 12px}.position-book-action .cc-directive{border-color:var(--line);background:transparent;color:var(--text);white-space:nowrap}.position-contracts{border-top:1px solid var(--line)}.position-contract{padding:0 12px 12px 30px;background:rgba(4,15,12,.48)}.position-contract:first-child{padding-top:12px}.position-contract-grid{display:grid;grid-template-columns:minmax(132px,1.25fr) repeat(7,minmax(78px,1fr));border-left:2px solid var(--line)}.position-contract-grid>div{min-width:0;padding:10px;border-right:1px solid var(--line)}.position-contract-grid>div:last-child{border-right:0}.position-contract-title strong{font-size:12px}.position-book-empty{padding:16px;color:var(--muted)}
     .cc-life-primary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line)}.cc-life-primary>div{padding:13px;border-right:1px solid var(--line)}.cc-life-primary>div:last-child{border-right:0}.cc-life-primary span,.cc-life-primary small{display:block;color:var(--muted);font-size:8px}.cc-life-primary strong{display:block;margin:5px 0;color:var(--text);font-size:15px;font-variant-numeric:tabular-nums}.cc-life-details{border-top:1px solid var(--line)}.cc-life-details>summary{padding:11px 14px;color:var(--text);cursor:pointer;font:800 9px/1.3 var(--mono);letter-spacing:.08em}.cc-life-details .cc-life-metrics,.cc-life-details .cc-life-paths{border-top:1px solid var(--line)}.cc-life-details .cc-life-foot{margin:0}.cc-life-card.is-stale .cc-life-primary strong,.cc-life-card.is-stale .cc-life-details strong{color:#71877e;opacity:.72}.cc-life-card.is-stale .cc-life-flag{color:var(--amber)}.cc-lifecycle-panel .cc-directive{border-color:var(--line);background:transparent;color:var(--text)}
-    .overview-operations{margin-top:16px}.overview-section-head{display:flex;align-items:end;justify-content:space-between;gap:14px;margin-bottom:10px}.overview-section-head h3{margin:4px 0 0;font-size:20px}.operations-grid{display:grid;grid-template-columns:minmax(330px,.85fr) minmax(520px,1.4fr);gap:12px}.operations-grid .panel{margin:0}.operations-grid .lane-summary-card{min-width:0}.operations-grid .lane-summary-matrix-head,.operations-grid .lane-summary-matrix-row{grid-template-columns:minmax(115px,1.15fr) minmax(90px,.7fr) minmax(190px,1.35fr) minmax(150px,1fr)}.operations-grid .lane-summary-matrix-head span,.operations-grid .lane-summary-matrix-row>div{padding:9px 10px;font-size:8px;overflow-wrap:anywhere}.operations-grid .lane-summary-matrix-row>div:first-child{white-space:normal}.operations-grid .lane-summary-arm{max-width:none}.operations-grid .lane-summary-last strong{white-space:normal}.operations-grid .system-health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .overview-portfolio,.overview-operations{margin-top:16px}.overview-portfolio>.portfolio-ledger{margin-top:0}.overview-section-head{display:flex;align-items:end;justify-content:space-between;gap:14px;margin-bottom:10px}.overview-section-head h3{margin:4px 0 0;font-size:20px}.operations-grid{display:grid;grid-template-columns:minmax(330px,.85fr) minmax(520px,1.4fr);gap:12px}.operations-grid .panel{margin:0}.operations-grid .lane-summary-card{min-width:0}.operations-grid .lane-summary-matrix-head,.operations-grid .lane-summary-matrix-row{grid-template-columns:minmax(115px,1.15fr) minmax(90px,.7fr) minmax(190px,1.35fr) minmax(150px,1fr)}.operations-grid .lane-summary-matrix-head span,.operations-grid .lane-summary-matrix-row>div{padding:9px 10px;font-size:8px;overflow-wrap:anywhere}.operations-grid .lane-summary-matrix-row>div:first-child{white-space:normal}.operations-grid .lane-summary-arm{max-width:none}.operations-grid .lane-summary-last strong{white-space:normal}.operations-grid .system-health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
     @media(max-width:1050px){.position-book-parent{grid-template-columns:repeat(4,minmax(0,1fr))}.position-book-parent>div{border-bottom:1px solid var(--line)}.position-book-action{grid-column:1/-1}.position-contract-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.operations-grid{grid-template-columns:1fr}.cc-life-primary{grid-template-columns:repeat(2,1fr)}}
-    @media(max-width:680px){.overview-breach-strip{display:block}.overview-breach-strip>div{margin-top:8px}.overview-clocks{grid-template-columns:1fr;width:100%;margin-top:10px}.overview-clocks>div{border-left:0;border-top:1px solid var(--line)}.position-book-parent,.position-contract-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.position-contract{padding-left:12px}.operations-grid .lane-summary-matrix{overflow:visible}.operations-grid .lane-summary-matrix-head{display:none}.operations-grid .lane-summary-matrix-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-top:8px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.operations-grid .lane-summary-matrix-row>div:first-child{grid-column:1/-1;background:#07110e}.operations-grid .lane-summary-matrix-row>div[data-evidence]:before{display:block;margin-bottom:4px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.operations-grid .lane-summary-matrix-row>div[data-evidence="alert"]:before{content:'TV'}.operations-grid .lane-summary-matrix-row>div[data-evidence="preview"]:before{content:'Disposition'}.operations-grid .lane-summary-matrix-row>div[data-evidence="fill"]:before{content:'Schwab'}.cc-life-primary{grid-template-columns:1fr 1fr}}
+    @media(max-width:680px){.overview-breach-strip{display:block}.overview-breach-strip>div{margin-top:8px}.overview-clocks{grid-template-columns:1fr;width:100%;margin-top:10px}.overview-clocks>div{border-left:0;border-top:1px solid var(--line)}.position-decision-head{display:block}.position-decision-badge{display:inline-block;margin-top:8px}.position-decision-proof-grid{grid-template-columns:1fr 1fr}.position-book-parent,.position-contract-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.position-contract{padding-left:12px}.operations-grid .lane-summary-matrix{overflow:visible}.operations-grid .lane-summary-matrix-head{display:none}.operations-grid .lane-summary-matrix-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-top:8px;border:1px solid var(--line);border-radius:5px;overflow:hidden}.operations-grid .lane-summary-matrix-row>div:first-child{grid-column:1/-1;background:#07110e}.operations-grid .lane-summary-matrix-row>div[data-evidence]:before{display:block;margin-bottom:4px;color:var(--muted);font:700 7px/1.2 var(--mono);letter-spacing:.08em;text-transform:uppercase}.operations-grid .lane-summary-matrix-row>div[data-evidence="alert"]:before{content:'TV'}.operations-grid .lane-summary-matrix-row>div[data-evidence="preview"]:before{content:'Disposition'}.operations-grid .lane-summary-matrix-row>div[data-evidence="fill"]:before{content:'Schwab'}.cc-life-primary{grid-template-columns:1fr 1fr}}
   </style>`;
   return source
     .replace('<title>NUVO VSIM v5 — Shadow Preview</title>', '<title>NUVO VSIM v5 — Live Shadow</title>')
@@ -2931,17 +3061,16 @@ export function rewriteDesignHtml(source, { e3SpineTab = false } = {}) {
       body:not(.live-ready) .shell{visibility:hidden}
       body:not(.live-ready)::before{content:'Loading live account data…';position:fixed;inset:0;display:grid;place-items:center;color:#8fa49b;background:#03100c;font:700 12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase}
     </style></head>`)
-    .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="underwrite">Underwrite</button>')
-    .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="bot">BOT</button>')
-    .replace('<button class="nav-button" data-view="system">System</button>', e3Nav + '<button class="nav-button" data-view="system">System</button>')
+    .replace('<button class="nav-button" data-view="opportunities">Opportunities</button>', '<button class="nav-button" data-view="csp">CSP</button><button class="nav-button" data-view="covered-calls">Covered Calls</button><button class="nav-button" data-view="positions">Position Management</button>')
+    .replace('<button class="nav-button" data-view="evidence">Evidence</button>', '<button class="nav-button" data-view="history">History</button><button class="nav-button" data-view="performance">Performance</button><button class="nav-button" data-view="bot">BOT</button>')
     .replace(readinessScorecard, laneSummaryCard)
     .replace('<section class="view active" id="overview" aria-labelledby="overview-title">', '<section class="view active" id="overview" aria-labelledby="overview-title">' + overviewBreachStrip)
     .replace('Today’s command view', 'Portfolio overview')
     .replace('<div class="snapshot"><span>Snapshot</span><strong>Aug 23 · 12:41 PT</strong></div>', '<div class="overview-clocks" aria-label="Portfolio data clocks"><div><span>Custody</span><strong data-vsim="clock-custody">—</strong></div><div><span>Option quote</span><strong data-vsim="clock-option">—</strong></div><div><span>Calculation</span><strong data-vsim="clock-calculation">—</strong></div></div>')
-    .replace('\n\n        <div class="two-column">', '\n' + portfolio + '\n\n        <div class="two-column">')
+    .replace('\n\n        <div class="two-column">', '\n\n        <div class="two-column">')
     .replace(/\n\s{8}<div class="two-column">\n\s{10}<article class="panel environment-panel">[\s\S]*?\n\s{8}<\/div>(?=\n\n\s{8}<article class="panel table-panel">)/u, '')
-    .replace(/\n\s{8}<div class="lower-grid">[\s\S]*?\n\s{8}<\/div>(?=\n\s{6}<\/section>)/u, '\n' + operationsSection)
-    .replace('      <section class="view" id="evidence"', calculators + underwrite + performance + bot + '\n      <section class="view" id="decisions"')
+    .replace(/\n\s{8}<div class="lower-grid">[\s\S]*?\n\s{8}<\/div>(?=\n\s{6}<\/section>)/u, '\n' + overviewPortfolio + operationsSection)
+    .replace('      <section class="view" id="evidence"', cspView + coveredCallsView + positionsView + underwrite + historyView + performanceView + bot + '\n      <section class="view" id="decisions"')
     .replace('<section class="view" id="system" aria-labelledby="system-title">', '<section class="view" id="system" aria-labelledby="system-title">' + mobileSystemCard)
     .replace('</main>', e3View + '</main>')
     .replace('</body>', '<script src="/design/live.js"></script></body>');
@@ -3107,6 +3236,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   let underwriteMode = 'scan';
   let portfolioReviewFilter = 'all';
   let tradingViewWidgetLoad = null;
+  let positionManagementRequestId = 0;
+  let positionManagementLoaded = false;
 
   async function ensureTradingViewWidget(root) {
     if (!root) return;
@@ -3368,21 +3499,10 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     applyCoveredCallAvailability(calculatorState.coveredCallInventory);
   }
 
-  function resetCspView() {
-    calculatorState.cspSymbol = null; calculatorState.cspRequestId = null;
-    const results = q('[data-vsim="csp-results"]'); if (results) results.hidden = true;
-    const candidates = q('[data-vsim="csp-candidate-panel"]'); if (candidates) candidates.hidden = true;
-    clear(q('[data-vsim="csp-candidates"]'));
-    text(q('[data-vsim="csp-outcome"]'), 'Enter one ticker for transparent put math');
-    text(q('[data-vsim="csp-badge"]'), 'MATH ONLY');
-    text(q('[data-vsim="csp-reason"]'), 'Every put row with a fresh executable bid is shown. No universe, ranking, Governor, portfolio gate, recommendation, or order route.');
-  }
-
   function setCalculatorMode(mode) {
-    if (calculatorState.mode !== mode) {
-      if (mode === 'covered-call') resetCoveredCallView(); else resetCspView();
-      calculatorState.mode = mode;
-    }
+    if (mode !== 'covered-call') return;
+    if (calculatorState.mode !== mode) resetCoveredCallView();
+    calculatorState.mode = mode;
     qa('[data-calculator]').forEach(button => {
       const active = button.dataset.calculator === mode;
       button.classList.toggle('active', active);
@@ -3430,6 +3550,76 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       root.append(button);
     });
     if (actionableCount === 0) applyCoveredCallAvailability(rows);
+  }
+
+  function renderPositionManagementDecisions(payload) {
+    const root = q('[data-vsim="position-decisions"]'); clear(root);
+    if (!root) return;
+    const decisions = payload?.decisions || [];
+    if (!decisions.length) {
+      root.append(make('p', 'No open covered-call position requires management.', 'muted'));
+      return;
+    }
+    decisions.forEach(decision => {
+      const card = make('section', undefined, 'position-decision-card');
+      card.dataset.decision = decision.decision || 'ERROR';
+      const head = make('div', undefined, 'position-decision-head');
+      const title = make('div'); title.append(
+        make('p', (decision.ticker || 'UNKNOWN') + ' · ' + (decision.option_symbol || 'contract unavailable'), 'kicker'),
+        make('h4', decision.decision || 'ERROR'),
+      );
+      head.append(title, make('span', decision.action_required ? 'ORDER REQUIRED' : 'NO ORDER', 'position-decision-badge'));
+      card.append(head,
+        make('p', decision.operator_action || 'DO NOT PLACE OR CHANGE AN ORDER.', 'position-decision-instruction'),
+        make('p', decision.reason || 'The position decision is unavailable.', 'position-decision-reason'));
+      if (decision.order) card.append(make('div', decision.operator_action, 'position-decision-order'));
+      const proof = decision.proof || {};
+      const proofRows = [];
+      if (present(proof.advantage_vs_hold_0)) proofRows.push(['Advantage vs HOLD', moneyExact(proof.advantage_vs_hold_0)]);
+      if (present(proof.advantage_standard_error)) proofRows.push(['Monte Carlo SE', moneyExact(proof.advantage_standard_error)]);
+      if (present(proof.lower_95_bound_vs_hold_0)) proofRows.push(['95% lower bound', moneyExact(proof.lower_95_bound_vs_hold_0)]);
+      if (present(proof.close_outlay)) proofRows.push(['Close outlay', moneyExact(proof.close_outlay)]);
+      if (present(proof.locked_option_pnl_if_closed)) proofRows.push(['P&L if closed', moneyExact(proof.locked_option_pnl_if_closed)]);
+      if (present(proof.assignment_pnl)) proofRows.push(['Assignment P&L', moneyExact(proof.assignment_pnl)]);
+      if (present(proof.current_strike)) proofRows.push(['Current strike', moneyExact(proof.current_strike)]);
+      if (proof.current_expiration) proofRows.push(['Expiry', proof.current_expiration]);
+      if (decision.primary_blocker) proofRows.push(['Why no adjustment', decision.primary_blocker]);
+      if (proofRows.length) {
+        const details = make('details', undefined, 'position-decision-proof');
+        details.append(make('summary', 'WHY THIS IS THE DECISION'));
+        const grid = make('div', undefined, 'position-decision-proof-grid');
+        proofRows.forEach(([label, value]) => { const cell = make('div');
+          cell.append(make('span', label), make('strong', value)); grid.append(cell); });
+        details.append(grid); card.append(details);
+      }
+      root.append(card);
+    });
+  }
+
+  async function loadPositionManagementDecisions({ force = false } = {}) {
+    if (positionManagementLoaded && !force) return;
+    const root = q('[data-vsim="position-decisions"]');
+    const button = q('[data-position-management-refresh]');
+    if (!root) return;
+    const requestId = ++positionManagementRequestId;
+    clear(root); root.append(make('p', 'Calculating one action per position from current executable quotes…', 'muted'));
+    if (button) { button.disabled = true; button.textContent = 'CALCULATING…'; }
+    try {
+      const payload = await api('/api/position-management');
+      if (requestId !== positionManagementRequestId) return;
+      positionManagementLoaded = true;
+      renderPositionManagementDecisions(payload);
+    } catch (error) {
+      if (requestId !== positionManagementRequestId) return;
+      renderPositionManagementDecisions({ decisions: [{ decision: 'ERROR', outcome: 'ERROR',
+        operator_action: 'DO NOT PLACE OR CHANGE AN ORDER.',
+        reason: 'Position truth could not be established: ' + error.message,
+        primary_blocker: 'REQUEST_FAILED' }] });
+    } finally {
+      if (requestId === positionManagementRequestId && button) {
+        button.disabled = false; button.textContent = 'REFRESH ACTIONS';
+      }
+    }
   }
 
   function renderPortfolio(portfolio, performance) {
@@ -3619,9 +3809,9 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
             ['Contract', (item.type === 'COVERED_CALL' ? 'SHORT CALL' : item.type || 'SHORT OPTION') + ' · ' + number(item.quantity), 'position-contract-title'],
             ['Strike', moneyExact(item.strike)],
             ['Expiry', item.expiration || '—'],
-            ['Entry credit', moneyExact(item.entry_credit)],
+            ['Gross entry credit', moneyExact(item.gross_entry_credit ?? item.entry_credit)],
             ['Option liability', quoteValue(item, present(item.market_value) ? Math.abs(Number(item.market_value)) : null, true)],
-            ['Option P&L', quoteValue(item, item.unrealized_pnl, true)],
+            ['Broker mark P&L', quoteValue(item, item.unrealized_pnl, true)],
             ['θ / day', quoteValue(item, item.theta_per_day, true)],
             ['Quote', item.quote_asof ? when(item.quote_asof) + (item.quote_freshness === 'LAST_MARKET_QUOTE' ? ' · STALE' : '') : 'UNAVAILABLE'],
           ];
@@ -3651,13 +3841,8 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         make('span', flag.code, 'cc-life-flag' + (flag.code === 'NOMINAL' ? ' nominal' : ''))));
       else badges.append(make('span', result && result.error || 'CALCULATOR_UNAVAILABLE', 'cc-life-flag'));
       head.append(title, badges); card.append(head);
-      const choiceShell = make('div', undefined, 'cc-choice-shell');
-      const choiceButton = make('button', 'COMPARE IN UNDERWRITE', 'cc-directive');
-      choiceButton.type = 'button'; choiceButton.dataset.lifecycleChoiceOption = item.option_symbol;
-      choiceButton.setAttribute('aria-label', 'Compare HOLD, CLOSE, and ROLL for ' + item.option_symbol);
-      choiceShell.append(choiceButton, make('p', 'Opens the full read-only common-clock table in Underwrite. Requires current executable quotes during regular trading hours; no row is selected or transmitted.'));
       if (!result || !result.ok) {
-        card.append(make('p', 'Exact lifecycle economics unavailable: ' + (result && result.error || 'live inputs incomplete') + '. No fee or market value was guessed.', 'cc-life-foot'), choiceShell);
+        card.append(make('p', 'Exact lifecycle economics unavailable: ' + (result && result.error || 'live inputs incomplete') + '. No fee or market value was guessed.', 'cc-life-foot'));
         lifecycleRoot.append(card); return;
       }
       const trade = result.current_trade || {}; const riskNeutral = result.risk_neutral || {}; const paths = result.paths || {};
@@ -3716,10 +3901,13 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         + '. Raw Schwab theta: ' + rawBrokerTheta + ' $/share/calendar-day × '
         + number(trade.broker_theta_equity_multiplier) + ' shares/contract × '
         + number(trade.broker_theta_contracts) + ' contracts'
-        + '. CLOSE · ROLL · EXIT recommendation: NO_TRUTH. U4 compares option-overlay math only; it never chooses an action.' + gaps, 'cc-life-foot'));
-      card.append(primary, details, choiceShell);
+        + '. The canonical position decision above selects the operator action; these rows are supporting arithmetic only.' + gaps, 'cc-life-foot'));
+      card.append(primary, details);
       lifecycleRoot.append(card);
     });
+    if (q('#positions')?.classList.contains('active') || window.location.hash === '#positions') {
+      loadPositionManagementDecisions();
+    }
   }
 
   function renderLifecycleChoices(root, result) {
@@ -3792,7 +3980,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   async function runLifecycleChoices(button) {
     const option = button?.dataset.lifecycleChoiceOption;
     if (!option) return;
-    activateView('underwrite'); setUnderwriteMode('manual'); setCalculatorMode('covered-call');
+    activateView('covered-calls'); setCalculatorMode('covered-call');
     const workspace = q('[data-vsim="cc-lifecycle-workspace"]');
     const root = q('[data-lifecycle-choice-result]', workspace);
     if (!workspace || !root) return;
@@ -3844,16 +4032,24 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       text(q('[data-vsim="cc-strike"]'), moneyExact(selected.strike));
       text(q('[data-vsim="cc-expiration"]'), selected.expiration + ' · ' + number(selected.dte) + ' DTE');
       text(q('[data-vsim="cc-premium"]'), moneyExact(selected.net_premium));
-      text(q('[data-vsim="cc-roc"]'), percent(selected.premium_roc));
-      text(q('[data-vsim="cc-annualized-roc"]'), percent(selected.annualized_premium_roc) + ' annualized');
-      text(q('[data-vsim="cc-otm"]'), percent(selected.market_implied_expire_otm));
-      text(q('[data-vsim="cc-touch"]'), percent(selected.market_implied_touch));
+      text(q('[data-vsim="cc-expected-profit"]'), moneyExact(selected.expected_wheel_profit));
+      text(q('[data-vsim="cc-expected-profit-day"]'), moneyExact(selected.expected_wheel_profit_per_calendar_day) + ' / calendar day · modeled, not guaranteed');
+      text(q('[data-vsim="cc-mm-upper"]'), moneyExact(selected.market_maker_expected_move_ceiling));
+      text(q('[data-vsim="cc-mm-position"]'), selected.strike_at_or_above_market_maker_expected_move === null
+        ? 'ATM straddle unavailable · IV reference used'
+        : selected.strike_at_or_above_market_maker_expected_move
+          ? 'strike at/above expected-move ceiling · reference only'
+          : 'strike inside expected-move ceiling · reference only');
+      const timing = result.technical_timing || {};
+      text(q('[data-vsim="cc-timing"]'), timing.status === 'FAVORABLE_TO_SELL_CALL'
+        ? 'FAVORABLE' : timing.status === 'NEUTRAL' ? 'NEUTRAL' : 'UNAVAILABLE');
+      text(q('[data-vsim="cc-timing-detail"]'), 'RSI ' + number(timing.rsi_14)
+        + ' · MACD histogram ' + number(timing.macd_histogram) + ' · reference only');
+      text(q('[data-vsim="cc-callaway-profit"]'), moneyExact(selected.called_away_profit));
       text(q('[data-vsim="cc-callaway"]'), percent(selected.called_away_return_on_cost));
-      text(q('[data-vsim="cc-impact"]'), 'Decision impact: selling this call would reserve '
-        + number(selected.covered_shares) + ' shares through ' + selected.expiration
-        + ' and accept sale of those shares at ' + moneyExact(selected.strike)
-        + '. Modeled incremental value versus holding uncovered is ' + moneyExact(selected.incremental_nev_vs_holding)
-        + ' (' + moneyExact(selected.incremental_nev_per_day) + ' per day). User action is required outside VSIM; this screen cannot place the trade.');
+      text(q('[data-vsim="cc-impact"]'), selected.order_instruction + '. If assigned, the shares sell above the '
+        + moneyExact(result.average_price) + ' cost and the combined share gain plus net premium is '
+        + moneyExact(selected.called_away_profit) + '. The contract maximizes primary modeled wheel profit from cost per calendar day for its eligible set. Expected move and RSI/MACD are references only; the market outcome is not certain.');
     }
     const tenors = q('[data-vsim="cc-tenors"]'); clear(tenors);
     const configuredTargets = result && (result.target_dtes || []).length
@@ -3862,33 +4058,53 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       : configuredTargets.map(target => ({ target_dte: target, status: 'NOT_EVALUATED' }));
     tenorRows.forEach(tenor => {
       const card = make('div', undefined, 'cc-tenor');
-      card.append(make('strong', number(tenor.target_dte) + ' DTE target'));
+      card.append(make('strong', tenor.slot_label || (number(tenor.target_dte) + ' DTE target')));
       if (tenor.best) card.append(
-        make('span', tenor.expiration + ' · ' + moneyExact(tenor.best.strike) + ' strike'),
-        make('small', number(tenor.eligible_candidates) + ' eligible · modeled edge/day ' + moneyExact(tenor.best.incremental_nev_per_day)),
+        make('span', tenor.expiration + ' · ' + number(tenor.best.dte) + ' DTE · ' + moneyExact(tenor.best.strike) + ' strike'),
+        make('span', tenor.best.order_instruction),
+        make('small', 'Net premium ' + moneyExact(tenor.best.net_premium)
+          + ' · expected wheel profit ' + moneyExact(tenor.best.expected_wheel_profit)
+          + ' · called-away profit ' + moneyExact(tenor.best.called_away_profit)),
+        make('small', 'MM expected move +' + moneyExact(tenor.best.market_maker_expected_move)
+          + ' to ' + moneyExact(tenor.best.market_maker_expected_move_ceiling) + '; strike is '
+          + (tenor.best.strike_at_or_above_market_maker_expected_move === null ? 'unclassified'
+            : tenor.best.strike_at_or_above_market_maker_expected_move ? 'at/above the upper reference' : 'inside the upper reference')
+          + '. Reference only.'),
+        make('small', 'Selected first of ' + number(tenor.eligible_candidates)
+          + ' liquid above-cost calls by primary expected wheel profit from cost per calendar day.'),
       );
-      else card.append(make('span', 'No eligible strike'), make('small', tenor.status || 'Blocked'));
+      else {
+        const rejection = tenor.rejected || {};
+        const blockerExplanation = tenor.primary_blocker?.code === 'CONSTITUTION/OPTION_LIQUIDITY_GATE_FAILED'
+          ? 'No above-cost call met the required live spread, open-interest, and volume standards.'
+          : tenor.primary_blocker?.code === 'UNDERWRITE/STRIKE_AT_OR_BELOW_COST_BASIS'
+            ? 'No listed call preserved a sale price above your share cost.'
+            : tenor.primary_blocker?.code === 'TRUTH/EVENT_IN_TENOR'
+              ? 'A verified company event falls inside this option life.'
+              : 'No contract passed every truth, cost-basis, and execution gate.';
+        card.append(
+        make('span', 'HOLD SHARES / NO TRADE'),
+        make('small', (tenor.expiration || 'Requested weekly expiry') + ' · '
+          + number(tenor.listed_dte) + ' DTE'),
+        make('small', blockerExplanation),
+        make('small', number(rejection.illiquid) + ' failed liquidity · '
+          + number(rejection.at_or_below_cost_basis) + ' at/below cost · '
+          + number(rejection.event_in_window) + ' event blocked.'),
+        );
+      }
       tenors.append(card);
     });
-    const candidateRows = [];
-    configuredTargets.forEach(target => candidateRows.push(...((result && result.candidates) || [])
-      .filter(row => Number(row.target_dte) === target).slice(0, 4)));
     const candidatePanel = q('[data-vsim="cc-candidate-panel"]');
-    if (candidatePanel) candidatePanel.hidden = candidateRows.length === 0;
-    text(q('[data-vsim="cc-eligible-count"]'), candidateRows.length + ' shown');
-    if (candidateRows.length) fillTable(q('[data-vsim="cc-candidates"]'), candidateRows, [
-      item => number(item.rank), item => (item.expiration || '—') + ' (' + number(item.dte) + ')',
-      item => moneyExact(item.strike), item => moneyExact(item.executable_credit_per_share),
-      item => moneyExact(item.incremental_nev_per_day), item => moneyExact(item.incremental_nev_vs_holding),
-    ], '');
-    else clear(q('[data-vsim="cc-candidates"]'));
+    if (candidatePanel) candidatePanel.hidden = true;
+    clear(q('[data-vsim="cc-candidates"]'));
     text(q('[data-vsim="cc-diagnostics"]'), JSON.stringify({
       outcome: result && result.outcome, reason_code: result && result.reason_code,
       symbol: result && result.symbol, target_dtes: result && result.target_dtes,
       average_price: result && result.average_price, current_mark: result && result.spot,
       minimum_strike_exclusive: result && result.minimum_strike_exclusive,
       rejected: result && result.rejected, rejection_codes: result && result.rejection_codes,
-      forecast: result && result.forecast, method: result && result.method,
+      forecast: result && result.forecast, technical_timing: result && result.technical_timing,
+      method: result && result.method,
       calibration: result && result.calibration, settlement: result && result.settlement,
       diagnostics: result && result.diagnostics, source: result && result.source,
       execution: result && result.execution,
@@ -3896,7 +4112,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   async function openCoveredCall(symbol, button) {
-    activateView('underwrite'); setUnderwriteMode('manual'); setCalculatorMode('covered-call'); resetCoveredCallView();
+    activateView('covered-calls'); setCalculatorMode('covered-call'); resetCoveredCallView();
     const requestId = crypto.randomUUID();
     calculatorState.coveredCallSymbol = symbol; calculatorState.coveredCallRequestId = requestId;
     text(q('[data-vsim="cc-outcome"]'), 'Calculating ' + symbol + ' covered calls…');
@@ -3916,77 +4132,62 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     finally { if (button) button.disabled = false; }
   }
 
-  function cspModelNev(row, name) {
-    const model = row.models && row.models[name];
-    return model && present(model.nev) && present(model.monte_carlo_standard_error)
-      ? moneyExact(model.nev) + ' ± ' + moneyExact(model.monte_carlo_standard_error)
-      : 'UNAVAILABLE';
-  }
-
-  function cspCashValue(row, key) {
-    const value = row && row.one_contract_economics
-      ? row.one_contract_economics[key] : null;
-    return present(value) ? moneyExact(value) : 'UNAVAILABLE';
-  }
-
   function renderCashSecuredPuts(result) {
-    const rows = result && result.ok && Array.isArray(result.rows) ? result.rows : [];
-    const calibration = result?.calibration || {};
-    const calibrationN = calibration.n || {};
-    const results = q('[data-vsim="csp-results"]'); if (results) results.hidden = false;
     const status = q('[data-vsim="csp-status"]');
-    if (status) status.dataset.state = result && result.ok ? 'ready' : 'unavailable';
-    text(q('[data-vsim="csp-outcome"]'), result && result.ok
-      ? 'CALCULATED · ' + result.symbol : 'MATH UNAVAILABLE');
-    text(q('[data-vsim="csp-badge"]'), result && result.ok ? 'CALCULATED' : 'UNAVAILABLE');
-    const forecastFact = result && result.forecast_persistence
-      ? ' Forecast ledger: ' + result.forecast_persistence.status + ' · '
-        + number(result.forecast_persistence.rows) + ' row(s).'
-      : '';
-    text(q('[data-vsim="csp-reason"]'), (result && result.reason
-      ? result.reason : 'Fresh put math could not be calculated. No stale value was substituted.') + forecastFact);
-    text(q('[data-vsim="csp-ticker"]'), result && result.symbol || '—');
-    setValue('csp-spot', result && result.spot, moneyExact);
-    text(q('[data-vsim="csp-row-count"]'), result && result.ok ? number(result.row_count) : '—');
-    text(q('[data-vsim="csp-history"]'), result && result.ok ? number(result.history_sessions) : '—');
-    text(q('[data-vsim="csp-rate"]'), result && result.ok ? percent(result.rate_assumptions.risk_free_rate) : '—');
-    text(q('[data-vsim="csp-yield"]'), result && result.ok ? percent(result.rate_assumptions.continuous_dividend_yield) : '—');
-    text(q('[data-vsim="csp-samples"]'), result && result.ok ? number(result.sample_count_per_member) : '—');
-    text(q('[data-vsim="csp-calibration"]'), result && result.ok
-      ? 'MODELED · ' + (calibration.status || 'UNCALIBRATED')
-        + ' · n(symbol×expiry)=' + number(calibrationN.unique_symbol_expiry || 0)
-      : 'MODELED · UNCALIBRATED · n(symbol×expiry)=0');
-    text(q('[data-vsim="csp-asof"]'), result && result.asof ? 'Calculated ' + when(result.asof) : 'No live calculation');
-    const candidatePanel = q('[data-vsim="csp-candidate-panel"]');
-    if (candidatePanel) candidatePanel.hidden = rows.length === 0;
-    if (rows.length) fillTable(q('[data-vsim="csp-candidates"]'), rows, [
-      item => (item.expiration || '—') + ' (' + number(item.dte) + ')',
-      item => moneyExact(item.strike),
-      item => moneyExact(item.quote.bid) + ' / ' + (present(item.quote.ask) ? moneyExact(item.quote.ask) : 'UNAVAILABLE'),
-      item => moneyExact(item.one_contract_economics.net_credit),
-      item => moneyExact(item.one_contract_economics.gross_obligation),
-      item => moneyExact(item.one_contract_economics.net_tied_cash),
-      item => moneyExact(item.one_contract_economics.assigned_basis),
-      item => present(item.market_math.risk_neutral_finish_itm_european)
-        ? percent(item.market_math.risk_neutral_finish_itm_european) : 'UNAVAILABLE',
-      item => present(item.market_math.expiry_level_forecast_vol)
-        ? percent(item.market_math.expiry_level_forecast_vol) : 'UNAVAILABLE',
-      item => cspModelNev(item, 'lognormal'),
-      item => cspModelNev(item, 'studentT'),
-      item => cspModelNev(item, 'jump'),
-      item => cspModelNev(item, 'bootstrap'),
-      item => cspModelNev(item, 'volatilityStress'),
-      item => cspCashValue(item, 'cash_carry_cost_0'),
-      item => present(item.headline_models.primary_cash_adj_nev_0)
-        ? moneyExact(item.headline_models.primary_cash_adj_nev_0) : 'UNAVAILABLE',
-      item => item.warnings.length ? item.warnings.join(' · ') : 'NONE',
-    ], '');
-    else clear(q('[data-vsim="csp-candidates"]'));
-    text(q('[data-vsim="csp-diagnostics"]'), JSON.stringify(result, null, 2));
+    if (status) status.dataset.state = result?.outcome === 'ERROR' ? 'error' : 'ready';
+    text(q('[data-vsim="csp-outcome"]'), result?.outcome === 'ERROR'
+      ? 'ERROR · ' + (result.symbol || 'UNKNOWN')
+      : (result?.outcome || 'KEEP_CASH') + ' · ' + (result?.symbol || 'UNKNOWN'));
+    text(q('[data-vsim="csp-badge"]'), result?.outcome === 'SELL_CSP'
+      ? '3 WEEKLY RESULTS' : result?.outcome || 'ERROR');
+    text(q('[data-vsim="csp-reason"]'), result?.reason
+      || 'Fresh market and account truth could not be established. Do not trade.');
+    text(q('[data-vsim="csp-asof"]'), result?.asof ? 'Market ' + when(result.asof) : 'Market time unavailable');
+    text(q('[data-vsim="csp-decision-id"]'), result?.decision_id
+      ? result.decision_id + ' · deterministic' : 'Decision not sealed');
+    const root = q('[data-vsim="csp-choices"]');
+    clear(root);
+    const choices = Array.isArray(result?.choices) ? result.choices : [];
+    if (!choices.length) {
+      const card = make('article', undefined, 'csp-choice');
+      card.dataset.outcome = 'ERROR';
+      const slot = make('div', undefined, 'csp-choice-slot');
+      slot.append(make('span', 'TRUTH FAILURE'), make('b', 'ERROR'));
+      card.append(slot, make('h3', 'DO NOT TRADE'),
+        make('p', result?.primary_blocker?.message || result?.reason || 'Required truth is unavailable.'));
+      root?.append(card); return;
+    }
+    choices.forEach(choice => {
+      const card = make('article', undefined, 'csp-choice');
+      card.dataset.outcome = choice.outcome;
+      const slot = make('div', undefined, 'csp-choice-slot');
+      slot.append(make('span', choice.slot_label || choice.slot), make('b', choice.outcome));
+      card.append(slot);
+      if (choice.outcome === 'SELL_CSP') {
+        const rec = choice.recommendation || {};
+        const proof = choice.mathematical_proof?.gates || {};
+        card.append(make('h3', rec.expiration + ' · ' + number(rec.dte) + ' DTE · $' + number(rec.strike) + ' PUT'));
+        const facts = make('div', undefined, 'csp-choice-proof');
+        const expected = make('div'); expected.append(make('span', 'Outside expected move'),
+          make('strong', '$' + number(proof.expected_move?.dollars_outside_floor) + ' below'));
+        const roc = make('div'); roc.append(make('span', 'ROC'), make('strong', percent(proof.roc?.actual)));
+        const credit = make('div'); credit.append(make('span', 'Net credit'), make('strong', moneyExact(rec.estimated_net_credit)));
+        const cash = make('div'); cash.append(make('span', 'Secured cash'), make('strong', moneyExact(rec.secured_cash)));
+        const nev = make('div'); nev.append(make('span', 'Primary NEV'),
+          make('strong', moneyExact(proof.primary_nev?.per_contract)));
+        const modelOtm = make('div'); modelOtm.append(make('span', 'Model finish OTM'),
+          make('strong', percent(proof.model_finish_probability?.finish_otm)));
+        facts.append(expected, roc, nev, modelOtm, credit, cash);
+        card.append(facts, make('p', choice.reason), make('div', choice.action.label, 'csp-order-ticket'));
+      } else {
+        card.append(make('h3', 'KEEP CASH / NO TRADE'),
+          make('p', choice.primary_blocker?.message || choice.reason || 'No contract passed every gate.'));
+      }
+      root?.append(card);
+    });
   }
 
   async function runCashSecuredPut(button) {
-    setCalculatorMode('cash-secured-put');
     const symbolInput = q('[data-csp-symbol]');
     const symbol = String(symbolInput && symbolInput.value || '').trim().toUpperCase();
     if (!/^[A-Z][A-Z0-9.]{0,9}$/u.test(symbol)) {
@@ -3999,14 +4200,14 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     if (button) button.disabled = true;
     text(q('[data-vsim="csp-outcome"]'), 'Calculating ' + symbol + '…');
     text(q('[data-vsim="csp-badge"]'), 'RUNNING');
-    text(q('[data-vsim="csp-reason"]'), 'Reading one live put chain and calculating every visible row. No account or Governor state is being read.');
+    text(q('[data-vsim="csp-reason"]'), 'Reading canonical account state and selecting one best contract in each of three weekly expiries.');
     try {
       const params = new URLSearchParams({ symbol });
       const result = await api('/api/cash-secured-put/calculate?' + params.toString());
-      if (calculatorState.mode !== 'cash-secured-put' || calculatorState.cspRequestId !== requestId) return;
+      if (calculatorState.cspRequestId !== requestId || calculatorState.cspSymbol !== symbol) return;
       renderCashSecuredPuts(result);
     } catch (error) {
-      if (calculatorState.mode === 'cash-secured-put' && calculatorState.cspRequestId === requestId) {
+      if (calculatorState.cspRequestId === requestId && calculatorState.cspSymbol === symbol) {
         renderCashSecuredPuts({ ok: false, symbol, reason_code: 'CALCULATION_REQUEST_FAILED', reason: error.message });
       }
     } finally { if (button) button.disabled = false; }
@@ -4269,6 +4470,43 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     renderPerformanceLedger(); renderPerformanceCalendar(performanceState.calendar);
   }
 
+  function renderHistory(performance) {
+    const history = performance?.history || {};
+    const trades = Array.isArray(performance?.trades) ? performance.trades : [];
+    const learningByTrade = performance?.learning?.by_trade || {};
+    const completeAnalyses = Number(performance?.learning?.analyzed ?? 0);
+    const pendingAnalyses = Number(performance?.learning?.pending ?? 0);
+    text(q('[data-vsim="history-integrity"]'), history.status || 'PARTIAL');
+    text(q('[data-vsim="history-imported"]'), number(history.imported_transactions || 0));
+    text(q('[data-vsim="history-completed"]'), number(trades.length));
+    text(q('[data-vsim="history-analyzed"]'), number(completeAnalyses));
+    text(q('[data-vsim="history-pending"]'), number(pendingAnalyses));
+    text(q('[data-vsim="history-trade-count"]'), number(trades.length) + ' completed trades');
+    text(q('[data-vsim="history-note"]'), (history.note || 'Trade history is partial.')
+      + ' Post-trade learning is sealed separately and never changes canonical broker truth.');
+    fillTable(q('[data-vsim="history-trades-body"]'), trades, [
+      trade => when(trade.closed_at), trade => trade.trade_id || '—',
+      trade => trade.underlying || trade.symbol || '—', trade => trade.strategy || '—',
+      trade => trade.direction || '—', trade => number(trade.quantity),
+      trade => when(trade.opened_at), trade => moneyExact(trade.opening_price),
+      trade => moneyExact(trade.closing_price), trade => moneyExact(trade.fees),
+      trade => moneyExact(trade.realized_pnl), trade => {
+        const isWheel = ['SHORT_PUT', 'SHORT_CALL'].includes(String(trade.strategy || ''))
+          || Boolean(trade.wheel_cycle_id);
+        const learned = learningByTrade[trade.trade_id];
+        const state = learned?.status || (isWheel ? 'PENDING' : 'NOT_WHEEL');
+        if (state !== 'COMPLETE') {
+          const badge = make('span', state, 'learning-state'); badge.dataset.state = state; return badge;
+        }
+        const details = make('details'); const summary = make('summary', 'COMPLETE', 'learning-state');
+        summary.dataset.state = state; details.append(summary,
+          make('p', learned.analysis?.summary || 'Sealed lesson available.'),
+          make('p', 'Future rule: ' + (learned.analysis?.future_rule || 'INSUFFICIENT_EVIDENCE')));
+        return details;
+      },
+    ], 'No completed matched trades exist in the imported Schwab ledger.');
+  }
+
   function renderOverview(status, portfolio) {
     const custody = status.custody || {};
     const account = custody.account || {};
@@ -4294,7 +4532,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     }
     if (cards[3]) {
       const dayPnlVerified = present(account.dayProfitLoss)
-        && account.dayProfitLossSource === 'SCHWAB_SUM_RECONCILED_POSITION_DAY_PROFIT_LOSS';
+        && account.dayProfitLossSource === 'SCHWAB_RECONCILED_ACCOUNT_DAY_PROFIT_LOSS';
       const dayPnl = dayPnlVerified ? Number(account.dayProfitLoss) : null;
       const dayPnlStale = portfolio && portfolio.option_analytics_freshness === 'LAST_MARKET_QUOTE';
       cards[3].classList.add('today-pnl-card');
@@ -4308,9 +4546,12 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
         pnlValue.classList.toggle('stale-value', Boolean(dayPnlStale));
       }
       text(q('.metric-foot', cards[3]), dayPnlVerified
-        ? 'Schwab position day P&L · ' + number(account.dayProfitLossPositionCount) + ' open positions'
+        ? 'Schwab account day P&L · ' + number(account.dayProfitLossPositionCount) + ' open positions'
           + (Number(account.dayProfitLossAdjustmentCount || 0) > 0
             ? ' · ' + number(account.dayProfitLossAdjustmentCount) + ' carried day-cost reconciliation' : '')
+          + (Number(account.dayProfitLossClosedOnlyTradeCount || 0) > 0
+            ? ' · ' + number(account.dayProfitLossClosedOnlyTradeCount) + ' fully closed trade'
+              + (Number(account.dayProfitLossClosedOnlyTradeCount) === 1 ? '' : 's') : '')
           + (dayPnlStale ? ' · STALE option marks included' : '')
         : 'Schwab day P&L is incomplete · no estimated balance change shown');
     }
@@ -4917,6 +5158,22 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     const statusRequest = isInitialSelfAudit
       ? api('/api/self-audit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
       : api('/api/status');
+    const performanceHydration = Promise.all([
+      api('/api/ledger?limit=250'),
+      api('/api/performance'),
+      api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month)
+        + '&scope=' + encodeURIComponent(performanceState.scope)),
+    ]).then(([ledger, performance, calendar]) => {
+      performanceState.calendar = calendar;
+      renderBrokerActivity(performance, ledger);
+      renderHistory(performance);
+      renderPerformance(performance, null);
+      return performance;
+    }).catch(error => {
+      text(q('[data-vsim="performance-warning"]'), 'Performance unavailable: ' + error.message);
+      text(q('[data-vsim="history-note"]'), 'History unavailable: ' + error.message);
+      return null;
+    });
     initialSelfAudit = false;
     let status = await statusRequest;
     if (isInitialSelfAudit && status?.selfAudit?.tvRouteChallenge) {
@@ -4945,20 +5202,16 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
     // Historical and off-screen panels hydrate after the operational surface
     // is already usable. A secondary-panel failure cannot blank the dashboard.
     try {
-      const requests = [api('/api/guardian'), api('/api/ledger?limit=250'),
-        api('/api/portfolio'), api('/api/performance'),
-        api('/api/performance/calendar?month=' + encodeURIComponent(performanceState.month)
-          + '&scope=' + encodeURIComponent(performanceState.scope))];
+      const requests = [api('/api/guardian'), api('/api/portfolio')];
       if (E3_SPINE_ENABLED) requests.push(api('/api/e3-spine'));
       const payloads = await Promise.all(requests);
-      performanceState.calendar = payloads[4];
-      renderOverview(currentStatus, payloads[2]);
-      renderSystem(currentStatus, payloads[3]);
+      const performance = await performanceHydration;
+      renderOverview(currentStatus, payloads[1]);
+      renderSystem(currentStatus, performance || {});
       renderGuardian(payloads[0]);
-      renderPortfolio(payloads[2], payloads[3]);
-      renderBrokerActivity(payloads[3], payloads[1]);
-      renderPerformance(payloads[3], payloads[2]);
-      if (E3_SPINE_ENABLED) renderE3Spine(payloads[5]);
+      renderPortfolio(payloads[1], performance || {});
+      if (performance) renderPerformance(performance, payloads[1]);
+      if (E3_SPINE_ENABLED) renderE3Spine(payloads[2]);
       await renderEvidence(currentStatus);
     } catch (error) {
       const output = q('.operator-output');
@@ -5154,6 +5407,11 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
   }
 
   document.addEventListener('click', event => {
+    const positionNavigation = event.target.closest('[data-view="positions"]');
+    if (positionNavigation) { window.setTimeout(() => loadPositionManagementDecisions(), 0); }
+    if (event.target.closest('[data-position-management-refresh]')) {
+      loadPositionManagementDecisions({ force: true }); return;
+    }
     const underwriteTab = event.target.closest('[data-underwrite-mode]');
     if (underwriteTab) { setUnderwriteMode(underwriteTab.dataset.underwriteMode); return; }
     const reviewFilter = event.target.closest('[data-review-filter]');
@@ -5175,6 +5433,7 @@ export function liveDashboardScript({ e3SpineTab = false } = {}) {
       commitPerformanceState({ ticker: null, strategy: null, from: null, to: null, scope: 'ALL' }, { reloadCalendar: true }); return;
     }
     if (event.target.closest('[data-jump-system-history]')) { activateView('system'); q('#system-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    if (event.target.closest('[data-jump-history]')) { activateView('history'); return; }
     const calculatorTab = event.target.closest('[data-calculator]');
     if (calculatorTab) { setCalculatorMode(calculatorTab.dataset.calculator); return; }
     const coveredCall = event.target.closest('[data-cc-symbol]');
@@ -5284,6 +5543,7 @@ async function route(request, env, ctx) {
     if (url.pathname !== '/') return json({ error: 'NOT_FOUND' }, 404);
     return serveDashboard(() => fullDashboard(BUNDLED_DESIGN_HTML, {
       e3SpineTab: e3SpineTabEnabled(env),
+      cspDefaultSymbol: String(env.NUVO_CSP_DEFAULT_SYMBOL ?? 'SPY').trim().toUpperCase(),
     }));
   }
   if (!url.pathname.startsWith('/api/')) return json({ error: 'NOT_FOUND' }, 404);
@@ -5422,6 +5682,9 @@ async function route(request, env, ctx) {
     return json(await coveredCallLifecycleChoicesDashboard(
       env, owner.id, url.searchParams.get('option'),
     ));
+  }
+  if (url.pathname === '/api/position-management' && request.method === 'GET') {
+    return json(await positionManagementDashboard(env, owner.id));
   }
   if (url.pathname === '/api/performance/calendar' && request.method === 'GET') {
     try {
@@ -5630,6 +5893,18 @@ export default {
           await runGuardianReview(env, owner.owner_id, { reviewType });
         } catch (error) {
           await audit(env, owner.owner_id, 'SCHEDULED_GUARDIAN_FAILED', { error: error.message });
+        }
+        if (String(env.NUVO_TRADE_LEARNING_ENABLED ?? 'OFF').toUpperCase() === 'ON'
+          && clock.minute % 5 === 3) {
+          try {
+            const report = await performanceDashboard(env, owner.owner_id);
+            const learned = await analyzeCompletedTradeBatch(env, owner.owner_id, report.trades, {
+              limit: Number(env.NUVO_TRADE_LEARNING_BATCH_SIZE ?? 2),
+            });
+            await audit(env, owner.owner_id, 'TRADE_LEARNING_BATCH', learned);
+          } catch (error) {
+            await audit(env, owner.owner_id, 'TRADE_LEARNING_BATCH_FAILED', { error: error.message });
+          }
         }
         if (clock.hour >= 9 && clock.hour <= 16 && clock.minute % 15 === 0) {
           try { await triggerShadowCycle(env, owner.owner_id, { source: 'SCHEDULED' }); }

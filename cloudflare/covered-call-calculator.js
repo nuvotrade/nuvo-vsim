@@ -35,6 +35,53 @@ const finite = (value) => value !== null && value !== undefined && value !== ''
 const clampProbability = (value) => Number.isFinite(value)
   ? Math.min(1, Math.max(0, value)) : null;
 
+function ema(values, period) {
+  if (!Array.isArray(values) || values.length < period) return null;
+  const alpha = 2 / (period + 1);
+  let value = values.slice(0, period).reduce((sum, row) => sum + row, 0) / period;
+  const rows = [value];
+  for (const row of values.slice(period)) {
+    value = row * alpha + value * (1 - alpha);
+    rows.push(value);
+  }
+  return rows;
+}
+
+function technicalTiming(closes) {
+  if (!Array.isArray(closes) || closes.length < 40) return {
+    status: 'UNAVAILABLE', policy_effect: 'INFORMATIONAL_ONLY_NOT_A_GATE',
+  };
+  const changes = closes.slice(1).map((close, index) => close - closes[index]);
+  const gains = changes.slice(-14).reduce((sum, change) => sum + Math.max(0, change), 0) / 14;
+  const losses = changes.slice(-14).reduce((sum, change) => sum + Math.max(0, -change), 0) / 14;
+  const rsi14 = losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+  const fast = ema(closes, 12); const slow = ema(closes, 26);
+  const overlap = Math.min(fast?.length ?? 0, slow?.length ?? 0);
+  const fastTail = overlap ? fast.slice(-overlap) : [];
+  const slowTail = overlap ? slow.slice(-overlap) : [];
+  const macdSeries = fastTail.map((value, index) => value - slowTail[index]);
+  const signalSeries = ema(macdSeries, 9) ?? [];
+  const macd = macdSeries.at(-1) ?? null;
+  const signal = signalSeries.at(-1) ?? null;
+  const histogram = macd != null && signal != null ? macd - signal : null;
+  const priorMacd = macdSeries.at(-2) ?? null;
+  const priorSignal = signalSeries.at(-2) ?? null;
+  const priorHistogram = priorMacd != null && priorSignal != null ? priorMacd - priorSignal : null;
+  const rsiOverbought = rsi14 >= 70;
+  const macdMomentumRollingOver = macd != null && histogram != null
+    && priorHistogram != null && macd > 0 && histogram < priorHistogram;
+  return {
+    status: rsiOverbought || macdMomentumRollingOver ? 'FAVORABLE_TO_SELL_CALL' : 'NEUTRAL',
+    rsi_14: rsi14,
+    rsi_overbought: rsiOverbought,
+    macd_12_26: macd,
+    macd_signal_9: signal,
+    macd_histogram: histogram,
+    macd_momentum_rolling_over: macdMomentumRollingOver,
+    policy_effect: 'INFORMATIONAL_ONLY_NOT_A_GATE',
+  };
+}
+
 const REJECTION_CODES = Object.freeze({
   incomplete_quote: 'TRUTH/OPTION_QUOTE_INCOMPLETE',
   at_or_below_cost_basis: 'UNDERWRITE/STRIKE_AT_OR_BELOW_COST_BASIS',
@@ -42,8 +89,10 @@ const REJECTION_CODES = Object.freeze({
   dte_outside_limits: 'CONSTITUTION/DTE_OUTSIDE_LIMITS',
   event_in_window: 'TRUTH/EVENT_IN_TENOR',
   illiquid: 'CONSTITUTION/OPTION_LIQUIDITY_GATE_FAILED',
-  no_incremental_edge: 'UNDERWRITE/INCREMENTAL_NEV_HURDLE_FAILED',
 });
+
+const WEEK_SLOTS = Object.freeze(['THIS_WEEK', 'NEXT_WEEK', 'WEEK_AFTER']);
+const WEEK_LABELS = Object.freeze(['This week', 'Next week', 'Week after']);
 
 function namedRejections(rejected) {
   return Object.fromEntries(Object.entries(REJECTION_CODES)
@@ -143,6 +192,7 @@ export function calculateCoveredCallCandidates({
   spot,
   contracts,
   historyBars,
+  expectedMoves = {},
   events = [],
   now = Date.now(),
   samples = 8_000,
@@ -170,6 +220,7 @@ export function calculateCoveredCallCandidates({
   const closes = usableBars.map((bar) => finite(bar.c));
   const returns = logReturns(closes);
   const volProfile = volatilityProfile(usableBars);
+  const timing = technicalTiming(closes);
   if (usableBars.length < 121 || returns.length < 120 || !volProfile.garchOk
     || !(finite(volProfile.realized) > 0)
     || !(finite(volProfile.estimatorSpread) <= 0.60)) {
@@ -188,9 +239,15 @@ export function calculateCoveredCallCandidates({
   const entryFees = Math.round(contractCount * ((finite(costs?.commissionPerContract) ?? 0)
     + (finite(costs?.exchangeFeePerContract) ?? 0)) * 100) / 100;
   const economicCapital = underlying * 100 * contractCount;
-  const rejected = {
+  const rejectionTemplate = () => ({
     at_or_below_cost_basis: 0, at_or_below_market: 0, incomplete_quote: 0,
-    dte_outside_limits: 0, event_in_window: 0, illiquid: 0, no_incremental_edge: 0,
+    dte_outside_limits: 0, event_in_window: 0, illiquid: 0,
+  });
+  const rejected = rejectionTemplate();
+  const rejectedByTarget = Object.fromEntries(targetDtes.map((target) => [target, rejectionTemplate()]));
+  const reject = (code, dte) => {
+    rejected[code] += 1;
+    if (Number.isFinite(dte)) rejectedByTarget[nearestTarget(dte, targetDtes)][code] += 1;
   };
   const distributions = new Map();
   const forecastFor = (dte) => {
@@ -222,19 +279,22 @@ export function calculateCoveredCallCandidates({
     if (![strike, dte, bid, ask, iv, delta].every(Number.isFinite)
       || !(strike > 0 && dte > 0 && bid > 0 && ask >= bid && iv > 0)
       || !(delta >= 0 && delta <= 1)) {
-      rejected.incomplete_quote += 1;
+      reject('incomplete_quote', dte);
       continue;
     }
     if (!(strike > basis)) {
-      rejected.at_or_below_cost_basis += 1;
+      reject('at_or_below_cost_basis', dte);
       continue;
     }
     if (!(strike > underlying)) {
-      rejected.at_or_below_market += 1;
+      reject('at_or_below_market', dte);
       continue;
     }
-    if (dte < limits.minDte || dte > limits.maxDte) {
-      rejected.dte_outside_limits += 1;
+    // The wheel explicitly evaluates the current weekly expiration plus the
+    // next two weeklies. This workflow-specific horizon is independent of the
+    // longer-DTE new-risk scanner floor; it still refuses expired contracts.
+    if (dte <= 0 || dte > limits.maxDte) {
+      reject('dte_outside_limits', dte);
       continue;
     }
     const expiryMs = now + dte * 86_400_000;
@@ -242,7 +302,7 @@ export function calculateCoveredCallCandidates({
       && finite(event.at) <= expiryMs
       && finite(event.at) >= now - limits.eventBlackoutDays * 86_400_000);
     if (eventInsideLife) {
-      rejected.event_in_window += 1;
+      reject('event_in_window', dte);
       continue;
     }
     const mid = (bid + ask) / 2;
@@ -250,7 +310,7 @@ export function calculateCoveredCallCandidates({
     if (spreadPct > limits.maxSpreadPctOfMid || !(openInterest >= limits.minOpenInterest)
       || !(volume >= limits.minDailyOptionVolume)
       || contractCount / openInterest > limits.maxPositionPctOfOi) {
-      rejected.illiquid += 1;
+      reject('illiquid', dte);
       continue;
     }
 
@@ -266,7 +326,7 @@ export function calculateCoveredCallCandidates({
       spot: underlying, strike, vol: iv, t,
     }));
     if (assignmentProbability === null || touchProbability === null) {
-      rejected.incomplete_quote += 1;
+      reject('incomplete_quote', dte);
       continue;
     }
     const grossPremiumPerContract = bid * 100;
@@ -284,7 +344,11 @@ export function calculateCoveredCallCandidates({
     const shortCallProfitProbability = shortCallLossProbability === null
       ? null : 1 - shortCallLossProbability;
     const upsideToStrike = (strike - underlying) / underlying;
-    const expectedMove = underlying * iv * Math.sqrt(t);
+    const expectedMoveTruth = expectedMoves?.[contract.expiration] ?? null;
+    const marketMakerExpectedMove = finite(expectedMoveTruth?.expected_move);
+    const marketMakerExpectedMoveCeiling = finite(expectedMoveTruth?.upper_boundary);
+    const ivExpectedMove = underlying * iv * Math.sqrt(t);
+    const expectedMove = marketMakerExpectedMove ?? ivExpectedMove;
     const expectedMoveBuffer = expectedMove > 0 ? (strike - underlying) / expectedMove : null;
     const forecast = forecastFor(dte);
     const modelResults = Object.fromEntries(Object.entries(forecast.models).map(([name, dist]) => [
@@ -295,7 +359,7 @@ export function calculateCoveredCallCandidates({
     ]));
     const primary = modelResults[UNDERWRITE_PRIMARY_MODEL];
     if (!primary) {
-      rejected.no_incremental_edge += 1;
+      reject('incomplete_quote', dte);
       continue;
     }
     const modelAssignmentProbability = clampProbability(primary.p_finish_itm);
@@ -304,16 +368,19 @@ export function calculateCoveredCallCandidates({
     const expectedAssignmentFee = modelAssignmentProbability
       * (finite(costs?.assignmentFee) ?? 0) * contractCount;
     const incrementalNev = primary.raw_nev_0 * contractCount - expectedAssignmentFee;
-    const edgeHurdle = Math.max(finite(limits.minNev) ?? 0,
+    const legacyEdgeHurdle = Math.max(finite(limits.minNev) ?? 0,
       entryFees * (finite(limits.minEdgeOverCosts) ?? 1));
-    if (!(incrementalNev > edgeHurdle)) {
-      rejected.no_incremental_edge += 1;
-      continue;
-    }
     const incrementalNevPerDay = incrementalNev / dte;
     const incrementalNevPerDayRoc = incrementalNevPerDay / economicCapital;
-    const calledAwayReturnOnCost = ((strike - basis) * 100 * contractCount + netPremium)
-      / (basis * 100 * contractCount);
+    const costBasisCapital = basis * 100 * contractCount;
+    const wheelIncomeReturnOnCost = netPremium / costBasisCapital;
+    const wheelIncomeReturnOnCostPerDay = wheelIncomeReturnOnCost / dte;
+    const calledAwayProfit = (strike - basis) * 100 * contractCount + netPremium;
+    const calledAwayReturnOnCost = calledAwayProfit / costBasisCapital;
+    const downsideBreakeven = basis - netPremium / (100 * contractCount);
+    const currentShareProfit = (underlying - basis) * 100 * contractCount;
+    const expectedWheelProfit = currentShareProfit + incrementalNev;
+    const expectedWheelProfitPerDay = expectedWheelProfit / dte;
     candidates.push({
       symbol: String(contract.symbol ?? '').replaceAll(' ', ''),
       underlying: ticker,
@@ -335,11 +402,22 @@ export function calculateCoveredCallCandidates({
       incremental_nev_vs_holding: incrementalNev,
       incremental_nev_per_day: incrementalNevPerDay,
       incremental_nev_per_day_roc: incrementalNevPerDayRoc,
+      legacy_uncovered_hold_edge_hurdle: legacyEdgeHurdle,
+      legacy_uncovered_hold_gate_passed: incrementalNev > legacyEdgeHurdle,
       expected_upside_surrendered: expectedSurrenderedUpside,
       expected_assignment_fee: expectedAssignmentFee,
-      edge_hurdle: edgeHurdle,
+      wheel_income_return_on_cost: wheelIncomeReturnOnCost,
+      wheel_income_return_on_cost_per_day: wheelIncomeReturnOnCostPerDay,
+      net_premium_per_calendar_day: netPremium / dte,
+      current_share_profit: currentShareProfit,
+      expected_wheel_profit: expectedWheelProfit,
+      expected_wheel_profit_per_calendar_day: expectedWheelProfitPerDay,
+      expected_wheel_profit_formula:
+        'CURRENT_SHARE_PROFIT_FROM_COST_PLUS_NET_PREMIUM_MINUS_PRIMARY_EXPECTED_SURRENDERED_UPSIDE_AND_ASSIGNMENT_FEE',
       upside_to_strike: upsideToStrike,
+      called_away_profit: calledAwayProfit,
       called_away_return_on_cost: calledAwayReturnOnCost,
+      downside_breakeven: downsideBreakeven,
       market_implied_expire_otm: expireOtmProbability,
       market_implied_assignment: assignmentProbability,
       market_implied_touch: touchProbability,
@@ -347,6 +425,12 @@ export function calculateCoveredCallCandidates({
       model_expire_otm: 1 - modelAssignmentProbability,
       model_assignment: modelAssignmentProbability,
       expected_move: expectedMove,
+      market_maker_expected_move: marketMakerExpectedMove,
+      market_maker_expected_move_ceiling: marketMakerExpectedMoveCeiling,
+      strike_at_or_above_market_maker_expected_move: marketMakerExpectedMoveCeiling == null
+        ? null : strike >= marketMakerExpectedMoveCeiling,
+      expected_move_formula: marketMakerExpectedMove == null
+        ? 'IV_SIGMA_MOVE_DIAGNOSTIC' : 'ATM_CALL_MID_PLUS_ATM_PUT_MID',
       expected_move_buffer: expectedMoveBuffer,
       calculation_unit_contracts: 1,
       one_contract_gross_premium: grossPremiumPerContract,
@@ -379,22 +463,41 @@ export function calculateCoveredCallCandidates({
       volume,
       quote_asof: Number.isFinite(contract.quoteAsOf)
         ? new Date(contract.quoteAsOf).toISOString() : null,
+      order_instruction: `SELL TO OPEN ${contractCount} ${String(contract.symbol ?? '').replaceAll(' ', '')} at $${bid.toFixed(2)} LIMIT or better`,
     });
   }
 
-  candidates.sort((a, b) => b.incremental_nev_per_day - a.incremental_nev_per_day
-    || b.incremental_nev_vs_holding - a.incremental_nev_vs_holding
+  candidates.sort((a, b) => b.expected_wheel_profit_per_calendar_day
+    - a.expected_wheel_profit_per_calendar_day
+    || b.called_away_profit - a.called_away_profit
+    || b.net_premium - a.net_premium
     || a.spread_pct - b.spread_pct || b.strike - a.strike);
   const ranked = candidates.map((candidate, index) => ({ ...candidate, rank: index + 1 }));
-  const tenors = targetDtes.map((target) => {
+  const primaryBlockerFor = (counts) => {
+    const code = ['event_in_window', 'incomplete_quote', 'illiquid', 'at_or_below_cost_basis',
+      'at_or_below_market', 'dte_outside_limits'].find((name) => counts[name] > 0);
+    return code ? { code: REJECTION_CODES[code], count: counts[code] } : {
+      code: 'TRUTH/NO_LISTED_CALLS_FOR_WEEK', count: 0,
+    };
+  };
+  const tenors = targetDtes.map((target, index) => {
     const rows = ranked.filter((candidate) => candidate.target_dte === target);
+    const listed = contracts.find((contract) => String(contract?.right ?? '').toLowerCase() === 'call'
+      && Number.isFinite(finite(contract?.dte)) && nearestTarget(finite(contract.dte), targetDtes) === target);
+    const targetRejected = rejectedByTarget[target];
     return {
+      slot: WEEK_SLOTS[index] ?? `WEEK_${index + 1}`,
+      slot_label: WEEK_LABELS[index] ?? `Week ${index + 1}`,
       target_dte: target,
-      listed_dte: rows[0]?.dte ?? null,
-      expiration: rows[0]?.expiration ?? null,
+      listed_dte: rows[0]?.dte ?? finite(listed?.dte),
+      expiration: rows[0]?.expiration ?? listed?.expiration ?? null,
       eligible_candidates: rows.length,
       best: rows[0] ?? null,
       status: rows.length ? 'EVALUATED' : 'NO_ELIGIBLE_STRIKE',
+      decision: rows.length ? 'SELL_COVERED_CALL' : 'HOLD_SHARES_NO_TRADE',
+      primary_blocker: rows.length ? null : primaryBlockerFor(targetRejected),
+      rejected: targetRejected,
+      rejection_codes: namedRejections(targetRejected),
     };
   });
   const method = {
@@ -404,26 +507,29 @@ export function calculateCoveredCallCandidates({
     independent_forecast: 'PRIMARY_CENTERED_5_SESSION_BLOCK_BOOTSTRAP_WITH_SEPARATE_CHALLENGERS',
     primary_model: UNDERWRITE_PRIMARY_MODEL,
     models: UNDERWRITE_MODEL_DEFINITIONS,
-    score: 'PRIMARY_RAW_NEV0_VS_HOLDING_SHARES_PER_CALENDAR_DAY',
+    score: 'MAX_PRIMARY_EXPECTED_WHEEL_PROFIT_FROM_COST_PER_CALENDAR_DAY',
     max_of_models: 'REMOVED',
     mixture: 'NONE',
     time_basis: 'TODAY_DOLLARS_PREMIUM_TODAY_MINUS_DISCOUNTED_TERMINAL_CALL_LIABILITY',
     rate: finite(rate) ?? 0,
     dividend_yield: finite(dividendYield) ?? 0,
     cash_carry: 'NOT_APPLICABLE_COVERED_CALL_INCREMENTAL_VALUE_IS_RAW_ONLY',
-    no_trade_competitor: 'REQUIRED; INCREMENTAL_NEV_MUST_CLEAR_COST_HURDLE',
+    uncovered_hold_comparison: 'DIAGNOSTIC_ONLY_NOT_AN_ENTRY_GATE',
     liquidity_gate: `CONSTITUTION_V5: SPREAD≤${limits.maxSpreadPctOfMid}; OI≥${limits.minOpenInterest}; VOLUME≥${limits.minDailyOptionVolume}; POSITION≤${limits.maxPositionPctOfOi}_OF_OI`,
     event_gate: `NO_VERIFIED_EVENT_INSIDE_OPTION_LIFE; ${limits.eventBlackoutDays}_DAY_BLACKOUT`,
     cost_basis_rule: 'STRIKE_MUST_BE_STRICTLY_ABOVE_AVERAGE_SHARE_PRICE',
     market_rule: 'STRIKE_MUST_BE_STRICTLY_ABOVE_CURRENT_MARK',
+    expected_move_reference: 'ATM_CALL_MID_PLUS_ATM_PUT_MID_INFORMATIONAL_NOT_A_GATE',
+    wheel_assignment_rule: 'ASSIGNMENT_AT_STRIKE_IS_ACCEPTED_WHEN_STRIKE_EXCEEDS_COST_BASIS',
+    technical_timing_rule: 'RSI14_AND_MACD_12_26_9_INFORMATIONAL_ONLY_PENDING_BACKTEST',
+    technical_timing_policy_effect: 'INFORMATIONAL_ONLY_NOT_A_GATE',
+    atr_policy_effect: 'INFORMATIONAL_ONLY_NOT_A_GATE_NOT_YET_CONNECTED',
     rejection_codes: REJECTION_CODES,
   };
   if (!ranked.length) return {
     ok: false,
     outcome: 'NO_ELIGIBLE_COVERED_CALL',
-    reason_code: rejected.no_incremental_edge > 0
-      ? 'NO_COVERED_CALL_ADDS_VALUE_VS_HOLDING_SHARES'
-      : 'NO_LIQUID_STRIKE_STRICTLY_ABOVE_COST_BASIS_AND_MARKET',
+    reason_code: 'NO_LIQUID_STRIKE_STRICTLY_ABOVE_COST_BASIS_AND_MARKET',
     symbol: ticker,
     shares: ownedShares,
     available_contracts: contractCount,
@@ -441,12 +547,13 @@ export function calculateCoveredCallCandidates({
       models: UNDERWRITE_MODEL_DEFINITIONS,
       max_of_models: 'REMOVED', mixture: 'NONE',
     },
+    technical_timing: timing,
     method,
   };
   return {
     ok: true,
     outcome: 'COVERED_CALL_CANDIDATE_IDENTIFIED',
-    objective: 'MAX_PRIMARY_RAW_NEV0_PER_DAY_VS_HOLDING_SHARES',
+    objective: 'MAX_PRIMARY_EXPECTED_WHEEL_PROFIT_FROM_COST_PER_CALENDAR_DAY',
     symbol: ticker,
     shares: ownedShares,
     available_contracts: contractCount,
@@ -466,6 +573,7 @@ export function calculateCoveredCallCandidates({
       models: UNDERWRITE_MODEL_DEFINITIONS,
       max_of_models: 'REMOVED', mixture: 'NONE',
     },
+    technical_timing: timing,
     method,
   };
 }

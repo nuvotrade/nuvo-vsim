@@ -503,12 +503,16 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
       : null;
     const oneSigmaMove = spot !== null && finite(analytics.iv) > 0 && dte !== null
       ? spot * analytics.iv * Math.sqrt(Math.max(dte, 1) / 365) : null;
+    const lifecycle = coveredCallLifecycle.get(position.symbol) ?? null;
     return {
       symbol: position.underlying ?? position.symbol,
       option_symbol: position.symbol,
       type: right === 'call' ? 'COVERED_CALL' : right === 'put' ? 'CASH_SECURED_PUT' : 'SHORT_OPTION',
       strike, expiration: position.expiration ?? null, dte,
-      quantity: qty, entry_credit: openingCredit, mark, market_value: finite(position.marketValue),
+      quantity: qty, entry_credit: openingCredit, gross_entry_credit: openingCredit,
+      net_entry_credit: finite(lifecycle?.entry_evidence?.net_credit),
+      opening_fees: finite(lifecycle?.entry_evidence?.opening_fees),
+      mark, market_value: finite(position.marketValue),
       unrealized_pnl: unrealized, theta_per_day: thetaPerDay,
       theta_per_share_per_calendar_day: finite(analytics.theta),
       theta_equity_multiplier: multiplier,
@@ -521,9 +525,9 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
       distance_to_strike_dollars: cushion,
       distance_to_strike_pct: spot > 0 && cushion !== null ? cushion / spot : null,
       one_sigma_move: oneSigmaMove,
-      distance_to_strike_sigma: finite(coveredCallLifecycle.get(position.symbol)?.risk_neutral?.sigma_distance_to_strike)
+      distance_to_strike_sigma: finite(lifecycle?.risk_neutral?.sigma_distance_to_strike)
         ?? (oneSigmaMove > 0 && cushion !== null ? cushion / oneSigmaMove : null),
-      distance_source: coveredCallLifecycle.get(position.symbol)?.ok
+      distance_source: lifecycle?.ok
         ? 'RISK_NEUTRAL_NEGATIVE_D2'
         : cushion !== null && oneSigmaMove !== null
           ? 'SCHWAB_CUSTODY_SPOT_AND_OPTION_QUOTE_IV' : 'INCOMPLETE',
@@ -532,7 +536,7 @@ export function portfolioFromCustody(custody, optionAnalytics = new Map(), {
         : right === 'call' && spot !== null ? spot * qty * multiplier : null,
       quote_asof: analytics.asof ?? null,
       quote_freshness: analytics.freshness ?? null,
-      lifecycle: coveredCallLifecycle.get(position.symbol) ?? null,
+      lifecycle,
     };
   });
   const commitments = new Map();

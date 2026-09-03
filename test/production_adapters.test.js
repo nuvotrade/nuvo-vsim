@@ -18,7 +18,7 @@ import {
 import { availableContractDtes } from '../src/pipeline/cycle.js';
 import {
   aggregatePositions, historicalLedgerWindow, normalizePosition, normalizeTransactions,
-  reconcilePositionDayProfitLoss, SchwabD1Client,
+  reconcileAccountDayProfitLoss, reconcilePositionDayProfitLoss, SchwabD1Client,
 } from '../cloudflare/schwab-client.js';
 import { D1R2EvidencePersistence } from '../cloudflare/evidence-persistence.js';
 
@@ -46,9 +46,11 @@ describe('protected live dashboard', () => {
     const dashboard = await fullDashboard();
     const html = await dashboard.text();
     assert.match(html, /NUVO VSIM v5 — Live Shadow/u);
-    for (const view of ['overview', 'underwrite', 'performance', 'bot', 'system']) {
+    for (const view of ['overview', 'csp', 'covered-calls', 'positions', 'history',
+      'performance', 'bot', 'system']) {
       assert.match(html, new RegExp(`data-view="${view}"`, 'u'));
     }
+    assert.doesNotMatch(html, /data-view="underwrite"/u);
     assert.doesNotMatch(html, /data-view="decisions"/u);
     assert.match(html, /id="decisions"/u);
     assert.doesNotMatch(html, /class="panel environment-panel"/u);
@@ -93,10 +95,11 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /LIMIT BREACHES · INFORMATION ONLY/u);
     assert.match(rewriteSource, /performance-unrealized-note/u);
     assert.doesNotMatch(rewriteSource, /<span>Withdrawable cash<\/span>/u);
-    assert.ok(rewriteSource.indexOf('<h3>Expiration ladder<\/h3>')
-      < rewriteSource.indexOf('<h3>Portfolio economics<\/h3>'));
+    assert.ok(rewriteSource.indexOf('<h3>Portfolio economics<\/h3>')
+      < rewriteSource.indexOf('<h3>Expiration ladder<\/h3>'));
     assert.match(rewriteSource, /Covered calls/u);
-    assert.match(rewriteSource, /data-view="underwrite">Underwrite/u);
+    assert.match(rewriteSource, /data-view="covered-calls">Covered Calls/u);
+    assert.match(rewriteSource, /data-view="history">History/u);
     assert.match(rewriteSource, /data-view="performance">Performance/u);
     assert.doesNotMatch(rewriteSource, /data-view="decisions">Decisions/u);
     assert.match(liveDashboardScript(), /system\.append\(decisions\)/u);
@@ -114,11 +117,13 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /PRIMARY RAW ± SE/u);
     assert.match(rewriteSource, /PRIMARY cash-adjusted/u);
     assert.match(rewriteSource, /Warnings never hide a row/u);
-    assert.match(rewriteSource, /NEV \/ day/u);
+    assert.match(rewriteSource, /Expected wheel profit/u);
     assert.doesNotMatch(rewriteSource, /data-vsim="csp-raroc"/u);
     assert.match(rewriteSource, /\.calculator-pane\[hidden\]\{display:none\}/u);
     assert.match(rewriteSource, /Enter one ticker for transparent put math/u);
-    assert.match(html, /data-view="underwrite">Underwrite/u);
+    assert.match(html, /data-view="csp">CSP/u);
+    assert.match(html, /data-view="covered-calls">Covered Calls/u);
+    assert.match(html, /data-view="history">History/u);
     assert.doesNotMatch(html, /data-view="opportunities">Opportunities/u);
     assert.doesNotMatch(html, /data-view="evidence">Evidence/u);
     assert.match(rewriteSource, /data-underwrite-mode="scan"/u);
@@ -128,7 +133,7 @@ describe('protected live dashboard', () => {
     assert.match(rewriteSource, /7 \/ 14 \/ 21 DTE comparison/u);
     assert.match(rewriteSource, /Strike must exceed your average share price/u);
     assert.match(rewriteSource, /CALCULATE CC opens read-only Underwrite math/u);
-    assert.match(rewriteSource, /<th>NEV \/ day<\/th><th>vs hold<\/th>/u);
+    assert.doesNotMatch(rewriteSource, /<h3>Eligible candidates<\/h3>/u);
     assert.match(rewriteSource, /calculator-results\[hidden\]/u);
     assert.doesNotMatch(rewriteSource, /<th>Annualized ROC<\/th>/u);
     assert.match(rewriteSource, /today-pnl-card/u);
@@ -176,19 +181,18 @@ describe('protected live dashboard', () => {
     assert.match(source, /covered_call_actionable/u);
     assert.match(source, /function renderCoveredCall\(result\)/u);
     assert.match(source, /function renderCashSecuredPuts\(result\)/u);
-    assert.match(source, /MODELED · UNCALIBRATED · n\(symbol×expiry\)=0/u);
+    assert.match(source, /Array\.isArray\(result\?\.choices\)/u);
     assert.match(source, /function runCashSecuredPut\(button\)/u);
     assert.doesNotMatch(source, /Run a fresh protected cash-secured-put calculation/u,
       'the primary read-only calculator action must not require a habitual confirmation');
     assert.match(source, /function renderCalculatorSymbols\(inventory\)/u);
     assert.match(source, /function resetCoveredCallView\(\)/u);
     assert.match(source, /function applyCoveredCallAvailability\(rows\)/u);
-    assert.match(source, /function resetCspView\(\)/u);
+    assert.doesNotMatch(source, /function resetCspView\(\)/u);
     assert.match(source, /coveredCallRequestId === requestId/u);
     assert.match(source, /cspRequestId !== requestId/u);
     assert.doesNotMatch(source, /renderCashSecuredPuts\(currentStatus\.latestCycle\)/u);
-    assert.match(source, /activateView\('underwrite'\)/u);
-    assert.match(source, /setUnderwriteMode\('manual'\)/u);
+    assert.match(source, /activateView\('covered-calls'\)/u);
     assert.match(source, /data-csp-calculate/u);
     const workerSource = readFileSync(new URL('../cloudflare/worker.js', import.meta.url), 'utf8');
     assert.doesNotMatch(workerSource, /data-csp-cash-rate|data-csp-target-basis/u);
@@ -197,15 +201,17 @@ describe('protected live dashboard', () => {
     assert.doesNotMatch(workerSource, /probTouch/u);
     assert.doesNotMatch(runShadowCycle.toString(), /source === 'CSP_CALCULATOR'/u);
     assert.match(workerSource, /cashSecuredPutDashboard/u);
-    assert.match(workerSource, /rights: \['put'\], includePartial: true/u);
+    assert.match(workerSource, /rights: \['put', 'call'\], includePartial: true/u);
     assert.match(workerSource, /request\.method === 'GET'/u);
     assert.doesNotMatch(workerSource, /triggerShadowCycle\(env, owner\.id, \{ source: 'CSP_CALCULATOR'/u);
-    assert.match(source, /No account or Governor state is being read/u);
-    assert.doesNotMatch(source, /ELIGIBLE CSP CANDIDATE|NO CAPITAL|NO EDGE/u);
+    assert.match(source, /Reading canonical account state and selecting one best contract/u);
+    assert.doesNotMatch(source, /All computable put rows|csp-candidates/u);
     assert.ok(source.includes('/api/cash-secured-put/calculate'));
     assert.ok(!source.includes('const best = rows.find'));
     assert.match(source, /function activateView\(id\)/u);
-    assert.match(source, /incremental_nev_vs_holding/u);
+    assert.match(source, /expected_wheel_profit/u);
+    assert.match(source, /reference only/u);
+    assert.doesNotMatch(source, /Eligible candidates/u);
     assert.match(source, /rejection_codes/u);
     assert.match(workerSource, /rights: \['call'\]/u);
     assert.match(workerSource, /summarizeCoveredCallPortfolioState\(snapshot, DEFAULT_LIMITS\)/u);
@@ -217,9 +223,9 @@ describe('protected live dashboard', () => {
     assert.match(source, /positions\.every\(position => present\(position\.marketValue\)\)/u);
     assert.doesNotMatch(source, /Math\.abs\(Number\(position\.marketValue\)/u);
     assert.match(source, /Today's P&L/u);
-    assert.match(source, /SCHWAB_SUM_RECONCILED_POSITION_DAY_PROFIT_LOSS/u);
+    assert.match(source, /SCHWAB_RECONCILED_ACCOUNT_DAY_PROFIT_LOSS/u);
     assert.match(source, /account\.dayProfitLoss/u);
-    assert.match(source, /Schwab position day P&L/u);
+    assert.match(source, /Schwab account day P&L/u);
     assert.match(source, /no estimated balance change shown/u);
     assert.doesNotMatch(source, /text\(q\('\.metric-label', cards\[3\]\), 'Reconciliation baseline'\)/u);
     assert.match(source, /Authority changes require the Principal/u);
@@ -1109,6 +1115,96 @@ describe('Schwab multi-account normalization', () => {
       'UNCHANGED_PRIOR_POSITION_CONTRADICTS_RAW_DAY_PNL');
   });
 
+  test('repairs a contradictory zero prior quantity when the symbol did not trade today', () => {
+    const position = reconcilePositionDayProfitLoss(normalizePosition({
+      instrument: { symbol: 'CBRS', assetType: 'EQUITY', netChange: 2.9865 },
+      longQuantity: 600,
+      shortQuantity: 0,
+      previousSessionLongQuantity: 0,
+      previousSessionShortQuantity: 0,
+      currentDayProfitLoss: -6_701.73,
+      currentDayCost: 8_493.63,
+      marketValue: 112_614,
+      averagePrice: 198.26455,
+    }), [], '2026-09-03T18:11:00.000Z');
+    assert.equal(position.previousSessionQuantity, 600);
+    assert.equal(position.previousSessionQuantitySource, 'INFERRED_FROM_NO_SAME_SESSION_TRADE');
+    assert.equal(position.dayProfitLossReference, 1_791.9);
+    assert.equal(position.dayProfitLoss, 1_791.9);
+  });
+
+  test('reconciles the Schwab account day total with fully closed intraday symbols', () => {
+    const positions = [
+      { symbol: 'SPY', quantity: 1, dayProfitLoss: 4.29 },
+      { symbol: 'SOFI', quantity: 100, dayProfitLoss: 354.69 },
+      { symbol: 'CRDO', quantity: 100, dayProfitLoss: -102.5 },
+      { symbol: 'CBRS', quantity: 600, dayProfitLoss: 1_557.9 },
+    ];
+    const performance = {
+      trades: [
+        { symbol: 'SPXW260903P07750000', closed_at: '2026-09-03T17:00:00.000Z', realized_pnl: -171.8, fees: 6.8 },
+        { symbol: 'CBRS260904C00200000', closed_at: '2026-09-03T14:50:00.000Z', realized_pnl: 226.03, fees: 7.97 },
+        { symbol: 'SPY', closed_at: '2026-09-03T16:05:00.000Z', realized_pnl: 3.89, fees: 0.02 },
+        { symbol: 'QQQ', closed_at: '2026-09-02T17:00:00.000Z', realized_pnl: 50 },
+      ],
+      unmatched: [],
+    };
+    const result = reconcileAccountDayProfitLoss(
+      positions, performance, '2026-09-03T18:11:00.000Z',
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.openPositionDayProfitLoss, 1_814.38);
+    assert.equal(result.closedOnlyRealizedProfitLoss, 69);
+    assert.equal(result.value, 1_883.38);
+    assert.deepEqual(result.closedOnlySymbols, ['CBRS260904C00200000', 'SPXW260903P07750000']);
+  });
+
+  test('rebuilds same-session sell-and-reopen day P&L from signed Schwab transactions', () => {
+    const position = reconcilePositionDayProfitLoss(normalizePosition({
+      instrument: { symbol: 'SOFI', assetType: 'EQUITY', netChange: 0.805 },
+      longQuantity: 100,
+      shortQuantity: 0,
+      previousSessionLongQuantity: 1000,
+      currentDayProfitLoss: -8_611.3,
+      currentDayCost: -7_364.2,
+      marketValue: 1_864.5,
+      averagePrice: 18.62,
+    }), [
+      {
+        type: 'TRADE', symbol: 'SOFI', quantity: -1000, price: 18.1937,
+        occurredAt: '2026-09-03T14:04:57.000Z',
+      },
+      {
+        type: 'TRADE', symbol: 'SOFI', quantity: 100, price: 18.62,
+        occurredAt: '2026-09-03T18:02:55.000Z',
+      },
+    ], '2026-09-03T18:24:44.084Z');
+    assert.equal(position.dayProfitLoss, 356.2);
+    assert.equal(position.dayProfitLossAdjustment, 8_967.5);
+    assert.equal(position.dayProfitLossSource,
+      'SCHWAB_RECONCILED_SESSION_TRANSACTION_MARK_TO_MARKET');
+    assert.equal(position.dayProfitLossContributionMode, 'SUBSTITUTED');
+    assert.equal(position.dayProfitLossTriggerReason,
+      'SIGNED_SESSION_TRANSACTIONS_CONTRADICT_RAW_DAY_PNL');
+    assert.equal(position.dayProfitLossSessionTradeCount, 2);
+  });
+
+  test('keeps raw session P&L when signed transactions do not reconcile custody quantity', () => {
+    const position = reconcilePositionDayProfitLoss(normalizePosition({
+      instrument: { symbol: 'SOFI', assetType: 'EQUITY', netChange: 0.805 },
+      longQuantity: 100,
+      shortQuantity: 0,
+      previousSessionLongQuantity: 1000,
+      currentDayProfitLoss: 356.2,
+      marketValue: 1_864.5,
+    }), [{
+      type: 'TRADE', symbol: 'SOFI', quantity: -1000, price: 18.1937,
+      occurredAt: '2026-09-03T14:04:57.000Z',
+    }], '2026-09-03T18:24:44.084Z');
+    assert.equal(position.dayProfitLoss, 356.2);
+    assert.equal(position.dayProfitLossSource, 'SCHWAB_POSITION_CURRENT_DAY_PROFIT_LOSS');
+  });
+
   test('keeps same-session option fill-to-mark P&L instead of adding currentDayCost', () => {
     const position = reconcilePositionDayProfitLoss(normalizePosition({
       instrument: { symbol: 'CBRS  260828C00210000', assetType: 'OPTION', netChange: -0.54 },
@@ -1150,7 +1246,7 @@ describe('Schwab multi-account normalization', () => {
     assert.match(source, /rawPositionPackets/u);
     assert.match(source, /account, positions: snapshot\.positions, rawPositionPackets, openOrders/u);
     assert.match(source, /positions_json,raw_positions_json,orders_json/u);
-    assert.match(source, /carried currentDayCost reconciled with instrument\.netChange/u);
+    assert.match(source, /fully closed today/u);
   });
 
   test('aggregates the same custody instrument before reconciliation and risk', () => {

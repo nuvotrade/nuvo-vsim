@@ -71,6 +71,9 @@ test('U4 values HOLD, CLOSE, and ROLL at one present-value origin with executabl
         result.hold.path_monte_carlo_standard_error));
     assert.equal(roll.discount_factor,
       Math.exp(-result.rate * roll.time_to_expiry_years));
+    assert.ok(Object.hasOwn(roll, 'spread_pct'));
+    assert.ok(Object.hasOwn(roll, 'open_interest'));
+    assert.ok(Object.hasOwn(roll, 'volume'));
   }
   assert.equal(result.method.max_of_models, 'REMOVED');
   assert.equal(result.method.mixture, 'NONE');

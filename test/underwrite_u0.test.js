@@ -55,5 +55,5 @@ test('the compatibility preflight admits partial coverage for per-symbol adjudic
   assert.match(source, /mutationEligible: false/u);
   assert.match(source, /mutation_eligible: false/u);
   assert.match(source, /READ_ONLY_CALCULATION_NO_ORDER_ROUTE/u);
-  assert.match(source, /READ_ONLY_MATH_NO_ORDER_ROUTE/u);
+  assert.match(source, /CSP_CANONICAL_DECISION/u);
 });

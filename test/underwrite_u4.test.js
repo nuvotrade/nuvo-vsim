@@ -8,9 +8,8 @@ const calculatorSource = readFileSync(
   new URL('../cloudflare/covered-call-lifecycle-choices.js', import.meta.url), 'utf8',
 );
 
-test('U4 glass is an explicit read-only comparison and never presents a recommendation', () => {
+test('U4 remains an audit calculator while Position Management owns the one-action decision', () => {
   const source = liveDashboardScript();
-  assert.match(source, /COMPARE IN UNDERWRITE/u);
   assert.match(source, /COMMON-CLOCK CHOICE TABLE · READ ONLY/u);
   assert.match(source, /snapshot skew/u);
   assert.match(source, /Path NEV₀ ± SE/u);
@@ -19,7 +18,8 @@ test('U4 glass is an explicit read-only comparison and never presents a recommen
   assert.match(source, /roll targets/u);
   assert.match(source, /Unavailable listed rows/u);
   assert.match(source, /This table does not recommend or transmit a trade/u);
-  assert.match(source, /U4 compares option-overlay math only; it never chooses an action/u);
+  assert.match(source, /renderPositionManagementDecisions/u);
+  assert.match(source, /WHY THIS IS THE DECISION/u);
   assert.doesNotMatch(source, /data-lifecycle-choice-option[^]*APPROVE/u);
 });
 

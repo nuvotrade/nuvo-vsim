@@ -14,9 +14,9 @@ export const UNDERWRITE_SURFACE_MODEL_LOCKS = Object.freeze({
   }),
   COVERED_CALL_SINGLE_TICKER: Object.freeze({
     label: 'CC_PRIMARY_CENTERED_5_DAY_BOOTSTRAP',
-    hash: '079c54a3ebed3616e2de20e82602ad2606f373f5e3fdaab7ebd97b189bd66f3d',
+    hash: '8019af1eefb2aad2047b0886619b8d63c62c23cff0926e4fdb4b4e9142ad2bb5',
     components: Object.freeze({
-      'cloudflare/covered-call-calculator.js': 'a9c67376ae5550c056f5426676ef622a5c231b4b0c275801dafb4c8d8d029bf2',
+      'cloudflare/covered-call-calculator.js': '0640f5290e741d602deb1c24f633abf1863e04b7cf9640e6e6ee7a92c25f13e3',
       'cloudflare/underwrite-model-engine.js': '3e5e720b9e39339023b9290576dce515bb8f05fc8967f41e4bd45522663ed9e0',
       'src/math/distribution.js': '43b9affd8005948ec5dcb8cac770e5720ce6f7c05e7a4829d24e14dd385564f9',
       'src/math/stats.js': '5bc3bbda0645eb6353bd76658e71d1cfe81f0e47838f5a6720bbe54795b59275',

@@ -19,7 +19,7 @@ test('E3 spine feature flag is explicit and defaults off', async () => {
   assert.doesNotMatch(await defaultResponse.text(), /data-view="e3-spine"/u);
 });
 
-test('enabled E3 spine injects two read-only panes without changing Overview markup', async () => {
+test('enabled E3 spine remains diagnostic-only and does not alter wheel navigation or Overview', async () => {
   const defaultHtml = rewriteDesignHtml(BUNDLED_DESIGN_HTML);
   const html = rewriteDesignHtml(BUNDLED_DESIGN_HTML, { e3SpineTab: true });
   const defaultOverviewStart = defaultHtml.indexOf('<section class="view active" id="overview"');
@@ -29,7 +29,7 @@ test('enabled E3 spine injects two read-only panes without changing Overview mar
   const rewrittenOverviewEnd = html.indexOf('<section class="view" id="underwrite"');
   const rewrittenOverview = html.slice(rewrittenOverviewStart, rewrittenOverviewEnd);
 
-  assert.match(html, /data-view="e3-spine">Engine spine/u);
+  assert.doesNotMatch(html, /data-view="e3-spine">Engine spine/u);
   assert.match(html, /id="e3-spine"/u);
   assert.match(html, /data-e3-pane="fixture"/u);
   assert.match(html, />FIXTURE</u);

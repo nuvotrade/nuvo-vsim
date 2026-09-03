@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fullDashboard, liveDashboardScript } from '../cloudflare/worker.js';
 
-test('phone monitoring layout reaches every live tab and uses dedicated BOT and System cards', async () => {
+test('phone monitoring layout reaches the exact wheel tabs and uses dedicated BOT and System cards', async () => {
   const html = await (await fullDashboard(undefined, { e3SpineTab: true })).text();
-  for (const view of ['overview', 'underwrite', 'performance', 'bot', 'e3-spine', 'system']) {
+  for (const view of ['overview', 'csp', 'covered-calls', 'positions', 'history',
+    'performance', 'bot', 'system']) {
     assert.match(html, new RegExp(`data-view="${view}"`, 'u'));
   }
+  assert.doesNotMatch(html, /data-view="(?:underwrite|e3-spine)"/u);
   assert.doesNotMatch(html, /data-view="decisions"/u);
   assert.match(html, /#system>\.system-decisions\{display:block/u);
   assert.match(html, /grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/u);
@@ -60,22 +62,33 @@ test('phone portfolio tables become labeled cards instead of clipped or horizont
   assert.match(script, /cell\.dataset\.label = labels\[index\]/u);
 });
 
-test('Overview cleanup keeps one hierarchical book, one clock stack, and wide Operations', async () => {
+test('Overview owns allocation and economics while Position Management owns actionable positions', async () => {
   const html = await (await fullDashboard()).text();
   const overviewStart = html.indexOf('<section class="view active" id="overview"');
-  const underwriteStart = html.indexOf('<section class="view" id="underwrite"');
-  const overview = html.slice(overviewStart, underwriteStart);
+  const cspStart = html.indexOf('<section class="view" id="csp"');
+  const overview = html.slice(overviewStart, cspStart);
   assert.match(overview, /Portfolio overview/u);
   assert.match(overview, /data-vsim="breach-strip"/u);
   assert.match(overview, /data-vsim="clock-custody"/u);
   assert.match(overview, /data-vsim="clock-option"/u);
   assert.match(overview, /data-vsim="clock-calculation"/u);
-  assert.match(overview, /<h3>Position book<\/h3>/u);
-  assert.match(overview, /<h3>Covered-call lifecycle<\/h3>/u);
+  assert.doesNotMatch(overview, /wheel-next-action|OPEN CSP DECISION|Wheel state · CASH → CSP/u);
+  assert.match(overview, /<h3 id="overview-portfolio-title">Portfolio overview<\/h3>/u);
+  assert.match(overview, /<h3>Expiration ladder<\/h3>/u);
+  assert.match(overview, /<h3>Portfolio economics<\/h3>/u);
+  assert.match(overview, /<h3>Deployment and cash reserve<\/h3>/u);
+  assert.match(overview, /<h3>Capital committed by ticker<\/h3>/u);
   assert.match(overview, /<h3 id="overview-operations-title">Operations<\/h3>/u);
-  assert.doesNotMatch(overview, /<h3>Open positions<\/h3>|LAYER 8/u);
-  assert.ok(overview.indexOf('Position book') < overview.indexOf('Covered-call lifecycle'));
-  assert.ok(overview.indexOf('Covered-call lifecycle') < overview.indexOf('Operations'));
+  assert.ok(overview.indexOf('<h3>Portfolio economics</h3>')
+    < overview.indexOf('<h3>Expiration ladder</h3>'));
+  assert.ok(overview.indexOf('overview-portfolio-title') < overview.indexOf('overview-operations-title'));
+  assert.doesNotMatch(overview, /<h3>Position book<\/h3>|<h3>Covered-call lifecycle<\/h3>|<h3>Open positions<\/h3>|LAYER 8/u);
+  const positionsStart = html.indexOf('<section class="view" id="positions"');
+  const historyStart = html.indexOf('<section class="view" id="history"');
+  const positions = html.slice(positionsStart, historyStart);
+  assert.match(positions, /<h3>Position book<\/h3>/u);
+  assert.match(positions, /<h3>Covered-call lifecycle<\/h3>/u);
+  assert.doesNotMatch(positions, /<h3>Expiration ladder<\/h3>|<h3>Portfolio economics<\/h3>|<h3>Deployment and cash reserve<\/h3>|<h3>Capital committed by ticker<\/h3>/u);
 });
 
 test('BOT card uses the shared broker-first projection and a genuine debounced refresh', () => {
