@@ -84,7 +84,7 @@ test('broker-ledger reconstruction reads broker first, creates a strict recovere
     notifier: { async send(notice) { calls.push('discord'); notices.push(notice); } },
   };
   const first = await reconcileLane1OpenFromBrokerLedger({ env: {}, ownerId: 'OWNER',
-    principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN', dependencies });
+    principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN', notifyRecovery: true, dependencies });
   assert.equal(first.status, 200, JSON.stringify(first.body));
   assert.equal(first.body.disposition, 'BROKER_LEDGER_RECONSTRUCTION');
   assert.equal(first.body.qualifiedStage0Fill, false);
@@ -131,8 +131,7 @@ test('restart deterministically recovers the accepted BUY fill race without trad
   let state = { armed: false, stage: 'FAULT', positionSide: 'FLAT',
     open: { seal, brokerOrderId: 'ORDER-LONG-RACE',
       acceptedAt: '2026-09-03T13:35:03.000Z' },
-    pendingFill: { signal: 'LONG', side: 'BUY', brokerOrderId: 'ORDER-LONG-RACE',
-      clientOrderId: seal.clientOrderId },
+    pendingFill: null,
     latestUnit: null, entryIdentity: null,
     fault: { faultCode: 'LANE_1_POSITION_STATE_DRIFT' } };
   const recoveryCapture = (id) => ({ ...reconstructedCapture(id),

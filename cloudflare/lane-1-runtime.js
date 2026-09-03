@@ -762,7 +762,7 @@ export async function resolveLane1CompletedExitFault({ env, ownerId,
 }
 
 export async function reconcileLane1OpenFromBrokerLedger({ env, ownerId,
-  principalConfirmation, notifyRecovery = true, dependencies = {} }) {
+  principalConfirmation, notifyRecovery = false, dependencies = {} }) {
   if (principalConfirmation !== 'RECONCILE_BROKER_LEDGER_OPEN') {
     return { status: 400, body: { state: 'REFUSED',
       faultCode: 'LANE_1_RECOVERY_CONFIRMATION_REQUIRED' } };
@@ -1211,10 +1211,14 @@ export async function expireLane1(env, ownerId, dependencies = {}) {
     const recover = dependencies.recover ?? ((options) =>
       reconcileLane1OpenFromBrokerLedger(options));
     const state = await status();
+    const acceptedAt = Date.parse(state?.open?.acceptedAt ?? '');
     const staleAcceptedFill = state?.stage === 'FAULT'
       && state?.fault?.faultCode === 'LANE_1_POSITION_STATE_DRIFT'
-      && state?.armed === false && Boolean(state?.pendingFill)
-      && Boolean(state?.open?.seal?.clientOrderId) && Boolean(state?.open?.brokerOrderId);
+      && state?.armed === false && state?.positionSide === 'FLAT'
+      && !state?.entryIdentity
+      && Boolean(state?.open?.seal?.clientOrderId) && Boolean(state?.open?.brokerOrderId)
+      && Number.isFinite(acceptedAt) && Date.now() - acceptedAt >= 0
+      && Date.now() - acceptedAt <= 86_400_000;
     if (staleAcceptedFill) {
       const recovered = await recover({ env, ownerId,
         principalConfirmation: 'RECONCILE_BROKER_LEDGER_OPEN', notifyRecovery: false });
