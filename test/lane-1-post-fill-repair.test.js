@@ -2,11 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   armExistingLane1FromDashboard, expireLane1, reconcileLane1OpenFromBrokerLedger,
-  resumeLane1PendingFill,
+  resumeLane1PendingFill, sameLane1FillReceiptIdentity,
 } from '../cloudflare/lane-1-runtime.js';
 import { appendLane1V2BrokerEvents, lane1V2ProposalSeal,
   materializeLane1V2Unit } from '../src/lane/lane-1-spy-v2.js';
 import { syntheticSnapshot } from './fixtures/lane-1-synthetic-state.js';
+import { lane1FillIdentity } from '../src/lane/lane-1-fill-contract.js';
 
 const hash = (digit = 'a') => digit.repeat(64);
 function reconstructedCapture(sourceId) {
@@ -184,6 +185,22 @@ test('restart deterministically recovers the accepted BUY fill race without trad
   assert.equal(recoveredWrites, 1);
   assert.equal(notified, 0, 'scheduled restart recovery must not emit a new Discord message');
   assert.equal(runtimeTouched, 0);
+});
+
+test('recovery reuses an immutable wire receipt only for the exact same fill identity', () => {
+  const identity = lane1FillIdentity({ fill: reconstructedFill(),
+    tvBodyBindingSha256: hash('e') });
+  const wireReceipt = { type: 'OPEN_FILLED', identity,
+    evidenceOrigin: 'SCHWAB_WIRE_CAPTURE', qualifiedStage0Fill: true,
+    manifestHash: hash('1') };
+  const reconstructedReceipt = { type: 'OPEN_FILLED', identity: structuredClone(identity),
+    evidenceOrigin: 'BROKER_LEDGER_RECONSTRUCTION', qualifiedStage0Fill: false,
+    manifestHash: hash('2') };
+  assert.equal(sameLane1FillReceiptIdentity(wireReceipt, reconstructedReceipt), true);
+  assert.equal(sameLane1FillReceiptIdentity(wireReceipt, { ...reconstructedReceipt,
+    identity: { ...identity, executionActivityId: 'DIFFERENT-EXECUTION' } }), false);
+  assert.equal(sameLane1FillReceiptIdentity(wireReceipt, { ...reconstructedReceipt,
+    type: 'EXIT_FILLED' }), false);
 });
 
 test('broker failure makes no reconstruction or coordinator correction', async () => {

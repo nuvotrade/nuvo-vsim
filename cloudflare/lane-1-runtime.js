@@ -60,6 +60,13 @@ function parseObject(value) {
   } catch { return null; }
 }
 
+export function sameLane1FillReceiptIdentity(existing, proposed) {
+  try {
+    return existing?.type === proposed?.type
+      && sameLane1FillIdentity(existing?.identity, proposed?.identity);
+  } catch { return false; }
+}
+
 function previewOrderContractEvidence(response, instruction, originalResponse) {
   const order = response?.orderStrategy;
   const leg = order?.orderLegs?.[0];
@@ -502,11 +509,15 @@ function fillReceiptStore(env, ownerId) {
         FROM operational_audit WHERE id=? LIMIT 1`).bind(id).first();
       const storedDetail = parseObject(stored?.detail_json);
       const { workerVersion: _storedWorkerVersion, ...storedReceipt } = storedDetail ?? {};
+      const byteIdentical = canonical(storedReceipt) === canonical(detail);
+      const exactImmutableFill = sameLane1FillReceiptIdentity(storedReceipt, detail);
       if (stored?.owner_id !== ownerId || stored?.event_type !== 'LANE_1_FILL_RECEIPT'
-        || !storedDetail || canonical(storedReceipt) !== canonical(detail)) {
+        || !storedDetail || (!byteIdentical && !exactImmutableFill)) {
         throw new Error('LANE_1_FILL_RECEIPT_IDENTITY_CONFLICT');
       }
-      return { id, createdAt: stored.created_at, changed: stored.created_at === createdAt };
+      return { id, createdAt: stored.created_at,
+        changed: byteIdentical && stored.created_at === createdAt,
+        reusedImmutableReceipt: !byteIdentical && exactImmutableFill };
     },
   };
 }
